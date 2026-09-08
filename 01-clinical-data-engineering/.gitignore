@@ -1,0 +1,12 @@
+# Generated/local artifacts
+.venv/
+data/generated/
+data/*.duckdb
+results/*.csv
+results/*.parquet
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc

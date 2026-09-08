@@ -6,41 +6,73 @@ Build a small but realistic longitudinal clinical data system from synthetic EHR
 
 The purpose is to learn healthcare data engineering and advanced SQL through a controlled clinical problem rather than isolated syntax exercises.
 
-## Initial clinical scenario
+## Clinical scenario
 
-We will create a synthetic cohort of adults with longitudinal encounters, diagnoses, medications, procedures, and laboratory measurements. The first analysis task will identify patients with an index ischemic stroke encounter and construct pre-index and post-index features without temporal leakage.
+We generate 5,000 synthetic adults with longitudinal encounters, diagnoses, procedures, medications, laboratory measurements, coverage periods, and simplified claims. The first analysis task identifies patients with an index ischemic stroke encounter and constructs pre-index features without temporal leakage.
 
-## Learning objectives
+The synthetic data intentionally includes edge cases: duplicate diagnosis rows, missing encounter end times, interrupted insurance coverage, multiple possible stroke encounters, missing lab values, and implausibly late diagnosis timestamps.
 
-By the end of this module, the repository should demonstrate:
+## Skills covered
 
 - relational clinical schema design
-- synthetic longitudinal clinical data generation
-- DuckDB workflow
-- PostgreSQL-compatible SQL where practical
+- reproducible synthetic clinical data generation
+- DuckDB and PostgreSQL-compatible SQL where practical
 - joins, CTEs, subqueries, aggregation, and window functions
 - index-event identification
 - eligibility and lookback windows
 - longitudinal feature engineering
-- healthcare coding concepts
-- claims-like utilization concepts
+- ICD-10 and CPT/HCPCS concepts
+- simplified claims utilization and payment concepts
 - temporal leakage prevention
 - data quality and cohort validation tests
-- basic dbt/PySpark/Databricks exposure after the core SQL workflow is complete
+- Python packaging, `pytest`, Ruff, and GitHub Actions
+- later: dbt concepts, PySpark, Databricks concepts, and query optimization
 
-## Proposed schema
+## Structure
 
-Initial tables:
+```text
+01-clinical-data-engineering/
+├── data/
+│   └── generate_synthetic_data.py
+├── docs/
+│   └── codebook.md
+├── exercises/
+│   └── 01_getting_started.md
+├── sql/
+│   ├── 00_quality_checks.sql
+│   ├── 01_index_stroke_cohort.sql
+│   └── 02_features.sql
+├── src/clinical_data_engineering/
+│   ├── generator.py
+│   ├── load_database.py
+│   └── build_cohort.py
+├── tests/
+├── pyproject.toml
+└── README.md
+```
 
-- `patients`
-- `encounters`
-- `diagnoses`
-- `procedures`
-- `medications`
-- `labs`
-- `coverage`
+## Quick start
 
-The schema and codebook will evolve as exercises are added.
+From this directory:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\\Scripts\\Activate.ps1
+pip install -e ".[dev]"
+
+python data/generate_synthetic_data.py
+python src/clinical_data_engineering/load_database.py
+python src/clinical_data_engineering/build_cohort.py
+pytest -q
+```
+
+Generated patient data and local DuckDB files are ignored by Git.
+
+## What to do first
+
+Do **not** begin by reading the supplied cohort solution. Start with [`exercises/01_getting_started.md`](exercises/01_getting_started.md). Inspect the schema, write the requested SQL yourself, then compare your logic with the supplied SQL files.
+
+The codebook is in [`docs/codebook.md`](docs/codebook.md).
 
 ## Milestones
 
@@ -49,63 +81,50 @@ The schema and codebook will evolve as exercises are added.
 - generate reproducible synthetic patients and longitudinal events
 - load tables into DuckDB
 - inspect keys, dates, missingness, and cardinality
-- write basic validation tests
+- detect intentional data-quality problems
 
 ### Milestone 2: Build the index stroke cohort
 
-- identify qualifying stroke encounters
-- define first eligible index event
-- require appropriate lookback/coverage
-- remove invalid temporal records
+- identify qualifying ischemic-stroke encounters
+- define the first observed index event
+- require age and coverage eligibility
+- understand why interrupted coverage complicates lookback logic
 - validate cohort counts
 
 ### Milestone 3: Construct longitudinal features
 
-Examples:
+Current examples:
 
 - age at index
-- prior AF diagnosis
-- hypertension history
-- prior healthcare utilization
-- selected pre-index labs
-- medication exposure
-- post-index readmission outcome
+- prior atrial fibrillation
+- prior hypertension
+- prior diabetes
+- prior ED/inpatient utilization
+- latest pre-index LDL
+- 30-day readmission outcome
 
-All predictors must respect explicit observation windows.
+All predictors use explicit pre-index observation windows.
 
 ### Milestone 4: Advanced SQL
 
-Use:
+Add and practice:
 
-- CTEs
-- window functions
 - conditional aggregation
-- date arithmetic
-- anti-joins / exclusion logic
+- anti-joins and exclusion logic
 - reusable views
-- query plans and simple optimization
+- coverage-gap logic
+- `EXPLAIN` and query plans
+- simple query optimization
 
 ### Milestone 5: Engineering layer
 
-- automated SQL tests
+- automated SQL/data tests
 - Python orchestration
 - CI
-- dbt-style transformation concepts
+- dbt-style transformations
 - small PySpark translation exercise
+- Databricks workflow concepts
 
-## Expected final artifact
+## Important limitation
 
-A reproducible pipeline that can run approximately as:
-
-```bash
-python data/generate_synthetic_data.py
-python src/load_database.py
-python src/build_cohort.py
-pytest
-```
-
-The exact interface may change as the project develops.
-
-## Rule for this module
-
-Synthetic data should contain intentional edge cases so that SQL correctness can be tested. Examples include duplicate events, missing dates, diagnoses after index, interrupted coverage, and patients with multiple possible index encounters.
+This is an educational synthetic dataset, not a validated clinical or claims data model. Codes, utilization patterns, payments, and event distributions are simplified deliberately. The goal is technical reasoning and reproducibility, not epidemiologic realism.

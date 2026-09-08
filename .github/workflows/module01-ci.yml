@@ -1,0 +1,29 @@
+name: module-01-ci
+
+on:
+  push:
+    paths:
+      - "01-clinical-data-engineering/**"
+      - ".github/workflows/module01-ci.yml"
+  pull_request:
+    paths:
+      - "01-clinical-data-engineering/**"
+      - ".github/workflows/module01-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 01-clinical-data-engineering
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check .
+      - name: Tests
+        run: pytest -q
