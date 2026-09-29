@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from clinical_tutor.content import load_course
+from clinical_tutor.engine import Engine
+from clinical_tutor.llm import Grade
+from clinical_tutor.store import Store
+
+LESSON_A = {
+    "id": "m01-01-alpha",
+    "title": "Alpha",
+    "summary": "First lesson.",
+    "why_it_matters": "Because.",
+    "objectives": ["Learn alpha"],
+    "steps": [
+        {"type": "text", "title": "Hello", "text": "Some **bold** text."},
+        {
+            "type": "quiz",
+            "question": "Pick B",
+            "options": ["A", "B", "C"],
+            "answer": 1,
+            "explanation": "B is right.",
+        },
+        {
+            "type": "think",
+            "interview": True,
+            "prompt": "Explain alpha.",
+            "model_answer": "Alpha is first.",
+            "key_points": ["first"],
+        },
+        {"type": "laptop", "title": "Do alpha", "task": "Write code.", "repo_path": "x.py"},
+        {"type": "recap", "points": ["done"]},
+    ],
+}
+
+LESSON_B = {
+    "id": "m01-02-beta",
+    "title": "Beta",
+    "summary": "Seed lesson.",
+    "status": "seed",
+    "why_it_matters": "Because.",
+    "objectives": ["Learn beta"],
+    "key_points": ["beta point"],
+}
+
+
+@pytest.fixture
+def course_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "course"
+    (root / "m01").mkdir(parents=True)
+    (root / "images").mkdir()
+    (root / "course.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "title": "Test course",
+                "description": "A tiny course.",
+                "modules": [
+                    {
+                        "id": "m01",
+                        "title": "Module one",
+                        "summary": "Summary.",
+                        "lessons": ["m01-01-alpha", "m01-02-beta"],
+                    }
+                ],
+            }
+        )
+    )
+    (root / "m01" / "m01-01-alpha.yaml").write_text(yaml.safe_dump(LESSON_A))
+    (root / "m01" / "m01-02-beta.yaml").write_text(yaml.safe_dump(LESSON_B))
+    return root
+
+
+class FakeTutor:
+    """Deterministic stand-in for the AI tutor."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def answer(self, context: str, history: list[dict[str, str]], question: str) -> str:
+        self.calls.append("answer")
+        return f"Answer to: {question}"
+
+    async def deepen(self, context: str) -> str:
+        self.calls.append("deepen")
+        return "Deeper insight."
+
+    async def welcome_back(self, context: str) -> str:
+        return "You were learning alpha."
+
+    async def grade(
+        self, prompt: str, key_points: list[str], model_answer: str, answer: str
+    ) -> Grade:
+        self.calls.append("grade")
+        return Grade(score=1 if "wrong" in answer else 3, feedback="Feedback.")
+
+    async def make_quiz(
+        self, context: str, n: int = 3, avoid: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "question": "Gen Q",
+                "code": "",
+                "options": ["x", "y"],
+                "answer": 0,
+                "explanation": "x.",
+            }
+        ]
+
+    async def interview_question(
+        self, context: str, avoid: list[str] | None = None
+    ) -> dict[str, Any]:
+        return {"prompt": "Gen interview?", "model_answer": "Answer.", "key_points": ["k"]}
+
+    async def write_lesson(self, brief: str, guide: str) -> list[dict[str, Any]]:
+        self.calls.append("write_lesson")
+        steps: list[dict[str, Any]] = [
+            {"type": "text", "title": "", "text": f"Generated {i}"} for i in range(5)
+        ]
+        steps.append({"type": "recap", "points": ["generated"]})
+        steps.append(
+            {
+                "type": "quiz",
+                "question": "bad",
+                "code": "",
+                "language": "",
+                "options": ["only"],
+                "answer": 3,
+                "explanation": "",
+            }
+        )
+        return steps
+
+
+@pytest.fixture
+async def store(tmp_path: Path):
+    s = await Store(tmp_path / "db.sqlite3").open()
+    yield s
+    await s.close()
+
+
+@pytest.fixture
+def make_engine(course_dir: Path, store: Store, tmp_path: Path):
+    def _make(tutor: Any = None) -> Engine:
+        return Engine(load_course(course_dir), store, tutor, tmp_path / "data")
+
+    return _make

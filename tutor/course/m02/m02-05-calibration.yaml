@@ -1,0 +1,446 @@
+id: m02-05-calibration
+title: 'Calibration: when a 20% risk should mean 20%'
+summary: Reliability diagrams, calibration-in-the-large and slope, Brier score, why calibration drifts
+  across sites, and recalibration (Platt, isotonic) without leaking.
+minutes: 25
+status: authored
+why_it_matters: Clinicians act on absolute risk, not on rankings. A model that ranks well but says 40%
+  when the truth is 15% sends the wrong patients to the wrong programs, and reviewers, regulators,
+  and interviewers all check for it.
+objectives:
+  - Read a reliability diagram and say what shape of miscalibration it shows
+  - Compute and interpret the Brier score, scaled Brier, and the no-skill reference
+  - Explain calibration-in-the-large and calibration slope, including what slope < 1 means
+  - Explain why calibration drifts with prevalence and case mix across sites
+  - Recalibrate with Platt/logistic scaling or isotonic regression on held-out data, without leaking
+key_points:
+  - Discrimination (ranking) and calibration (honest probabilities) are separate properties
+  - Calibration slope < 1 means predictions are too extreme, the usual signature of overfitting
+  - Calibration shifts with prevalence and case mix across sites and over time
+  - Neural nets are often overconfident; temperature or Platt scaling usually fixes most of it
+  - Recalibrate on held-out data, never on the test set
+  - ECE depends on binning and hides where the errors are; report a curve plus intercept and slope
+tags: [calibration, evaluation, interview]
+steps:
+  - type: text
+    title: Two models, one AUROC
+    text: |
+      Your team has two 30-day readmission models for the stroke cohort from Module 01. Both have
+      a validation AUROC of **0.74**. The transitional-care program can call 150 patients a
+      month and wants everyone with a predicted risk above **20%**.
+
+      Model A flags 140 patients. Model B flags 610.
+
+      Same ranking quality, a fourfold difference in who gets a phone call. The difference is
+      **calibration**: whether a predicted 20% really means that about 20 in 100 such patients
+      are readmitted.
+
+      AUROC only cares about order. The moment anyone uses the _number_ (a threshold, a
+      conversation with a patient, a cost estimate), calibration is what matters.
+
+  - type: text
+    title: Discrimination vs calibration
+    text: |
+      Two separate questions about a risk model:
+
+      - **Discrimination**: do patients who get readmitted receive higher scores than those who
+        don't? Measured by AUROC (and AUPRC, from the previous lesson).
+      - **Calibration**: among patients given risk _p_, is the observed event rate close to _p_?
+
+      They are independent in one direction: any strictly increasing transform of the scores
+      (squaring them, dividing by 3) leaves AUROC unchanged and can wreck calibration. A model
+      can also be perfectly calibrated and useless: predict the cohort prevalence (say 13%) for
+      everyone. It is calibrated on average and has AUROC 0.5.
+
+      You want both. They fail for different reasons and are fixed in different ways.
+
+  - type: quiz
+    question: |
+      You take a well-calibrated model and replace every prediction p with p². What happens?
+    options:
+      - AUROC drops and calibration is unchanged
+      - AUROC is unchanged and predictions become systematically too low
+      - Both AUROC and calibration are unchanged
+      - AUROC improves because the scores are more spread out
+    answer: 1
+    explanation: |
+      Squaring is strictly increasing on [0, 1], so every pair of patients keeps its order and
+      AUROC is identical. But 0.2 becomes 0.04, so predicted risks are now far below observed
+      rates. This is exactly why a good AUROC tells you nothing about whether the numbers can be
+      trusted.
+
+  - type: text
+    title: The reliability diagram
+    text: |
+      The basic calibration picture:
+
+      1. Sort patients by predicted risk and split them into bins (often 10 equal-size groups).
+      2. For each bin, plot the **mean predicted risk** (x) against the **observed event rate** (y).
+      3. Draw the diagonal. Points on it mean "20% predicted, 20% observed".
+
+      Reading it: points **below** the diagonal mean the model **over**-predicts in that range;
+      points **above** mean it **under**-predicts.
+
+      A smoothed curve (loess or a spline of the outcome on predicted risk) is usually preferred
+      in the clinical prediction literature because it doesn't depend on arbitrary bins. Add a
+      small histogram of predictions underneath: most readmission predictions sit below 20%, so
+      the right-hand part of the curve rests on few patients.
+
+  - type: image
+    image: m02-05-reliability-diagram.png
+    caption: |
+      Simulated readmission data. Both models rank patients identically. The orange model is
+      overconfident: its risk range is stretched, so low-risk patients get risks that are too low
+      and high-risk patients get risks that are far too high (predicted ~0.67, observed ~0.35).
+      Its curve is flatter than the diagonal.
+
+  - type: quiz
+    question: |
+      On a reliability diagram, the top decile of your model has mean predicted risk 0.45 and
+      observed readmission rate 0.28. The bottom decile: predicted 0.02, observed 0.05. Which
+      description fits?
+    options:
+      - The model is too conservative; spread predictions out
+      - The model over-predicts everywhere; lower the intercept
+      - The model is too extreme at both ends, which suggests calibration slope < 1
+      - The model is fine; deciles always scatter around the diagonal
+    answer: 2
+    explanation: |
+      High risks are too high and low risks are too low. The curve is flatter than the
+      diagonal, which is the "predictions too extreme" pattern that a calibration slope below 1
+      measures. "Over-predicts everywhere" is tempting, but the bottom decile is
+      _under_-predicted, so a single intercept shift can't fix it.
+
+  - type: text
+    title: Calibration-in-the-large and slope
+    text: |
+      Two numbers summarize a calibration curve, both from logistic regressions of the outcome on
+      the model's **linear predictor** (the logit of predicted risk, `lp`):
+
+      - **Calibration-in-the-large (CITL)**: fit `logit(P(y=1)) = a + lp`, with the slope fixed
+        at 1 (lp as an offset). Ideal `a = 0`. A negative `a` means predictions are too high on
+        average; positive means too low. Closely related to comparing mean predicted risk with
+        the observed rate.
+      - **Calibration slope**: fit `logit(P(y=1)) = a + b·lp`. Ideal `b = 1`.
+
+      What the slope means:
+
+      - `b < 1`: predictions are **too extreme** (too close to 0 and 1). The classic cause is
+        **overfitting**: the model learned coefficients that are too large for new data.
+      - `b > 1`: predictions are **too moderate**, clustered near the average. It can happen with
+        over-shrunk models or when the validation population is more heterogeneous.
+
+      Slope is only meaningful on data the model was **not** trained on. On training data a
+      logistic regression's slope is exactly 1 by construction.
+
+  - type: code
+    title: Intercept and slope in a few lines
+    language: python
+    code: |
+      import numpy as np
+      import statsmodels.api as sm
+
+      def calibration_intercept_slope(y, p, eps=1e-6):
+          p = np.clip(p, eps, 1 - eps)
+          lp = np.log(p / (1 - p))          # logit of predicted risk
+
+          # CITL: intercept only, with lp as an offset (slope fixed at 1)
+          citl = sm.GLM(y, np.ones_like(lp), offset=lp,
+                        family=sm.families.Binomial()).fit().params[0]
+
+          # Slope: regress the outcome on lp
+          slope = sm.GLM(y, sm.add_constant(lp),
+                         family=sm.families.Binomial()).fit().params[1]
+          return citl, slope
+    after: |
+      Run this on your held-out test set with bootstrap CIs. A result like "CITL −0.35
+      (−0.52 to −0.18), slope 0.71 (0.60 to 0.83)" reads as "risks too high on average and too
+      extreme", which is a typical external-validation finding.
+
+  - type: quiz
+    question: |
+      A gradient-boosted readmission model has calibration slope **0.62** on the temporal test
+      set. What is the most likely explanation and fix?
+    options:
+      - The model is underfit; add more trees
+      - The test set has lower prevalence; adjust the intercept only
+      - Slope below 1 means good discrimination; no action needed
+      - The model overfit; stronger regularization or recalibration on held-out data
+    answer: 3
+    explanation: |
+      A slope well below 1 means the model's predictions are too extreme on new data, the typical
+      result of overfitting (too many trees, too deep, too little regularization). Fixing it at
+      source (regularization, early stopping) or recalibrating both work. A prevalence change
+      mostly moves the **intercept**; an intercept-only fix won't repair a slope of 0.62.
+
+  - type: text
+    title: A hierarchy of "calibrated"
+    text: |
+      Van Calster and colleagues (J Clin Epidemiol, 2016) proposed a useful ladder:
+
+      - **Mean calibration**: average predicted risk equals the observed event rate (CITL ≈ 0).
+      - **Weak calibration**: intercept 0 and slope 1. No systematic over/underestimation and
+        predictions not too extreme or too moderate.
+      - **Moderate calibration**: the calibration _curve_ follows the diagonal, so predicted risk
+        matches observed risk among patients with the same predicted risk.
+      - **Strong calibration**: correct for every covariate pattern. Essentially unattainable,
+        and not something to chase.
+
+      Their practical advice: aim for moderate calibration, and don't declare victory from a
+      single summary number. Intercept and slope can both be perfect while the curve bends in
+      the middle.
+
+  - type: text
+    title: Brier score
+    text: |
+      The **Brier score** is the mean squared error of probabilities:
+      `mean((p − y)²)`. Lower is better, and it rewards both discrimination and calibration.
+
+      On its own it's hard to read because it depends on prevalence. Always compare with the
+      **no-skill reference**: predict the prevalence π for everyone, and the Brier score is
+      `π(1 − π)`. At 13% readmission that's 0.13 × 0.87 ≈ **0.113**.
+
+      A model with Brier 0.100 sounds good until you notice the reference is 0.113. The
+      **scaled Brier** `1 − Brier / Brier_ref` makes this explicit (here ≈ 0.12, meaning 12% of
+      the way from no-skill to perfect). That's typical for readmission, which is a hard outcome.
+
+      The decomposition intuition (Murphy): Brier ≈ **reliability** (calibration error, lower is
+      better) − **resolution** (how far predictions move away from the base rate, higher is
+      better) + **uncertainty** `π(1 − π)` (fixed by the data). A model can lower its Brier
+      score by being better calibrated, by separating patients more, or both.
+
+  - type: quiz
+    question: |
+      Site A has 13% readmission, site B has 5%. The same model gets Brier 0.105 at A and 0.046 at
+      B. What can you conclude?
+    options:
+      - Nothing yet; compare each with its own no-skill reference first
+      - The model is much better at site B
+      - The model is miscalibrated at site A
+      - Brier is prevalence-invariant, so the difference must be sampling noise
+    answer: 0
+    explanation: |
+      No-skill references are 0.13 × 0.87 ≈ 0.113 at A and 0.05 × 0.95 ≈ 0.048 at B. Scaled
+      Brier is about 0.07 at A and about 0.04 at B, so the model is modest at both and not
+      clearly better at B. Raw Brier falls mechanically as outcomes get rarer. Comparing raw
+      values across sites is a common mistake.
+
+  - type: code
+    title: Brier, scaled Brier, and the binned curve
+    language: python
+    code: |
+      import numpy as np
+      from sklearn.metrics import brier_score_loss
+      from sklearn.calibration import calibration_curve
+
+      brier = brier_score_loss(y_test, p_test)
+      brier_ref = brier_score_loss(y_test, np.full_like(p_test, y_test.mean()))
+      scaled_brier = 1 - brier / brier_ref
+
+      # Equal-size bins ("quantile") avoid near-empty high-risk bins
+      obs, pred = calibration_curve(y_test, p_test, n_bins=10, strategy="quantile")
+      for o, q in zip(obs, pred):
+          print(f"predicted {q:.2f}  observed {o:.2f}")
+    after: |
+      Note the return order: `calibration_curve` returns **observed first, predicted second**.
+      Swapping them flips your plot across the diagonal and inverts your conclusion, a bug that
+      shows up in real notebooks.
+
+  - type: text
+    title: ECE and its caveats
+    text: |
+      In ML papers you'll see **expected calibration error (ECE)**: the weighted average, over
+      bins, of |observed − predicted|. It's a single convenient number, but:
+
+      - It depends on the **binning**: number of bins, equal-width vs equal-size. Change 10 bins to
+        20 and ECE changes.
+      - With equal-width bins on rare outcomes, most patients land in the first one or two bins
+        and the high-risk bins hold a handful of patients each.
+      - It's **biased upward** in small samples: noise alone makes bins deviate.
+      - It's one number, so it doesn't tell you **direction** (too high or too low) or **where**.
+
+      For clinical work, report the curve plus CITL and slope with CIs. Treat ECE as a secondary
+      summary, and state the binning if you use it.
+
+  - type: text
+    title: Neural nets are often overconfident
+    text: |
+      Guo et al. (ICML 2017) showed that modern deep networks, trained to minimize
+      cross-entropy with high capacity, tend to be **overconfident**: their probabilities are more
+      extreme than their accuracy justifies. Your PyTorch readmission model from earlier in this
+      module is a candidate.
+
+      The simple fix they popularized is **temperature scaling**: divide the logits by a single
+      learned `T > 1` before the sigmoid or softmax, fit on a validation set. One parameter, it
+      doesn't change the ranking, and it usually removes most of the miscalibration.
+
+      Other things that change calibration: class weights and resampling (previous lesson; they
+      deliberately inflate predicted risk), label smoothing, focal loss, and early stopping
+      point. Check calibration after every one of these choices.
+
+  - type: text
+    title: Why calibration drifts across sites
+    text: |
+      Discrimination often travels reasonably well between hospitals. Calibration usually doesn't.
+
+      - **Prevalence**: if site B's baseline readmission rate is lower (different discharge
+        practices, more post-acute follow-up, a different payer mix), the model trained at A
+        over-predicts everyone at B. That's mostly a shift in the **intercept**.
+      - **Case mix**: B treats sicker or healthier patients, or the predictors relate to the
+        outcome more weakly there. That changes the **slope** as well.
+      - **Measurement and coding**: different lab assays, documentation habits, or coding
+        intensity make the same feature mean different things.
+      - **Time**: the same site drifts as practice changes. Module 03 monitors this in production.
+
+  - type: image
+    image: m02-05-prevalence-shift.png
+    caption: |
+      Simulated. The model was fit at site A (17% readmission) and applied at site B (9%) where
+      the risk factor works the same way but baseline risk is lower. The ranking is unchanged, so
+      AUROC is the same, but every predicted risk is too high at B. An intercept update fixes
+      most of this.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your readmission model has AUROC 0.76 at the development hospital. You deploy it at a
+      second hospital, AUROC is still 0.75, but the care managers say the risk scores 'look way
+      too high'. What's going on and what would you do?"
+    model_answer: |
+      The ranking still works, so this is most likely a calibration problem, not a discrimination
+      one. The first thing I'd check is prevalence: if the second hospital's 30-day readmission
+      rate is lower, a model calibrated to the first site will over-predict across the board.
+      I'd confirm with a reliability curve on local data, plus calibration-in-the-large and slope
+      with bootstrap CIs. If it's mainly an intercept shift, the cheapest fix is an intercept-only
+      update fitted on a recent local sample. If the slope is also off, I'd do logistic
+      recalibration (intercept and slope). Only if the curve is badly shaped or there's enough
+      local data would I refit or retrain. I'd fit the update on one local period and check it on
+      a later one, not on the same data. Then I'd revisit the operating threshold with the care
+      team, because the 20% cut-off now flags a different number of patients, and I'd add
+      calibration to the monitoring dashboard, because this will drift again.
+    key_points:
+      - Same AUROC with wrong-looking risks points to calibration, not discrimination
+      - Checks prevalence and case-mix difference, and measures CITL, slope, and a curve locally
+      - Uses the lightest update that works (intercept, then intercept plus slope, then refit)
+      - Fits the update on held-out local data and validates it on a later period
+      - Revisits the threshold and adds calibration monitoring
+
+  - type: text
+    title: Recalibration methods
+    text: |
+      Recalibration learns a mapping from the model's output to a better probability. It is fit
+      on data the model was **not trained on** and evaluated on data neither step has seen.
+
+      - **Logistic (Platt) scaling**: fit `logit(p_new) = a + b·lp`. Two parameters, very
+        stable, works with a few hundred events. It preserves the ranking exactly. (Platt's
+        original version was for SVM margins. With probabilities you regress on their logit.)
+      - **Temperature scaling**: the one-parameter special case `lp / T` with no intercept. It
+        fixes over/underconfidence but not a prevalence shift.
+      - **Intercept-only update**: fixes calibration-in-the-large, the standard first step for a
+        new site.
+      - **Isotonic regression**: a non-parametric, monotone step function. It can fix any
+        monotone miscalibration shape, but it needs much more data (commonly quoted as a thousand
+        or more calibration samples, with enough events), can overfit, and produces ties.
+
+      For a readmission model with a few hundred events in the calibration set, start with
+      logistic scaling.
+
+  - type: code
+    title: Fit on the calibration split, apply to test
+    language: python
+    code: |
+      import numpy as np
+      from scipy.special import logit
+      from sklearn.linear_model import LogisticRegression
+      from sklearn.isotonic import IsotonicRegression
+
+      clip = lambda p: np.clip(p, 1e-6, 1 - 1e-6)
+
+      # p_cal, y_cal: predictions and labels on a held-out calibration split
+      platt = LogisticRegression(penalty=None)
+      platt.fit(logit(clip(p_cal)).reshape(-1, 1), y_cal)
+      p_test_platt = platt.predict_proba(logit(clip(p_test)).reshape(-1, 1))[:, 1]
+
+      iso = IsotonicRegression(out_of_bounds="clip", y_min=0, y_max=1)
+      iso.fit(p_cal, y_cal)
+      p_test_iso = iso.predict(p_test)
+    after: |
+      Three splits: **train** fits the model, **calibration** fits the mapping, **test** judges
+      both. With little data, scikit-learn's `CalibratedClassifierCV` does the cross-fitted
+      version for you: each fold's calibrator is fit on predictions from a model that never saw
+      those rows.
+
+  - type: quiz
+    question: |
+      A colleague fits isotonic regression on the **test set** predictions, then reports test-set
+      Brier and ECE for the recalibrated model. What's wrong?
+    options:
+      - Nothing, since calibration doesn't affect discrimination
+      - Isotonic should be replaced by Platt scaling
+      - The recalibrator has seen the test labels, so the calibration metrics are optimistic
+      - Brier score cannot be computed after isotonic regression
+    answer: 2
+    explanation: |
+      Isotonic regression is flexible enough to nearly memorize the test set's observed rates,
+      so post-hoc calibration metrics on the same data will look excellent and mean little. This
+      is leakage (Module 01), applied to the evaluation stage. Fit the recalibrator on a
+      separate calibration split or with cross-fitting, then judge it on untouched data.
+
+  - type: quiz
+    question: Which statement about recalibration and AUROC is correct?
+    options:
+      - Platt scaling can change AUROC because it refits the model
+      - Isotonic regression always improves AUROC
+      - Platt scaling leaves AUROC unchanged; isotonic can lower it slightly by creating ties
+      - Neither method can ever change AUROC
+    answer: 2
+    explanation: |
+      Logistic scaling with a positive slope is strictly increasing, so the ranking and AUROC are
+      exactly preserved. Isotonic regression is only non-decreasing: it maps ranges of scores to
+      the same value, and those ties can reduce AUROC a little. "Neither can change it" is the
+      tempting answer, and it's wrong because of those ties.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A clinician asks you: 'Your model has an AUROC of 0.78. Isn't that all I need to know?'
+      How do you explain calibration to them, and when does it matter more than AUROC?"
+    model_answer: |
+      I'd say AUROC answers "if I pick one patient who was readmitted and one who wasn't, how
+      often does the model rank the readmitted one higher?" That's useful for ordering a list, but
+      it says nothing about whether "25% risk" means 25%. Calibration answers that. It matters
+      most when the number itself is used: a fixed threshold for enrolling patients in a
+      transitional-care program, counseling a patient about their risk, estimating how many beds
+      or nurse calls we'll need, or comparing expected against observed readmissions for quality
+      reporting. It matters less if we only ever take the top 50 patients each week, where only
+      the ranking matters. I'd show them the reliability curve instead of a metric, and point out
+      that calibration is the property most likely to break when the model moves to their
+      hospital or when practice changes, so we check and update it locally.
+    key_points:
+      - Explains AUROC as ranking and calibration as whether the numbers mean what they say
+      - Names uses where absolute risk drives action (thresholds, counseling, capacity, quality reporting)
+      - Notes when ranking alone suffices (fixed top-k lists)
+      - Uses a reliability curve as the communication tool
+      - Points out calibration is the first thing to break across sites and over time
+
+  - type: laptop
+    title: Build a calibration report for the readmission model
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/calibration.py
+    task: |
+      Create this module with one function, `calibration_report(y, p)`, that returns CITL, slope,
+      Brier, scaled Brier, and a reliability plot (10 quantile bins plus a histogram of
+      predictions). Train a logistic regression on `stroke_features` from
+      `01-clinical-data-engineering/` using an earlier-years train split, a middle calibration
+      split, and a latest-years test split by `index_date`. Report calibration before and after
+      logistic recalibration. Then deliberately fit the recalibrator on the test split and see
+      how much better (and how misleading) the numbers look.
+
+  - type: recap
+    points:
+      - Discrimination is **ranking**, calibration is **honest numbers**, and you need both when risks drive action
+      - "Read a reliability diagram: below the diagonal means over-prediction, a flat curve means too extreme"
+      - "Calibration-in-the-large (ideal 0) and slope (ideal 1); slope < 1 means overfitting and too-extreme risks"
+      - Always compare Brier with the no-skill reference π(1 − π), or report scaled Brier
+      - ECE depends on binning and hides direction; report the curve plus intercept and slope with CIs
+      - Calibration drifts with prevalence and case mix; update the intercept first, then the slope
+      - Recalibrate on a held-out calibration split (Platt/logistic first, isotonic only with lots of data), never on test

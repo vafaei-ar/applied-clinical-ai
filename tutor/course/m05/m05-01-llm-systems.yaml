@@ -1,0 +1,437 @@
+id: m05-01-llm-systems
+title: The LLM system toolkit
+summary: Hosted vs local models, PHI, tokens and context windows, sampling, structured outputs, tool
+  calling, prompt versioning, and cost per completed task.
+minutes: 25
+status: authored
+why_it_matters: Clinical LLM roles expect you to reason about the system around the model (where data
+  goes, what it costs, how output is validated), not just to write prompts. These are the questions
+  compliance, engineering, and interviewers ask first.
+objectives:
+  - Compare hosted APIs and local/open-weights models on privacy, PHI, cost, and quality
+  - Explain tokens, context windows, and token-based pricing, and estimate the cost of a task
+  - Explain what temperature does and why low temperature is not a determinism guarantee
+  - Use structured outputs with schema validation, treating model output as untrusted input
+  - Describe tool calling and when it beats prompting alone
+  - Version prompts and measure cost per completed task rather than per request
+key_points:
+  - PHI and BAAs decide what you may send where
+  - Tokens drive cost, latency, and context limits; output tokens usually cost more
+  - Temperature reshapes the next-token distribution; even at 0, hosted outputs can vary
+  - Validate model output like any untrusted input, with a schema plus domain checks
+  - The model proposes tool calls; your code executes them and owns the permissions
+  - Prompts are code, so version and log them with every output
+  - Measure cost per completed task, including retries and failures
+tags: [llm, systems, interview]
+steps:
+  - type: text
+    title: The demo worked. Then compliance called.
+    text: |
+      Module 05 builds one system: an assistant that answers clinicians' questions from your
+      hospital's **stroke guidelines** and summarizes **discharge summaries** for the stroke
+      cohort you built in Module 01.
+
+      A resident prototypes it in an afternoon by pasting notes into a chatbot. It looks great.
+      Then three questions arrive:
+
+      - **Compliance:** "Where did those notes go, and who can keep them?"
+      - **Finance:** "What will this cost at 2,000 discharges a month?"
+      - **Engineering:** "What happens when the output isn't the format the EHR expects?"
+
+      None of these are prompt questions. They are **system** questions, and answering them is
+      what separates a clinical LLM engineer from someone who has used ChatGPT.
+
+  - type: text
+    title: The model is one box in the system
+    text: |
+      An LLM feature in production has several parts, and most failures happen outside the
+      model:
+
+      - **Model choice and hosting**: where inference runs and under what agreement.
+      - **Prompt**: versioned instructions and templates.
+      - **Context**: what you put in front of the model (retrieved guideline chunks, the note).
+      - **Output handling**: parsing, schema validation, domain checks, retries.
+      - **Tools**: functions the model may ask you to run.
+      - **Logging and evaluation**: every call recorded, a test suite run on every change.
+
+      This lesson covers the toolkit. Lessons 02–06 build retrieval on top of it and then
+      evaluate everything.
+
+  - type: text
+    title: Hosted API or your own open-weights model?
+    text: |
+      **Hosted frontier model via API**
+
+      - Usually the highest quality with no GPUs to run.
+      - Text leaves your network, so you need a contract (below), retention controls, and trust
+        in the vendor.
+      - The vendor can update or retire models, which changes behavior under you.
+
+      **Open-weights model from Hugging Face, self-hosted**
+
+      - Data never leaves your environment; you pin the exact weights forever.
+      - You own GPUs, serving, scaling, and security patches.
+      - Quality per unit of effort is often lower, especially for small models, though
+        fine-tuning on narrow tasks can close the gap.
+
+      **Middle path:** many clouds serve both proprietary and open models inside your own cloud
+      account under your existing health-data agreements. That is often what health systems
+      actually choose.
+
+  - type: text
+    title: PHI and the BAA
+    text: |
+      Under HIPAA, a vendor that creates, receives, stores, or transmits **protected health
+      information** on behalf of a covered entity is a **business associate**. You need a
+      signed **Business Associate Agreement (BAA)** before PHI is sent.
+
+      A BAA is necessary but not sufficient. Also check:
+
+      - Is the **specific service** covered? Vendors often cover some endpoints, not all.
+      - **Retention and logging**: are prompts stored, for how long, and who can see them?
+      - Is your data used for **training**? It should not be.
+      - Region and subprocessors.
+
+      Note the asymmetry in our project: **published guidelines are not PHI**, but **discharge
+      summaries are**. The guideline Q&A and the summarizer can have different hosting answers.
+      De-identified data is not PHI, but de-identifying free text is imperfect. Module 06
+      covers HIPAA in depth.
+
+  - type: quiz
+    question: |
+      Your team wants to summarize discharge summaries with a hosted model. Which is the
+      necessary first step?
+    options:
+      - Set temperature to 0 so outputs are reproducible
+      - Remove patient names from the notes, which makes them de-identified
+      - Confirm a BAA covers this specific service, and check its retention and training terms
+      - Nothing; HIPAA doesn't apply to AI vendors
+    answer: 2
+    explanation: |
+      PHI can only go to a business associate under a BAA, and the BAA must cover the service
+      you actually call. Removing names is tempting but is not de-identification: HIPAA's Safe
+      Harbor method lists 18 identifier types (dates, record numbers, locations, and more), and
+      free-text notes contain many of them. Temperature is unrelated to privacy.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We're building a discharge-summary summarizer. Should we use a hosted frontier model
+      API or self-host an open-weights model? Walk me through how you'd decide."
+    model_answer: |
+      I'd decide on four axes and let the data decide quality. First, data governance: these are
+      PHI, so a hosted option is only on the table if we have a BAA covering that exact
+      endpoint, zero or short retention, and no training on our data. Many health systems get
+      this through their existing cloud provider. Second, quality: I'd build a small labeled
+      eval set of real summaries and compare a hosted frontier model with one or two open
+      models, measuring omissions and hallucinated medications, not just fluency. Third, cost and
+      latency at our volume: hosted is pay-per-token with no fixed cost; self-hosting has GPU
+      and engineering cost that only pays off at high, steady volume. Fourth, control: self-
+      hosting gives pinned weights and no surprise model updates; with hosted I'd pin dated
+      model versions and rerun the eval on every change. My default would be a hosted model
+      under a BAA for quality and speed to launch, with the interface kept provider-neutral so
+      we can switch if cost or policy changes.
+    key_points:
+      - Treats PHI as a gate, requiring a BAA for the specific service plus retention and training terms
+      - Compares quality empirically on a task-specific eval set, including omissions and hallucinations
+      - Compares cost structure, pay-per-token vs fixed GPU and engineering cost, at the real volume
+      - Addresses version control and vendor model updates
+      - Keeps the interface provider-neutral to preserve the option to switch
+
+  - type: text
+    title: Tokens are the unit of everything
+    text: |
+      Models read and write **tokens**, subword pieces from a fixed vocabulary. A rough rule for
+      English prose is about 4 characters or 0.75 words per token, but it varies by tokenizer.
+
+      Clinical text is expensive to tokenize: abbreviations (`s/p tPA`, `HLD`), drug names,
+      doses, and dates often split into many tokens. Always count with the model's own
+      tokenizer on your real notes instead of assuming the rule of thumb.
+
+      Tokens drive three things at once:
+
+      - **Price**: billed per token, and input and output are priced separately. **Output
+        tokens usually cost several times more** than input tokens.
+      - **Latency**: output is generated one token at a time, so long outputs are slow.
+      - **Limits**: everything must fit in the context window.
+
+  - type: text
+    title: The context window is a budget, not a bucket
+    text: |
+      The **context window** is the maximum number of tokens the model handles in one call:
+      system prompt + instructions + retrieved chunks + the note + **the output**. Input and
+      output share it.
+
+      Three traps:
+
+      - **Silent truncation.** If your code trims long notes to fit, the part that gets cut is
+        often the end, which is where the **discharge medications** and follow-up plan live.
+      - **More context is not free.** It costs money and latency on every call.
+      - **Long-context use is uneven.** Models can miss information placed in the middle of long
+        inputs ("Lost in the Middle", Liu et al., TACL 2024). A large window doesn't mean every
+        token gets equal attention.
+
+      That is a big reason RAG (next lesson) exists: send the few chunks that matter, not the
+      whole guideline.
+
+  - type: quiz
+    question: |
+      Illustrative prices: $3 per million input tokens, $15 per million output tokens. Each
+      summary uses 6,000 input tokens and 500 output tokens. What do **10,000 summaries** cost?
+    options:
+      - $195
+      - $975
+      - $255
+      - $25.50
+    answer: 2
+    explanation: |
+      Per summary: 6,000 × $3/1M = $0.018 input, plus 500 × $15/1M = $0.0075 output, total
+      $0.0255. Times 10,000 = $255. Pricing all 6,500 tokens at the input rate gives $195, and
+      pricing all at the output rate gives $975. Output is only 8% of the tokens here but
+      about 30% of the cost.
+
+  - type: text
+    title: What temperature actually does
+    text: |
+      At each step the model produces **logits**, one score per possible next token. Sampling
+      turns them into a choice:
+
+      - **Temperature T** divides the logits before the softmax. T < 1 sharpens the
+        distribution toward the top token; T > 1 flattens it. As T → 0 you approach **greedy**
+        decoding (always the top token).
+      - **Top-p (nucleus)** samples only from the smallest set of tokens whose probability adds
+        up to p.
+
+      For extraction and summarization, use low temperature. But **T = 0 is not a determinism
+      guarantee** on hosted APIs: batching, floating-point nondeterminism on GPUs, and silent
+      backend updates can all change outputs. Some models don't expose temperature at all.
+      So evaluate with repeated runs and log the parameters you used.
+
+  - type: code
+    language: python
+    title: Temperature in five lines
+    code: |
+      import numpy as np
+
+      logits = np.array([2.0, 1.0, 0.2])   # next token: "aspirin", "clopidogrel", "warfarin"
+
+      def probs(logits, T):
+          z = logits / T
+          z = z - z.max()                  # numerical stability; doesn't change the result
+          p = np.exp(z)
+          return p / p.sum()
+
+      for T in (0.2, 1.0, 2.0):
+          print(T, probs(logits, T).round(3))
+    after: |
+      At T = 1.0 this prints `[0.652 0.24 0.108]`.
+
+  - type: quiz
+    question: In the code above, what does `probs(logits, 0.2)` print, approximately?
+    options:
+      - "[0.993 0.007 0.   ]"
+      - "[0.652 0.24  0.108]"
+      - "[0.497 0.301 0.202]"
+      - "[0.333 0.333 0.333]"
+    answer: 0
+    explanation: |
+      Dividing by 0.2 multiplies the logit gaps by 5 (differences of 5 and 9), so the top token
+      takes almost all the mass. The third option is T = 2.0, where the distribution flattens.
+      Uniform probabilities would need T → ∞, not T → 0.
+
+  - type: text
+    title: Structured outputs, and why you still validate
+    text: |
+      If the summarizer feeds a discharge dashboard, free text is useless. You need fields:
+      diagnosis, NIHSS at discharge, medications with status, follow-up interval.
+
+      Ask for **JSON matching a schema**. Many providers offer schema-constrained decoding
+      ("structured outputs"), and open-model serving stacks offer grammar-constrained decoding.
+      That guarantees **syntax**, not **truth**: the JSON parses, but the dose can still be
+      invented.
+
+      So treat model output like any **untrusted input**, like form data from the internet:
+
+      - **Schema checks**: types, required fields, enums, ranges.
+      - **Domain checks**: every medication name must appear in the source note; NIHSS in
+        0–42; follow-up can't be negative.
+      - **Failure policy**: retry once with the validation error in the prompt, then route to a
+        human. Count failures and track that rate as a metric.
+
+  - type: code
+    language: python
+    title: A schema for discharge extraction (Pydantic v2)
+    code: |
+      from typing import Literal
+      from pydantic import BaseModel, Field, ValidationError
+
+      class Medication(BaseModel):
+          name: str
+          dose: str | None = None
+          status: Literal["new", "continued", "changed", "stopped"]
+
+      class DischargeExtract(BaseModel):
+          primary_diagnosis: str
+          nihss_at_discharge: int | None = Field(default=None, ge=0, le=42)
+          medications: list[Medication]
+          follow_up_days: int | None = Field(default=None, ge=0)
+
+      def parse(raw: str) -> DischargeExtract | None:
+          try:
+              return DischargeExtract.model_validate_json(raw)
+          except ValidationError as err:
+              log_failure(raw, err)   # count it, then retry or route to a human
+              return None
+
+  - type: quiz
+    question: |
+      The model returns `{"primary_diagnosis": "Ischemic stroke", "nihss_at_discharge": 2,
+      "medications": [{"name": "clopidogrel", "status": "discontinued"}]}`. What does
+      `parse` do?
+    options:
+      - Returns a DischargeExtract; status is stored as the string "discontinued"
+      - Fails, because `dose` is missing from the medication
+      - Fails, because `follow_up_days` is missing
+      - Fails, because "discontinued" is not one of the allowed status values
+    answer: 3
+    explanation: |
+      `status` is a `Literal` enum, so any value outside new/continued/changed/stopped raises a
+      `ValidationError`. `dose` and `follow_up_days` have defaults of `None`, so omitting them
+      is fine. This is exactly the synonym drift that breaks downstream code, and the fix is a
+      schema in the prompt plus validation, not hoping the model is consistent.
+
+  - type: text
+    title: Tool calling, precisely
+    text: |
+      With **tool calling** (also called function calling) you describe functions to the model:
+      a name, a description, and a JSON schema for the arguments. The loop is:
+
+      - The model returns a **request**: `get_active_meds(patient_id="P0042")`.
+      - **Your code** decides whether to run it, runs it, and sends back the result.
+      - The model continues with that result in context.
+
+      The model never executes anything. **You own permissions**: which tools exist, which
+      patient IDs the caller may access, and whether a tool can write.
+
+      Use tools when the model needs **fresh or exact data** (current meds, a lab value), a
+      **deterministic computation** (a risk score, a dose calculation: don't let the model do
+      arithmetic), or an **action**. Don't use them when a fixed pipeline works: each round trip
+      adds latency, cost, and a new failure mode. Lesson 06 evaluates tool-using agents.
+
+  - type: quiz
+    question: Which task most clearly calls for a tool rather than a prompt alone?
+    options:
+      - Rewriting a discharge summary in plain language for the patient
+      - Computing a CHA₂DS₂-VASc score from the patient's coded diagnoses and age
+      - Summarizing the hospital course section of a note
+      - Classifying whether a clinician's question is about acute care or prevention
+    answer: 1
+    explanation: |
+      A risk score is a deterministic calculation over structured data. A tool (a SQL query
+      over the Module 01 `diagnoses` and `patients` tables plus a scoring function) gets it
+      right every time, while a model doing arithmetic in text sometimes won't. The other
+      three are language tasks the model does well directly.
+
+  - type: text
+    title: Prompts are code
+    text: |
+      A one-word prompt change can move accuracy by several points (Lesson 05 measures this).
+      So manage prompts like code:
+
+      - Store templates in **git** with an ID and version (`summarize_discharge@v7`).
+      - Keep variables out of the template (`{note}`, `{chunks}`).
+      - **Log every call**: prompt version, model identifier, parameters, retrieved chunk IDs,
+        input and output token counts, latency, and the output.
+      - **Pin model versions.** Hosted aliases like "latest" can change behavior without
+        notice. Use dated versions where the provider offers them.
+      - Rerun the **evaluation suite** on every prompt or model change before release.
+
+      This is the same reproducibility discipline as pinning package versions in the Module 03
+      Docker image.
+
+  - type: text
+    title: Cost per completed task
+    text: |
+      A per-request price is the wrong number to optimize. What the hospital buys is **correct,
+      usable outputs**. So measure:
+
+      **cost per completed task = total spend ÷ tasks completed correctly**
+
+      Total spend includes retries after validation failures, multi-step calls, and failed
+      attempts that still cost tokens. A fuller version adds the **clinician time** spent fixing
+      or redoing failures, which usually dwarfs token costs.
+
+      A cheap model that needs retries and fails often can cost as much per useful result as a
+      strong model, and it costs more once clinician time is counted.
+
+  - type: image
+    image: m05-01-cost-per-task.png
+    caption: |
+      Illustrative numbers. The small model is 5x cheaper per call, but with 3 calls per
+      attempt (retries after schema failures) and 60% of tasks correct, it costs 2.0¢ per
+      completed task vs 2.3¢ for the strong model, before counting clinician time to fix the
+      40% it gets wrong.
+
+  - type: quiz
+    question: |
+      A model costs $0.01 per request. Each task takes 2 requests on average (one retry about
+      half the time, plus a follow-up call), and 80% of tasks end with a correct output. What is
+      the cost per completed task?
+    options:
+      - $0.010
+      - $0.0125
+      - $0.020
+      - $0.025
+    answer: 3
+    explanation: |
+      Spend per task attempt is 2 × $0.01 = $0.02. Only 80% of attempts produce a usable
+      result, so $0.02 ÷ 0.8 = $0.025. The tempting $0.02 ignores that failed tasks still cost
+      money, and $0.0125 divides the per-request price by the success rate but forgets the
+      extra calls.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Six weeks after launch, our discharge summarizer costs 4x what we estimated. How would
+      you investigate and fix it?"
+    model_answer: |
+      I'd start from the logs, since every call should record prompt version, model, and token
+      counts. First, decompose spend: calls per task, input tokens per call, output tokens per
+      call, and price per token. Then compare each against the estimate. Common culprits:
+      retries from validation failures (a schema change or new note format can spike these),
+      notes much longer than the pilot sample, a prompt change that added examples or made
+      outputs verbose, someone switching to a pricier model alias, or an agent loop making
+      extra tool calls. Then the fixes follow the cause: fix the schema or prompt driving
+      retries, cap output length, trim context to relevant sections, cache repeated system
+      prompts where the provider supports it, and route easy cases to a smaller model if the
+      eval shows it's good enough. Finally, I'd add cost per completed task to the monitoring
+      dashboard with an alert, so we catch drift in days, not weeks.
+    key_points:
+      - Uses per-call logs to decompose spend into calls per task, tokens per call, and price
+      - Checks likely causes such as retries, longer inputs, verbose outputs, model changes, and loops
+      - Matches fixes to causes, such as trimming context, capping output, caching, and routing
+      - Validates any cheaper configuration against the eval set before switching
+      - Adds cost per completed task to monitoring with alerts
+
+  - type: laptop
+    title: Start the Module 05 project with a provider-neutral client
+    repo_path: 05-clinical-llm-evaluation/src/llm_client.py
+    task: |
+      Create `05-clinical-llm-evaluation/src/llm_client.py` with a small `LLMClient` protocol:
+      `complete(prompt_id: str, variables: dict, schema: type[BaseModel] | None) -> Result`,
+      where `Result` holds the parsed output (or `None`), raw text, input/output token counts,
+      latency, model identifier, and prompt version. Add a `FakeClient` that returns canned
+      JSON so tests run without any API. Put the `DischargeExtract` schema from this lesson in
+      `schemas.py`, and write a pytest showing an invalid `status` value is counted as a
+      validation failure.
+
+  - type: recap
+    points:
+      - The model is one box; hosting, context, validation, tools, and logging are the system
+      - "**PHI requires a BAA** covering the exact service, plus retention and no-training terms; public guidelines are not PHI"
+      - Tokens drive price, latency, and limits; output tokens usually cost more; count with the real tokenizer
+      - Context windows include the output, and truncation silently drops the end of notes
+      - Temperature reshapes the distribution; T = 0 on a hosted API is not guaranteed deterministic
+      - Structured outputs guarantee syntax, not truth, so validate schema and domain rules
+      - The model requests tool calls and your code executes them and owns permissions
+      - Version prompts, pin models, log everything, and optimize **cost per completed task**

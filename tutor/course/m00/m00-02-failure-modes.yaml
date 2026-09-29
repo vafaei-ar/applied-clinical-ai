@@ -1,0 +1,394 @@
+id: m00-02-failure-modes
+title: "The three failure modes: leakage, bias, and shift"
+summary: Almost every broken clinical model fails through leakage, biased data or labels, or distribution
+  shift. Learn to recognize each one quickly.
+minutes: 25
+status: authored
+why_it_matters: A candidate who can diagnose these three instantly reads as senior. They reappear in
+  every later module, from cohort SQL to LLM evaluation.
+objectives:
+  - Define temporal leakage, target leakage, and pipeline (label) leakage with clinical examples
+  - Distinguish selection bias, measurement bias, and label bias (e.g., cost as a proxy for need)
+  - Recognize covariate shift, label shift, and concept drift in hospitals
+  - Triage a failing model by asking three diagnostic questions
+key_points:
+  - Obermeyer et al. (Science 2019) cost-as-proxy algorithm, where the label choice caused the bias
+  - Using post-index diagnoses as predictors is temporal leakage
+  - Models can learn the hospital or scanner instead of the disease
+  - COVID-era changes are a textbook example of shift
+tags: [leakage, bias, shift, interview]
+steps:
+  - type: text
+    title: Three models, three failures
+    text: |
+      - A stroke readmission model scores AUROC **0.94** in validation and **0.68** in production.
+      - A widely used care-management algorithm systematically under-selects Black patients who
+        are just as sick as the White patients it selects.
+      - A chest X-ray pneumonia model works well at the hospitals it was trained on and worse
+        at a new one, partly because it learned to recognize _which hospital_ the image came from.
+
+      Different teams, different data, different models. But each is an example of one of three
+      failure modes that cover most of what goes wrong in clinical ML:
+
+      - **Leakage**: the model sees information it won't have when it's used.
+      - **Bias**: the data or label measures something different for different people.
+      - **Shift**: the world the model is used in isn't the world it learned from.
+
+      This lesson gives you a working vocabulary for all three. Later modules go deep on each.
+
+  - type: text
+    title: "Leakage: three flavours"
+    text: |
+      Leakage means training or evaluation uses information that won't be available at
+      prediction time. That makes validation look better than deployment will be.
+
+      - **Temporal leakage**: a feature comes from after time zero. Example: a "prior
+        diagnosis" that was actually recorded after the index stroke.
+      - **Target leakage**: a feature is a consequence or a restatement of the outcome. Example:
+        predicting sepsis with "IV antibiotics given", or readmission with "discharged to
+        hospice".
+      - **Pipeline leakage**: information from the test set gets into training through the
+        split or preprocessing. Example: the same patient in train and test, or imputation
+        values computed on the full dataset.
+
+      People use these terms loosely (you'll also hear "label leakage" for the second or third).
+      The names matter less than the mechanism: _what did the model know, and when?_
+
+  - type: quiz
+    question: |
+      You predict in-hospital mortality at admission. One feature is "palliative care consult
+      ordered during this stay." What kind of problem is this?
+    options:
+      - Pipeline leakage, because it contaminates the test set
+      - Covariate shift, because consult rates change over time
+      - Selection bias, since only some patients get consults
+      - Target leakage, since it's usually a consequence of the clinical course and is not known at admission
+    answer: 3
+    explanation: |
+      A palliative consult during the stay happens after admission and is often ordered _because_
+      the patient is dying. It is both from the future and a near-restatement of the outcome.
+      That's target leakage (with a temporal component). It isn't pipeline leakage, because no
+      test-set information is involved. The feature itself is the problem.
+
+  - type: code
+    title: Leakage in the running project
+    text: "A first attempt at the prior-AF feature for the stroke cohort:"
+    code: |
+      SELECT
+          c.patient_id,
+          MAX(CASE WHEN d.icd10_code LIKE 'I48%' THEN 1 ELSE 0 END) AS prior_af
+      FROM index_stroke_cohort c
+      LEFT JOIN diagnoses d
+        ON d.patient_id = c.patient_id
+       AND CAST(d.diagnosis_date AS DATE) >= c.index_date - INTERVAL '365 days'
+       AND CAST(d.diagnosis_date AS DATE) <= c.index_date + INTERVAL '30 days'
+      GROUP BY c.patient_id
+    after: |
+      The author wanted to "catch AF diagnosed during the stroke workup". Hold that thought.
+
+  - type: quiz
+    question: What's wrong with `prior_af` in the query above?
+    options:
+      - Nothing, because AF found during workup was present before the stroke
+      - It includes AF recorded up to 30 days after the index date, which isn't known at time zero
+      - The LEFT JOIN drops patients with no diagnoses
+      - It should use `encounter_start` instead of `diagnosis_date`
+    answer: 1
+    explanation: |
+      The window runs to `index_date + 30 days`, so AF recorded during the stay or at a
+      readmission counts as "prior". That's temporal leakage, and because patients who get
+      readmitted generate more diagnoses, it also leaks the outcome. "It was present anyway" is
+      the tempting argument, but the question is what the system knew at time zero. The
+      conditions are in the `ON` clause, so C is wrong, and switching to `encounter_start` (D) would
+      make things worse. `sql/02_features.sql` uses a strict `< c.index_date`.
+
+  - type: text
+    title: "The subtle one: leaking the clinician"
+    text: |
+      Some features are available at prediction time and still cause trouble.
+
+      A sepsis model that uses "blood culture ordered in the last 6 hours" or "lactate ordered"
+      learns something real: clinicians order those tests when they suspect infection. The model
+      becomes very good at detecting **clinician suspicion**, which the clinician already has.
+
+      On a retrospective test set this looks like excellent performance. At the bedside it adds
+      little, because it alerts on patients the team is already treating.
+
+      This isn't leakage by the time-zero rule. It's a question of **incremental value**, and
+      the fix is in evaluation: measure performance on patients who aren't yet suspected, and
+      measure lead time relative to clinician action. Module 07's sepsis case returns to this.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your sepsis model's top feature is 'lactate ordered in the last 6 hours.' Is that a
+      problem?"
+    model_answer: |
+      It depends on what the model is for, so I'd unpack it. It isn't temporal leakage if the
+      order time is before the prediction time. But a lactate order is a marker of clinician
+      suspicion. So the model may mostly be detecting that the team already thinks the patient
+      is septic, which inflates retrospective metrics and adds little at the bedside.
+
+      To test that, I'd first ablate order-based features and see how much performance drops.
+      Second, I'd evaluate on the subset of prediction times before any sepsis workup was
+      started. Third, I'd measure lead time: how often the model fires before the first culture
+      or antibiotic order. If the value comes almost entirely from order features, I'd either
+      remove them or reframe the product as a workload or bundle-compliance tool rather than
+      early detection.
+    key_points:
+      - Distinguishes temporal leakage from capturing clinician behaviour
+      - Explains that the model may only detect suspicion that already exists
+      - Proposes ablation of order-based features
+      - Evaluates on not-yet-suspected patients and measures lead time before clinician action
+      - Ties the decision back to the intended use
+
+  - type: text
+    title: "Bias: three places it enters"
+    text: |
+      "Bias" in clinical ML usually means the data or label means something different for
+      different groups. Three sources matter most:
+
+      - **Selection bias**: who ends up in the data. Only patients who got a test have a result,
+        and only insured patients have claims.
+      - **Measurement bias**: the same quantity is measured less accurately for some people. A
+        well-known example: pulse oximeters overestimated oxygen saturation more often in Black
+        patients than in White patients, which can hide hypoxemia (Sjoding et al., NEJM 2020).
+      - **Label bias**: the outcome you train on is a proxy that tracks the thing you care about
+        differently across groups.
+
+      Label bias is the hardest to see, because the model can be accurate and well calibrated
+      for the label and still be wrong about what you care about.
+
+  - type: text
+    title: Cost as a proxy for need
+    text: |
+      Obermeyer et al. (Science 2019) studied a commercial algorithm that health systems used to
+      pick patients for high-risk care-management programs. It predicted **future healthcare
+      costs** and used that as its measure of need. Race was not an input.
+
+      They found that at the same risk score, Black patients were considerably sicker than
+      White patients, with more active chronic conditions. The reason: less money was spent on
+      Black patients with the same level of illness, reflecting unequal access to care. The
+      algorithm predicted cost accurately. Cost just wasn't need.
+
+      In their simulation, correcting this disparity at the program's selection threshold would
+      raise the share of Black patients selected for extra help from about 18% to about 47%.
+      Working with the manufacturer, they showed that a label combining cost with direct measures
+      of health greatly reduced the bias.
+
+  - type: image
+    image: m00-02-cost-proxy.png
+    caption: |
+      A simulated version of the pattern. Both groups have the same distribution of illness, but
+      group B generates less cost at the same illness level. A model that ranks by predicted cost
+      puts sicker group-B patients below the cutoff. The data here is simulated, not the study's.
+
+  - type: quiz
+    question: |
+      Which check would have revealed the problem in the cost-as-proxy algorithm?
+    options:
+      - Checking calibration of predicted cost separately by race
+      - Removing race from the inputs and retraining
+      - Comparing actual health (e.g., number of chronic conditions) by race at the same risk score
+      - Checking overall AUROC for predicting high cost
+    answer: 2
+    explanation: |
+      The algorithm was reasonably calibrated **for cost** across races, so check A would pass,
+      and so would D. Race wasn't an input, so B changes nothing: the bias came in through the
+      label. Only comparing the thing you actually care about (health need) at equal scores
+      exposes it. The lesson: evaluate against the construct you care about, not just the label
+      you trained on.
+
+  - type: text
+    title: Bias in our stroke cohort
+    text: |
+      Look at the running project through this lens:
+
+      - **Selection**: the cohort requires 365 days of continuous coverage before the stroke.
+        That guarantees a full lookback window, and it also drops people with coverage gaps, who
+        are more likely to have unstable jobs or insurance.
+      - **Label**: `readmission_30d` only sees readmissions recorded in _our_ data. In a
+        single-hospital EHR, a readmission to another hospital is invisible and gets labelled
+        as "no readmission". Claims data sees it, if the patient stays enrolled.
+      - **Measurement**: labs like LDL are only present for patients who got them tested, and
+        testing rates differ by access.
+
+      None of this means "don't build the model". It means measure it, document it, and check
+      performance by subgroup (Module 02).
+
+  - type: quiz
+    question: |
+      Patients in the synthetic data with a coverage gap before their stroke are excluded from
+      `index_stroke_cohort`. What's the main risk if the readmission model is later used on
+      all stroke patients?
+    options:
+      - Performance on people with unstable coverage is unknown, and their features (short lookback) will look different
+      - The model will be overfitted to the included patients' noise
+      - It's pipeline leakage, because excluded patients were in the test set
+      - No risk, since exclusion criteria make the cohort cleaner
+    answer: 0
+    explanation: |
+      Selection at cohort-building time defines the population your performance estimates
+      apply to. People with coverage gaps have shorter, sparser histories, so their feature
+      values look different, and they were never evaluated. That's a selection problem, not
+      overfitting or pipeline leakage. The fix: state the intended population explicitly, or
+      evaluate on the excluded group with a shorter-lookback variant.
+
+  - type: text
+    title: "Shift: three kinds"
+    text: |
+      A model learns P(y | x) from training data. Deployment data can differ in three ways:
+
+      - **Covariate shift**: P(x) changes and P(y | x) stays the same. Example: a hospital opens
+        a geriatric unit, so patients are older.
+      - **Label shift** (prior shift): P(y) changes. Example: outcome prevalence rises during
+        an epidemic.
+      - **Concept drift**: P(y | x) changes, so the same patient now has a different risk.
+        Example: a new treatment lowers readmission for patients who look identical on paper.
+
+      Real shifts are usually mixtures. The categories matter because each needs a different
+      response: covariate shift may just need checking, label shift may need recalibration, and
+      concept drift may need retraining.
+
+  - type: image
+    image: m00-02-shift-types.png
+    caption: |
+      Blue is training data, orange is deployment data. Covariate shift moves the inputs, label
+      shift moves the base rate, and concept drift changes the relationship itself.
+
+  - type: text
+    title: Shift in real hospitals
+    text: |
+      Shift is the rule, not the exception (see Finlayson et al., "The Clinician and Dataset Shift
+      in Artificial Intelligence", NEJM 2021). Common sources:
+
+      - **Coding changes**: the US moved from ICD-9 to ICD-10 in October 2015, and any feature
+        built on codes changed overnight.
+      - **New assays or devices**: a lab switches to a different assay and values move.
+      - **EHR build changes**: a flowsheet field is renamed and a feature silently becomes missing.
+      - **Practice changes**: new guidelines or new drugs change outcomes for the same patient.
+      - **COVID-19**: in 2020, case mix, elective admissions, testing, and staffing all changed
+        at once. Models built before it saw inputs and outcome rates unlike anything in training.
+
+      And there are **site differences**. Zech et al. (PLOS Medicine 2018) showed that a chest
+      X-ray model could identify which hospital system an image came from, and could exploit
+      differences in pneumonia rates between sites, which then failed to carry over to a new
+      site. The model learned the hospital, not just the disease.
+
+  - type: quiz
+    question: |
+      Your hospital replaces its troponin assay with a high-sensitivity version that reports
+      values on a different scale. Patients are the same. What kind of shift is this, and what
+      breaks?
+    options:
+      - Label shift, since more MIs will be diagnosed
+      - No shift, since it's the same analyte
+      - Concept drift, since patients' true risk changed
+      - "Covariate shift through measurement: the same patient's feature values change, so learned thresholds on that feature are wrong"
+    answer: 3
+    explanation: |
+      The patients haven't changed, but how the input is measured has, so P(x) moves and the
+      model's learned cut-points on troponin no longer mean the same thing. It can also cause
+      label shift downstream, if more MIs get diagnosed, but the direct break is in the input.
+      This is why monitoring tracks input distributions and why lab code or unit changes should
+      trigger a model review.
+
+  - type: quiz
+    question: |
+      A well-calibrated readmission model was trained when the readmission rate was 10%. The rate
+      is now 15%, and P(x | y) hasn't changed (pure label shift). What happens?
+    options:
+      - Predicted probabilities become too low on average, while the ranking of patients is largely preserved
+      - Nothing, since calibrated models adapt automatically
+      - AUROC drops sharply, so the model must be retrained
+      - Predicted probabilities become too high on average
+    answer: 0
+    explanation: |
+      Under pure label shift, the model still ranks patients well (discrimination holds), but its
+      probabilities reflect the old 10% base rate, so they underestimate risk. The usual fix is
+      recalibration, often just adjusting the intercept, rather than full retraining. This is why
+      monitoring calibration, not only AUROC, matters (Modules 02 and 03).
+
+  - type: think
+    interview: true
+    prompt: |
+      "A readmission model that performed well for two years suddenly gets worse. How do you
+      investigate?"
+    model_answer: |
+      I'd go from the cheapest, most common causes to the most expensive. First, the pipeline:
+      did a feed break, a field get renamed, a code mapping change, or missingness spike? A lot
+      of "drift" turns out to be a broken join. I'd compare this month's feature distributions
+      and missing rates with the training baseline.
+
+      Second, I'd separate discrimination from calibration. If AUROC holds but calibration is
+      off, that points to a prevalence change and recalibration may be enough. If AUROC dropped,
+      I'd look for covariate shift in specific features and in specific sites or subgroups, like
+      a newly acquired hospital.
+
+      Third, I'd talk to clinicians and operations about what changed in practice: a new
+      discharge program, new follow-up clinics, a coding change. That's concept drift, and it
+      usually means retraining on recent data. I'd also check whether the model's own
+      interventions changed outcomes for flagged patients, because that makes naive
+      re-evaluation misleading. Throughout, I'd keep the model on with extra review or roll back
+      to a previous version, depending on how bad the degradation is.
+    key_points:
+      - Checks data pipeline issues first (feeds, schema, code mappings, missingness)
+      - Separates calibration loss from discrimination loss
+      - Localizes shift by feature, site, and subgroup
+      - Asks clinicians and operations about practice changes (concept drift)
+      - Notes the feedback loop from the model's own interventions, and has a rollback plan
+
+  - type: text
+    title: Three questions for any model
+    text: |
+      When you review a model, yours or someone else's, ask:
+
+      - **Leakage**: _Could the model have known this at prediction time?_ Check every feature's
+        availability time, the split, and the preprocessing. (Module 01, lesson 5, goes deep.)
+      - **Bias**: _Does the label and the data mean the same thing for everyone?_ Check who is
+        excluded, what the label is a proxy for, and how performance varies by subgroup.
+        (Module 02)
+      - **Shift**: _Will tomorrow's data look like training?_ Validate temporally and externally,
+        and monitor inputs, calibration, and outcomes after deployment. (Module 03)
+
+      These three questions also apply to LLM systems in Module 05: a leaked benchmark, a
+      biased evaluation set, and a guideline corpus that went out of date are the same failures
+      in new forms.
+
+  - type: quiz
+    question: |
+      A dermatology model trained mostly on images from one clinic performs poorly on darker
+      skin tones at a new clinic, and images there come from a different camera. Which failure
+      modes are involved?
+    options:
+      - Leakage only
+      - Selection bias in the training data, plus covariate shift from the new population and camera
+      - Label shift only, since disease prevalence differs
+      - Concept drift, since skin disease has changed
+    answer: 1
+    explanation: |
+      The training data under-represented darker skin (selection bias), and the new clinic
+      differs in both the people and the device (covariate shift). Real failures often combine
+      modes, which is why the triage questions are asked together. Nothing here uses future
+      information, so it isn't leakage, and the disease biology hasn't changed (D).
+
+  - type: laptop
+    title: Who does the cohort leave out?
+    repo_path: 01-clinical-data-engineering/sql/01_index_stroke_cohort.sql
+    task: |
+      Write a DuckDB query that finds patients with a qualifying stroke (ED or inpatient, `I63%`)
+      who are **not** in `index_stroke_cohort`. Then compare them with included patients on
+      `sex`, `race_ethnicity`, and `plan_type` (from `coverage`). Which exclusion rule removes
+      the most people, and does it remove some groups more than others? Write two sentences in
+      your notes on what that means for the readmission model's intended population.
+
+  - type: recap
+    points:
+      - "**Leakage**: the model knows something it won't know at prediction time (temporal, target, pipeline)"
+      - Features that capture **clinician suspicion** can be legal and still add little value
+      - "**Bias** enters through selection, measurement, and especially the label"
+      - "Obermeyer 2019: predicting **cost** instead of **need** under-selected sicker Black patients"
+      - Evaluate against the thing you care about, not just the label you trained on
+      - "**Shift**: covariate P(x), label P(y), concept P(y | x). Each needs a different fix"
+      - Label shift breaks calibration before it breaks ranking
+      - "Triage with three questions: could it know this, does it mean the same for everyone, will tomorrow look like training?"

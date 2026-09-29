@@ -1,0 +1,528 @@
+id: m01-04-cohort-design
+title: 'Cohort design: index dates, eligibility, and attrition'
+summary: Define an index event, apply age and continuous-coverage eligibility, use lookback and washout
+  windows, and report every exclusion in an attrition table.
+minutes: 28
+status: authored
+why_it_matters: Cohort definition is where most observational studies and clinical models quietly go
+  wrong, long before any model is trained. It is the core of the repo's Milestone 2, and "walk me
+  through your cohort" is one of the most common questions in health data science interviews.
+objectives:
+  - Define the index date and explain why "first observed" is not "incident"
+  - Apply age and continuous-coverage (enrollment) requirements at the index date
+  - Use washout periods to approximate incident events
+  - Handle interrupted coverage, either with a single-period rule or by stitching periods with allowed gaps
+  - Decide between "first qualifying event, then eligibility" and "first eligible event"
+  - Build an attrition (CONSORT/STROBE-style) table and explain how coverage gaps bias lookback features
+key_points:
+  - The index event is time zero; eligibility is assessed at time zero
+  - Observability requires coverage, because no coverage means no data, not no disease
+  - A washout period reduces prevalent-case contamination but never guarantees incidence
+  - Order of operations matters, so pick the index event first, then apply eligibility
+  - Every exclusion must be counted and justified
+tags: [cohort, study-design, interview]
+steps:
+  - type: text
+    title: Same data, same sentence, two cohorts
+    text: |
+      Two analysts get the same request: _"adults with their first ischemic stroke and a year of
+      insurance coverage before it."_ They run it on the repo's default synthetic database.
+
+      One gets **333** patients. The other gets **345**.
+
+      Neither query has a bug. Both use `I63%`, age 18+, and 365 days of coverage. The only
+      difference is the **order** of two steps. One picks each patient's first stroke and then
+      checks eligibility. The other looks for the first stroke that _passes_ eligibility.
+
+      Those 12 patients are not a rounding error. By the end of this lesson you'll know exactly
+      who they are, and which analyst you'd back in a design review.
+
+  - type: text
+    title: What a cohort definition must pin down
+    text: |
+      A cohort definition is a small protocol. Borrowing the language of trials, it has four parts:
+
+      - **Index event**: the event that defines time zero (here, an acute ischemic stroke encounter).
+      - **Eligibility**: inclusion and exclusion criteria, **assessed at time zero** (age, coverage,
+        no prior stroke).
+      - **Windows**: the lookback for features and washout, and the follow-up for the outcome.
+      - **Accounting**: how many people each rule removes, and why.
+
+      If any of these is left implicit, two people will build two different cohorts from the same
+      sentence, as you just saw. Module 04 returns to this structure in **target trial
+      emulation**, where eligibility, treatment assignment, and time zero must line up.
+
+  - type: code
+    title: The index event in the repo
+    text: "From `sql/01_index_stroke_cohort.sql`:"
+    code: |
+      WITH qualifying_strokes AS (
+          SELECT DISTINCT
+              e.patient_id,
+              e.encounter_id,
+              CAST(e.encounter_start AS DATE) AS index_date
+          FROM encounters e
+          INNER JOIN diagnoses d
+              ON e.encounter_id = d.encounter_id
+             AND e.patient_id = d.patient_id
+          WHERE d.icd10_code LIKE 'I63%'
+            AND e.encounter_type IN ('ED', 'inpatient')
+      ),
+      stroke_candidates AS (
+          SELECT patient_id, encounter_id, index_date,
+                 ROW_NUMBER() OVER (
+                     PARTITION BY patient_id
+                     ORDER BY index_date, encounter_id
+                 ) AS stroke_number
+          FROM qualifying_strokes
+      ),
+      first_stroke AS (
+          SELECT patient_id, encounter_id, index_date
+          FROM stroke_candidates
+          WHERE stroke_number = 1
+      )
+    after: |
+      Two design choices hide here. Only **ED and inpatient** encounters count, because an `I63`
+      code on an outpatient visit is often follow-up or history coding rather than an acute
+      event. And `encounter_id` breaks ties, so a same-day ED visit and admission always resolve
+      the same way. Real phenotypes often also require the code in the principal diagnosis
+      position. The synthetic schema has no position column, so that's a simplification.
+
+  - type: quiz
+    question: |
+      Suppose you delete `DISTINCT` from `qualifying_strokes`. The data contains injected duplicate
+      diagnosis rows. What changes?
+    options:
+      - Some patients appear twice in the final cohort
+      - The final cohort is unchanged, but stroke_number overcounts strokes per patient
+      - Patients with duplicate rows are dropped by ROW_NUMBER
+      - The query fails because ROW_NUMBER needs unique rows
+    answer: 1
+    explanation: |
+      `ROW_NUMBER()` hands out 1, 2, 3 even to identical rows, and only `stroke_number = 1` is
+      kept, so the cohort still has one row per patient. What breaks is anything that relies on
+      `stroke_number` meaning "the patient's Nth stroke". A duplicated diagnosis would make one
+      encounter look like two strokes, which corrupts a recurrence count. `DISTINCT` makes the grain
+      **one row per stroke encounter**, and stating the grain of every CTE is a good habit.
+
+  - type: text
+    title: First observed is not incident
+    text: |
+      The repo selects the **first observed** stroke. That is not the same as the patient's
+      **first** stroke.
+
+      The database begins in 2020. A patient whose first `I63` encounter is in February 2020 may
+      have had a stroke in 2016 at another hospital, or before they joined this insurer. The data
+      is **left-censored**: history before the observation window is invisible.
+
+      This matters because a cohort meant to capture **incident** (new) strokes gets contaminated
+      with **prevalent** or recurrent ones, and those patients can have a different prognosis and
+      different treatment. Every "first event" in a database is really "first event since we
+      started watching".
+
+  - type: text
+    title: Washout, the standard approximation
+    text: |
+      The usual fix is a **washout** (or "clean") period. Require a stretch of **observable** time
+      before the index (often 365 days) with **no** evidence of the condition.
+
+      The key word is observable. Twelve stroke-free months only mean something if the patient
+      was covered for those months, which is why washout and continuous coverage go together.
+
+      In the repo the washout is **implicit**. Taking the first `I63` ever seen and requiring 365
+      days of coverage before it means there was no qualifying stroke encounter in the covered
+      prior year. An explicit washout would also look for outpatient `I63` codes and history
+      codes such as `Z86.73` (personal history of cerebral infarction) or `I69.3-` (sequelae).
+
+      The trade-off: a longer washout gives more confidence that the stroke is incident, but you
+      lose patients and bias toward people with long, stable coverage. No washout **proves**
+      incidence. It only lowers the contamination.
+
+  - type: quiz
+    question: |
+      A patient's first `I63` ED visit in the data is on 2020-02-10. Their coverage started
+      2019-06-01. Is this an incident stroke?
+    options:
+      - Yes, because it's the first I63 code in the database
+      - Yes, because they were covered on the index date
+      - Unknown. There are only about 8 months of observable history, so it fails a 365-day washout
+      - No, because anyone whose stroke is in 2020 must have a prior stroke
+    answer: 2
+    explanation: |
+      "First in the database" only means first since observation began, and here observation
+      began 8 months earlier. You can't tell. A 365-day washout (which the repo enforces through
+      its coverage rule) excludes this patient. Option D overreaches, since many such strokes
+      are truly incident. The problem is that we can't **verify** it.
+
+  - type: text
+    title: Eligibility, and why coverage means observability
+    text: |
+      The repo applies two eligibility rules at the index date:
+
+      - **Age 18+**: `birth_date <= index_date - INTERVAL '18 years'`.
+      - **365 days of continuous coverage** before the index.
+
+      Age is simple. Coverage is the conceptually important rule. In claims data, a month
+      without coverage produces **no records**. A patient with atrial fibrillation who was
+      uninsured last spring looks exactly like a patient without AF. _No data is not no disease._
+
+      So continuous coverage is not bureaucracy. It is how you make sure the lookback window was
+      actually **watched**. (In EHR-only data there's no enrollment table, so teams use proxies
+      such as "at least one visit in each of the prior two years". These are weaker, because an
+      EHR only sees care delivered inside its own system.)
+
+  - type: code
+    title: The eligibility step
+    code: |
+      eligible AS (
+          SELECT s.patient_id, s.encounter_id, s.index_date, p.birth_date
+          FROM first_stroke s
+          INNER JOIN patients p USING (patient_id)
+          WHERE CAST(p.birth_date AS DATE) <= s.index_date - INTERVAL '18 years'
+            AND EXISTS (
+                SELECT 1
+                FROM coverage c
+                WHERE c.patient_id = s.patient_id
+                  AND CAST(c.coverage_start AS DATE) <= s.index_date - INTERVAL '365 days'
+                  AND CAST(c.coverage_end AS DATE) >= s.index_date
+            )
+      )
+    after: |
+      `EXISTS` asks "is there **at least one** coverage row that spans the entire window from
+      index − 365 days to the index date?" It never multiplies rows the way a join to `coverage`
+      would, and it stops at the first match. Note what it demands: a **single** row covering
+      the whole year.
+
+  - type: quiz
+    question: |
+      A patient has two coverage rows. Commercial runs 2019-01-01 to 2021-12-31 and Medicare runs
+      2022-01-01 to 2025-12-31. Their stroke is on 2022-06-01. What does the repo's `EXISTS` do?
+    options:
+      - Includes them, because together the rows cover the whole year
+      - Excludes them, because no single row spans index − 365 days to the index
+      - Includes them, because the Medicare row covers the index date
+      - Errors, because EXISTS can't handle two matching rows
+    answer: 1
+    explanation: |
+      Neither row alone starts on or before 2021-06-01 **and** ends on or after 2022-06-01, so
+      the patient is excluded, even though they were never uninsured for a single day. Plan
+      switches like turning 65 and moving to Medicare create exactly this pattern. The repo's
+      generator only creates gaps of 30+ days, so the rule is fine on its own data. On real
+      enrollment files it would wrongly drop people.
+
+  - type: text
+    title: Interrupted coverage, two policies
+    text: |
+      The synthetic data deliberately gives about 12% of patients **two coverage periods with a
+      gap** of 30–180 days. There are two defensible policies:
+
+      **1. Single continuous period (the repo).** Any break in the lookback excludes the
+      patient. This is strict and simple, but as the quiz showed it also drops back-to-back
+      periods with no real gap.
+
+      **2. Stitch periods into "islands" with an allowed gap.** Merge rows whose gap is at most N
+      days (claims studies often use about 30–45), then require one island to span the lookback.
+      This keeps plan switches and short administrative breaks. The tolerated days are still
+      unobserved, so you accept a little missed history in return for a larger, more
+      representative cohort.
+
+      Whichever you choose, **state it and count it**. In the default run, 15 patients are excluded
+      for a gap in their lookback. Because every synthetic gap is at least 30 days, a 30-day
+      allowance rescues none of them.
+
+  - type: code
+    title: Stitching coverage periods (gaps-and-islands)
+    text: The window-function pattern from the previous lesson, applied to coverage.
+    code: |
+      WITH periods AS (
+          SELECT patient_id,
+                 CAST(coverage_start AS DATE) AS s,
+                 CAST(coverage_end AS DATE) AS e,
+                 MAX(CAST(coverage_end AS DATE)) OVER (
+                     PARTITION BY patient_id ORDER BY coverage_start, coverage_end
+                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                 ) AS prev_end
+          FROM coverage
+      ),
+      flagged AS (
+          SELECT *,
+                 CASE WHEN prev_end IS NULL
+                        OR date_diff('day', prev_end, s) - 1 > 30  -- uncovered days
+                      THEN 1 ELSE 0 END AS new_island
+          FROM periods
+      ),
+      numbered AS (
+          SELECT *, SUM(new_island) OVER (
+                     PARTITION BY patient_id ORDER BY s, e ROWS UNBOUNDED PRECEDING
+                 ) AS island
+          FROM flagged
+      )
+      SELECT patient_id, island, MIN(s) AS island_start, MAX(e) AS island_end
+      FROM numbered
+      GROUP BY patient_id, island
+    after: |
+      Then run the same `EXISTS` against these islands instead of raw coverage rows. The running
+      sum of `new_island` gives each merged period its own number.
+
+  - type: quiz
+    question: |
+      Why does the stitching query use `MAX(coverage_end)` over **all** preceding rows instead of
+      `LAG(coverage_end)`?
+    options:
+      - LAG is not supported inside a CASE expression in DuckDB
+      - MAX is faster because it avoids sorting
+      - With overlapping periods, the previous row may end before an earlier, longer period does
+      - LAG would return NULL for every row after the first
+    answer: 2
+    explanation: |
+      Take a long period from 2019 to 2024, then a short one starting and ending inside it in
+      2020, then a period starting in 2023. `LAG` compares the 2023 row with the short 2020 row
+      and sees a false 3-year gap. The running `MAX` remembers that coverage actually ran to
+      2024. Overlapping and nested enrollment rows are common in real payer data.
+
+  - type: image
+    image: m01-04-index-then-eligibility.png
+    caption: |
+      A is included. B's first stroke (2020) has too little covered history, so the repo drops B
+      entirely. A "first eligible stroke" rule would instead choose B's 2022 stroke. C has a gap
+      inside the lookback.
+
+  - type: text
+    title: The subtle one, first stroke then eligibility
+    text: |
+      Now the two analysts from the start. The repo does this:
+
+      1. pick each patient's **first qualifying stroke** (`first_stroke`), then
+      2. apply age and coverage to **that** stroke (`eligible`).
+
+      The alternative is to apply eligibility to **every** stroke and keep the first one that
+      passes. In the default run that gives **345** patients instead of 333. I checked the 12
+      extra patients. **Every one** had an earlier stroke in 2020 that failed the lookback
+      requirement, and a later stroke (up to 5 years later) that passed.
+
+      So for all 12, the "index" stroke under the alternative rule is **a recurrent stroke with
+      a previous stroke visible in the data**. In a cohort that claims to be _first_ strokes,
+      that is prevalent-case contamination, which is exactly what the washout was meant to
+      prevent.
+
+  - type: text
+    title: So which is right?
+    text: |
+      For a question about **first (incident) stroke**, the repo's order is right. It follows a
+      principle from trial design: _time zero is defined by the event, and eligibility is judged
+      at that moment_. You don't search a patient's timeline for a moment that happens to qualify.
+      Searching like that lets the data choose each person's time zero, which biases selection
+      in ways that are hard to see.
+
+      But "right" depends on the question. If the hospital wants the readmission model to score
+      **every** stroke admission, including repeat strokes, then the population is **stroke
+      admissions**, not first strokes. You'd take all qualifying admissions, check eligibility for
+      each one, add "prior stroke" as a feature, and split by patient so one person's admissions
+      don't end up in both train and test.
+
+      What's never right is letting the SQL decide the population by accident. Write the choice
+      down and count what it excludes.
+
+  - type: quiz
+    question: |
+      The deployment goal is: "score every ischemic stroke admission for 30-day readmission risk."
+      Which cohort design matches it best?
+    options:
+      - The repo as written, with the first qualifying stroke per patient
+      - The first eligible stroke per patient
+      - All eligible stroke admissions, a prior-stroke feature, and patient-grouped splits
+      - One randomly chosen stroke admission per patient
+    answer: 2
+    explanation: |
+      Your training population should look like the population you'll score in deployment. Repeat
+      strokes will be scored in production, so they belong in training, with a feature that
+      tells the model this is a recurrence. Grouped splits stop the same patient from leaking
+      across train and test. Options A and B both drop recurrent admissions (B just does it less
+      consistently), and random selection throws away data for no gain.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how you would define a cohort of patients with an incident ischemic stroke
+      in a claims database."
+    model_answer: |
+      I'd start with the index event. That's an acute-care encounter, ED or inpatient, with an
+      I63 code, ideally in the principal position. Time zero is the admission date. Then
+      eligibility at time zero: adults, with at least 12 months of continuous enrollment before
+      the index so the lookback is actually observable. I'd stitch enrollment periods and allow
+      a short gap, around 30 days, so plan switches don't knock people out. To approximate
+      incidence I'd apply a washout. That means no stroke codes in any setting, and no history
+      or sequelae codes like Z86.73 or I69, during those 12 months. I'd pick the first qualifying
+      event and then apply eligibility, not search for the first eligible one, because the second
+      approach lets recurrent strokes in. I'd report an attrition table for every step and run
+      sensitivity analyses with different washout lengths and gap allowances. Where possible, I'd
+      check the code algorithm's positive predictive value against chart review or published
+      validation studies.
+    key_points:
+      - Index event defined with an acute setting and I63 codes, and time zero stated explicitly
+      - Continuous enrollment in the lookback for observability, with a policy for gaps
+      - A washout for prior stroke evidence, and an acknowledgement that it approximates incidence
+      - Selects the index event first and then applies eligibility, with the reason
+      - An attrition table plus sensitivity analyses or phenotype validation
+
+  - type: text
+    title: Attrition tables
+    text: |
+      An **attrition table** lists every step of the cohort build with the number of patients
+      remaining and the number removed, and why. Drawn as boxes, it's the familiar flow diagram
+      from trial reports (CONSORT). Observational guidelines ask for the same thing. STROBE, and
+      its RECORD extension for routinely collected data, want numbers at each stage.
+
+      It does three jobs:
+
+      - **Transparency**: reviewers can see who you lost and judge generalizability.
+      - **Debugging**: a step that suddenly removes 40% instead of 15% is usually a bug or an
+        upstream data change. (The data-quality lesson builds tests on exactly this.)
+      - **Reproducibility**: another team can match your numbers step by step.
+
+      Exclusion counts depend on the order steps are applied, so apply and report them
+      **sequentially**, in a fixed order.
+
+  - type: image
+    image: m01-04-attrition-funnel.png
+    caption: |
+      The repo's cohort on the default synthetic run. Coverage is the only rule that bites. Of
+      the 67 coverage exclusions, most are people enrolled less than a year before their stroke.
+
+  - type: code
+    title: Computing the attrition counts
+    text: Flag each rule once per patient, then count cumulatively. Here `first_stroke` is the CTE from the cohort query.
+    code: |
+      WITH flags AS (
+          SELECT
+              s.patient_id,
+              CAST(p.birth_date AS DATE) <= s.index_date - INTERVAL '18 years' AS adult,
+              EXISTS (
+                  SELECT 1 FROM coverage c
+                  WHERE c.patient_id = s.patient_id
+                    AND CAST(c.coverage_start AS DATE) <= s.index_date - INTERVAL '365 days'
+                    AND CAST(c.coverage_end AS DATE) >= s.index_date
+              ) AS covered_365d
+          FROM first_stroke s
+          JOIN patients p USING (patient_id)
+      )
+      SELECT
+          (SELECT COUNT(*) FROM patients)                  AS n_patients,
+          COUNT(*)                                         AS n_first_stroke,
+          COUNT(*) FILTER (WHERE adult)                    AS n_adult,
+          COUNT(*) FILTER (WHERE adult AND covered_365d)   AS n_final
+      FROM flags
+    after: |
+      Flags are better than chains of filtered CTEs because you can also cross-tabulate them.
+      For example, you can check how many people failed **both** rules. The last number should
+      equal `SELECT COUNT(*) FROM index_stroke_cohort`, and a test should enforce that.
+
+  - type: quiz
+    question: |
+      A colleague says: "If we apply the coverage rule before the age rule, the final cohort
+      stays the same, and only the per-step exclusion counts change." When is that **false**?
+    options:
+      - When a step selects an event, like "first eligible stroke", rather than just filtering patients
+      - Never. Filters always commute
+      - When the age rule uses an INTERVAL
+      - When the cohort has fewer than 1,000 patients
+    answer: 0
+    explanation: |
+      Pure filters on a fixed index date commute, so the same people survive in any order and only
+      the per-step counts shift. A step that **chooses** the index event is not a filter.
+      Applying eligibility before selecting the event changes which event becomes time zero, and
+      that's the 333 vs 345 difference. That's why "select the index, then filter" has to be
+      written down as a fixed order.
+
+  - type: text
+    title: How coverage gaps bias lookback features
+    text: |
+      Suppose you skipped the coverage rule. A patient uninsured for 4 of the 12 lookback months
+      has a third of their history missing. Their `prior_af`, `prior_hypertension`, and
+      prior-utilization counts are pulled **toward zero**. The model learns that they are
+      healthier than they are.
+
+      The bias is **not random**. Coverage churn is more common in some groups, for example
+      people moving in and out of Medicaid eligibility. So the missing history clusters in
+      patients who may already be higher-risk. That is how a data-coverage problem becomes a
+      fairness problem (Module 02 returns to subgroup performance).
+
+      The fix has its own cost. Requiring continuous coverage **selects** for stably insured
+      people, which limits generalizability. There's no free option, so measure how the excluded
+      group differs and report it.
+
+  - type: text
+    title: Don't forget the other side of time zero
+    text: |
+      The repo checks coverage only **up to** the index date (`coverage_end >= index_date`). The
+      30-day readmission label lives **after** it.
+
+      In claims data, if coverage ends on day 5, a readmission on day 20 never appears, so the
+      label is silently 0. You might be tempted to "require 30 days of coverage after the index".
+      But that conditions eligibility on the **future**, and patients who die early often lose
+      coverage, so you'd quietly exclude the sickest.
+
+      The principled approach is to treat loss of coverage as **censoring**, which is the
+      survival-analysis toolkit of Module 04. The synthetic encounters here don't depend on
+      coverage, so the repo can sidestep this. Real projects can't.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your cohort requires 12 months of continuous enrollment, and that removes 17% of stroke
+      patients. A stakeholder wants to drop the requirement so the model covers everyone. How do
+      you respond?"
+    model_answer: |
+      I'd take the concern seriously, because excluded patients are often exactly the ones we
+      most need to serve. Then I'd explain the trade-off. Without enrollment, missing history
+      looks like absence of disease, so features for those patients are biased toward
+      "healthy", and the bias is concentrated in groups with coverage churn. Rather than argue in
+      the abstract, I'd quantify it. First, compare the excluded group's demographics and
+      outcomes with the included group. Next, relax the rule step by step, with 6 months instead
+      of 12 and stitched periods with a 30- or 45-day allowed gap, and see how much of the 17%
+      comes back. Then check model performance and calibration on the recovered patients. If
+      they matter for deployment, a middle ground is to include them with an explicit
+      "observable months" feature or a separate model, and to monitor them as their own
+      subgroup. The decision and its rationale go in the attrition table and the model
+      documentation.
+    key_points:
+      - Explains that unobserved time makes absent codes look like absent disease, so features are biased
+      - Notes the bias is concentrated in groups with coverage churn (fairness)
+      - Compares excluded and included patients instead of arguing in the abstract
+      - Proposes relaxations such as a shorter lookback, stitched gaps, or an observable-time feature, plus subgroup checks
+      - Documents the decision
+
+  - type: laptop
+    title: Build the attrition table and the stitched-coverage variant
+    repo_path: 01-clinical-data-engineering/sql/01_index_stroke_cohort.sql
+    task: |
+      1. Create `sql/03_attrition.sql` that outputs one row per step (patients, first qualifying
+         stroke, aged 18+, 365-day coverage) with `n_remaining` and `n_excluded`.
+      2. Add a pytest in `tests/test_pipeline.py` asserting that the final attrition count
+         equals `COUNT(*)` of `index_stroke_cohort`.
+      3. Implement the stitched-islands version of the coverage rule with a 30-day gap. Then try
+         a 60-day gap and compare the cohort sizes. Write down which patients came back and why.
+      4. Stretch: build the "first eligible stroke" variant and confirm the extra patients all
+         have an earlier stroke on record.
+
+  - type: text
+    title: Next, what may be known at time zero
+    text: |
+      You now have a time zero you can defend. It comes from an explicit index event, eligibility
+      judged at that moment, an observable lookback, and every exclusion counted.
+
+      The next lesson asks the obvious follow-up question: **which information is allowed to
+      exist at time zero?** That's temporal leakage. It covers lookback versus outcome windows,
+      recorded time versus event time, and the index-day problem. Everything there assumes the
+      index date you just learned to build.
+
+  - type: recap
+    points:
+      - The **index event** defines time zero, and eligibility is judged at that moment
+      - "**First observed** is not **incident**. Data is left-censored, so use a washout to approximate incidence"
+      - Continuous coverage makes the lookback **observable**, because no data is not no disease
+      - The repo's single-period `EXISTS` drops patients with any gap, and also patients with back-to-back plan switches. Stitching islands with an allowed gap is the alternative
+      - Pick the **first qualifying event, then apply eligibility**. "First eligible" lets recurrent strokes in (333 vs 345)
+      - Match the cohort to the deployment population, and write the choice down
+      - Report an **attrition table** in a fixed order, and test that it reconciles with the final cohort
+      - Coverage gaps bias lookback features toward "healthy", unevenly across groups

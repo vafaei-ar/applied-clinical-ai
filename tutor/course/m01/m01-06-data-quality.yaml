@@ -1,0 +1,497 @@
+id: m01-06-data-quality
+title: Data quality, validation, and tests
+summary: Duplicates, orphans, late timestamps, and implausible values, and how to turn every check into
+  an automated test (SQL assertions, pytest, dbt) that fails loudly.
+minutes: 27
+status: authored
+why_it_matters: Teams trust engineers whose pipelines fail loudly instead of silently producing a
+  wrong cohort. Quality checks are also how you prove a cohort is correct, which is what reviewers,
+  regulators, and interviewers will ask you to do.
+objectives:
+  - Classify issues by dimension (uniqueness, completeness, validity, consistency, timeliness)
+  - Tell clinical duplicates apart from technical-key duplicates, and deduplicate deliberately
+  - Write SQL assertions that return zero rows when healthy, and run them as pytest data tests
+  - Use dbt tests (unique, not_null, relationships, accepted_values) and know when to warn or fail
+  - Add expected-count regression tests and explain what a data contract is
+key_points:
+  - A test is a query for bad rows, so it returns zero rows when the data is healthy
+  - A unique technical key says nothing about clinical duplicates
+  - Separate hard assertions (must be zero) from monitors with thresholds
+  - Expected-count regression tests catch silent upstream changes that no row-level test sees
+  - Data contracts make schema and semantics an explicit agreement between producers and consumers
+tags: [quality, testing, dbt, interview]
+steps:
+  - type: text
+    title: Nothing failed
+    text: |
+      Monday morning. The nightly job that builds the stroke cohort finished green, as it has for
+      months. The dashboard now shows **29% fewer** stroke patients than on Friday.
+
+      After two days of digging, someone finds the cause. Over the weekend the source system
+      started sending `encounter_type = 'Emergency'` instead of `'ED'`. The cohort SQL says
+      `encounter_type IN ('ED', 'inpatient')`, so every ED-only stroke quietly fell out. Every
+      query ran, and every step "succeeded".
+
+      A pipeline that can't fail can't be trusted. This lesson is about making the pipeline fail
+      **loudly, early, and close to the cause**.
+
+  - type: text
+    title: Five dimensions of quality
+    text: |
+      A shared vocabulary makes issues easier to triage. With repo examples:
+
+      - **Uniqueness**: one row per entity at the stated grain. The injected duplicate diagnosis
+        rows violate it.
+      - **Completeness**: required values are present. Missing `encounter_end` and missing lab
+        `result_value` violate it.
+      - **Validity**: values in allowed sets and ranges. `'Emergency'`, a negative LDL, or a
+        birth date in the future.
+      - **Consistency**: facts agree across columns and tables. An orphan diagnosis with no
+        encounter, `encounter_end < encounter_start`, or two definitions of age that disagree.
+      - **Timeliness**: data arrives and is timestamped when expected. A stale feed, or a
+        diagnosis dated 30 days after its encounter.
+
+      **Accuracy** (does the record match reality?) is the one you can't check in SQL alone. It
+      needs an external reference such as chart review.
+
+  - type: quiz
+    question: |
+      The repo's check #5 finds diagnosis rows whose `encounter_id` doesn't exist in
+      `encounters`. Which dimension is that?
+    options:
+      - Uniqueness
+      - Completeness
+      - Timeliness
+      - Consistency (referential integrity)
+    answer: 3
+    explanation: |
+      The `encounter_id` value is present, so it isn't a completeness problem. But it points at
+      nothing, so two tables disagree. That's referential integrity, a kind of consistency.
+      Completeness would be an `encounter_id` that is NULL. The distinction matters for the fix:
+      an orphan usually means a load-order or filtering bug upstream, not missing data entry.
+
+  - type: text
+    title: Technical keys vs clinical duplicates
+    text: |
+      Every diagnosis row has a `diagnosis_id`, and it is always unique. A uniqueness test on it
+      will **always pass**. It's generated per row, so it can't detect a repeated fact.
+
+      The generator deliberately copies about 0.5% of diagnosis rows under **new IDs**. The same
+      patient, encounter, date, and ICD-10 code appear twice. A **clinical duplicate** is defined
+      by the columns that carry meaning, not by the surrogate key.
+
+      So always ask: _what is the grain of this table?_ For diagnoses, the grain is "one code per
+      encounter per date". The test must be on that grain. That's why Exercise 01 asks why the
+      technical row ID shouldn't define a duplicate.
+
+  - type: code
+    title: The repo's clinical-duplicate check
+    text: "From `sql/00_quality_checks.sql`:"
+    code: |
+      SELECT COUNT(*) AS duplicate_groups
+      FROM (
+          SELECT patient_id, encounter_id, diagnosis_date, icd10_code, diagnosis_name,
+                 COUNT(*) AS n
+          FROM diagnoses
+          GROUP BY 1, 2, 3, 4, 5
+          HAVING COUNT(*) > 1
+      )
+    after: |
+      `diagnosis_id` is deliberately left out of the `GROUP BY`. Note that SQL's `GROUP BY` treats
+      NULLs as equal, so two rows with a NULL date form one group. The repo's pandas test matches
+      this with `groupby(..., dropna=False)`. If you forget `dropna=False`, pandas silently drops
+      those rows.
+
+  - type: quiz
+    question: |
+      `patients.patient_id` holds the values `A, A, B, NULL, NULL`. What does the repo's check
+      `COUNT(*) - COUNT(DISTINCT patient_id)` return?
+    options:
+      - "1"
+      - "2"
+      - "3"
+      - "0"
+    answer: 2
+    explanation: |
+      `COUNT(*)` counts all 5 rows. `COUNT(DISTINCT ...)` ignores NULLs, so it counts 2 (A and
+      B). The result is 3: one real duplicate plus two NULLs. That is a sensible alarm for a
+      primary key, but it mixes two different problems. A cleaner suite has a separate `not_null`
+      test and `unique` test, which is exactly how dbt splits them.
+
+  - type: text
+    title: Deduplicate on purpose
+    text: |
+      When you find clinical duplicates, don't just `DISTINCT` them away wherever they show up.
+      Decide once, in a **staging** layer, and record the decision:
+
+      - Are they **true duplicates** (a double load, a retransmitted message), or **legitimate
+        repeats** (the same code on two claim lines)? Check with the data owner.
+      - Which row survives? Pick a deterministic rule, such as the lowest ID or the latest load.
+      - Count the rows before and after, and alert if the duplicate rate jumps.
+
+      Why bother, when `prior_af` uses `MAX(...)` and is immune? Because **count** features are
+      not immune. "Number of diagnoses in the prior year" or claims totals double-count. Neither
+      is `stroke_number`, as you saw in the cohort lesson.
+
+  - type: code
+    title: A staging dedup in DuckDB
+    code: |
+      CREATE OR REPLACE TABLE stg_diagnoses AS
+      SELECT *
+      FROM diagnoses
+      QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY patient_id, encounter_id, diagnosis_date, icd10_code
+          ORDER BY diagnosis_id
+      ) = 1;
+    after: |
+      `QUALIFY` filters on a window function without a subquery. DuckDB, Snowflake, BigQuery,
+      and Databricks SQL support it, but PostgreSQL does not. Everything downstream then reads
+      `stg_diagnoses`, never the raw table.
+
+  - type: text
+    title: Late timestamps, two meanings
+    text: |
+      "Timeliness" covers two different problems:
+
+      - **Late arrival**: the feed itself is stale. Last night's encounters haven't landed, so
+        today's cohort is missing people. You catch this with **freshness** checks on the max load
+        timestamp.
+      - **Implausible event times**: the repo's check #4 flags diagnoses dated more than 14 days
+        after their encounter started. The generator injects some that are shifted by 30 days.
+
+      The 14-day threshold is a judgment call. An inpatient stay can last longer than 14 days, so
+      a diagnosis coded at discharge on day 20 is legitimate. A sharper check compares against
+      `encounter_end` when it exists, and falls back to a threshold only when it's missing.
+
+      As the leakage lesson showed, these timestamps decide whether a feature was knowable at
+      time zero. They aren't cosmetic.
+
+  - type: text
+    title: Referential integrity is your job
+    text: |
+      In an OLTP database, a foreign key constraint would reject an orphan diagnosis at insert
+      time. In analytics, you usually don't get that protection. The repo loads tables with
+      `CREATE TABLE ... AS SELECT`, so there are no constraints at all. Many cloud warehouses let
+      you declare foreign keys but don't enforce them.
+
+      So orphan checks are anti-joins you run yourself, like the repo's check #5:
+
+      ```
+      SELECT COUNT(*) FROM diagnoses d
+      LEFT JOIN encounters e USING (encounter_id)
+      WHERE e.encounter_id IS NULL
+      ```
+
+      Orphans matter clinically. A diagnosis without an encounter has no setting (ED? outpatient?)
+      and no reliable date anchor, so any rule that joins through encounters silently drops it.
+
+  - type: quiz
+    question: |
+      A colleague rewrites the orphan check with `NOT IN`. The `encounters` table contains one row
+      with a NULL `encounter_id`. What does this return?
+    code: |
+      SELECT COUNT(*) AS orphan_diagnoses
+      FROM diagnoses
+      WHERE encounter_id NOT IN (SELECT encounter_id FROM encounters);
+    language: sql
+    options:
+      - The correct number of orphans
+      - The correct number, plus diagnoses with a NULL encounter_id
+      - 0, whatever the data
+      - An error, because the subquery contains NULL
+    answer: 2
+    explanation: |
+      `x NOT IN (..., NULL)` is never TRUE. It evaluates to NULL for every non-matching row, and
+      `WHERE` drops NULLs. So the test always passes, which is the worst kind of test. Use `LEFT
+      JOIN ... IS NULL` or `NOT EXISTS`, which don't have this trap. A check that can't fail
+      needs a test of its own: run it on data where you **planted** an orphan.
+
+  - type: text
+    title: Tests return zero rows when healthy
+    text: |
+      The most useful convention in data testing is this: **a test is a query that selects the
+      bad rows**. Zero rows means pass. Any rows means fail, and those rows are your debugging
+      output.
+
+      That's better than returning a count or a boolean. The failure message shows _which_
+      patients broke the rule, and every test has the same shape, so a runner can execute
+      hundreds of them. dbt's singular tests work exactly this way.
+
+      Note that the repo's `00_quality_checks.sql` returns **counts**, and several are expected to
+      be **non-zero** because the issues are injected on purpose. That's the difference between
+      two kinds of check:
+
+      - **Assertions**: must be zero. Examples are one row per patient in the cohort and no
+        underage patients. Fail the build.
+      - **Monitors**: expected to be small. Examples are the duplicate rate and late diagnoses.
+        Warn above a threshold, and fail above a larger one.
+
+  - type: image
+    image: m01-06-checks-pipeline.png
+    caption: |
+      Put each check at the earliest layer where it can be seen. A renamed value is cheapest to
+      catch at staging with an accepted-values test. Otherwise it only shows up later as a
+      smaller cohort.
+
+  - type: text
+    title: What the repo's tests actually do
+    text: |
+      Read `tests/` and you'll find two different kinds of test.
+
+      `test_generator.py` asserts that **the mess exists**. It checks that there are duplicate
+      diagnosis groups, that some `encounter_end` values are missing, and that there are more
+      coverage rows than patients. That tests the generator's promise to downstream exercises: a
+      data-quality lesson on clean data would be useless.
+
+      `test_pipeline.py` runs the pipeline end to end in a temp directory. It generates 700
+      patients with seed 21, loads DuckDB, and builds the cohort. Then it asserts **invariants**:
+      the cohort is non-empty, has no duplicate patients, no one under 18, and every patient
+      has qualifying coverage.
+
+      The coverage assertion re-runs **the same `EXISTS` predicate** as the cohort SQL. That's
+      worth pausing on.
+
+  - type: quiz
+    question: |
+      The test's coverage check copies the cohort SQL's own `EXISTS` condition. Which bug can it
+      **not** catch?
+    options:
+      - Someone deletes the EXISTS clause from the cohort SQL
+      - Someone changes 365 to 36 in the cohort SQL
+      - A patient appears twice in the cohort
+      - The rule itself is wrong. For example, back-to-back plan switches are wrongly excluded
+    answer: 3
+    explanation: |
+      A test that restates the implementation only checks that the code still matches itself. It
+      catches regressions like a deleted clause or a changed constant, but it shares every
+      mistake in the definition. To test the definition, use a **hand-built fixture** with a known
+      answer. That would be a tiny patient with two adjacent coverage rows that a human says
+      should be included.
+
+  - type: code
+    title: A zero-row test suite in pytest
+    language: python
+    code: |
+      import duckdb
+      import pytest
+
+      ZERO_ROW_CHECKS = {
+          "cohort_one_row_per_patient": """
+              SELECT patient_id FROM index_stroke_cohort
+              GROUP BY patient_id HAVING COUNT(*) > 1""",
+          "no_orphan_diagnoses": """
+              SELECT d.diagnosis_id FROM diagnoses d
+              LEFT JOIN encounters e USING (encounter_id)
+              WHERE e.encounter_id IS NULL""",
+          "encounter_end_after_start": """
+              SELECT encounter_id FROM encounters
+              WHERE encounter_end < encounter_start""",
+      }
+
+      @pytest.mark.parametrize("name", sorted(ZERO_ROW_CHECKS))
+      def test_zero_rows(con: duckdb.DuckDBPyConnection, name: str) -> None:
+          bad = con.execute(ZERO_ROW_CHECKS[name]).fetchall()
+          assert not bad, f"{name}: {len(bad)} failing rows, e.g. {bad[:5]}"
+    after: |
+      `con` is a session-scoped fixture (defined in `conftest.py`) that generates, loads, and
+      builds the database **once** with `tmp_path_factory`, instead of once per test. Adding a
+      check is now one dictionary entry, and each check reports separately.
+
+  - type: quiz
+    question: |
+      The cohort SQL filters with `birth_date <= index_date - INTERVAL '18 years'` and then
+      reports `age_at_index` as `FLOOR(days_between / 365.25)`. A patient is born 2002-01-01 and
+      has a stroke on 2020-01-01 (6,574 days later). What happens?
+    options:
+      - They are excluded as under 18
+      - They are included with age_at_index = 18
+      - They are included with age_at_index = 17, so the test "age_at_index < 18" fails
+      - The query errors on the leap-year boundary
+    answer: 2
+    explanation: |
+      It's their 18th birthday, so the calendar filter lets them in. But only four leap days fall
+      in those 18 years, so 6,574 / 365.25 = 17.998, which floors to **17**. Two definitions of
+      the same concept disagree, which is a consistency bug. The default data happens to contain
+      no such patient, so the test passes by luck. Fix it by computing age once, correctly (for
+      example, a year difference minus 1 if the birthday hasn't happened yet), and filtering on
+      that. Then add a boundary fixture.
+
+  - type: text
+    title: Expected-count regression tests
+    text: |
+      Row-level tests would not have caught Monday's disaster. Every remaining row was valid. The
+      signal was the **count**.
+
+      An expected-count regression test pins the size of each attrition step:
+
+      - **Synthetic, seeded data**: the pipeline is deterministic, so assert the **exact**
+        attrition counts from a reviewed run. Store them as a snapshot, and when a change moves
+        them on purpose, update the snapshot in the same pull request.
+      - **Real, changing data**: compare with a baseline, such as the trailing median of recent
+        runs, and alert outside a tolerance (say ±5%). Do this **per attrition step**, so the
+        alert says _which_ rule changed.
+
+      The repo's `assert cohort_rows > 0` is the weakest possible version. It would pass on a
+      cohort of 1.
+
+  - type: image
+    image: m01-06-count-regression.png
+    caption: |
+      Simulated nightly runs. Normal drift stays inside the band. The relabelled encounter type
+      drops the cohort about 29% on one night, and the test fails that same morning rather than
+      two days later.
+
+  - type: text
+    title: dbt tests
+    text: |
+      **dbt** (you'll meet it properly in the next lesson) builds SQL models and ships four
+      built-in generic tests. You declare them in YAML next to the model:
+
+      - `unique`: no duplicate values in a column
+      - `not_null`: no NULLs
+      - `relationships`: every value exists in a column of another model (orphan check)
+      - `accepted_values`: every value is in a listed set
+
+      Each one compiles to a query that **selects failing rows**, which is the zero-rows
+      convention again. You can also write **singular tests**, plain `.sql` files in `tests/`
+      that return bad rows, for rules like "no feature date on or after the index".
+
+      Two production knobs matter. `severity: warn` turns a test into a monitor, and `warn_if` /
+      `error_if` (for example `">100"`) set thresholds. `dbt build` runs each model's tests right
+      after building it and **skips downstream models** when a test fails, so a bad staging
+      table never reaches the cohort.
+
+  - type: code
+    title: Tests on the staging models
+    language: yaml
+    code: |
+      models:
+        - name: stg_encounters
+          columns:
+            - name: encounter_id
+              data_tests: [unique, not_null]
+            - name: encounter_type
+              data_tests:
+                - accepted_values:
+                    values: ['outpatient', 'ED', 'inpatient']
+        - name: stg_diagnoses
+          columns:
+            - name: encounter_id
+              data_tests:
+                - relationships:
+                    to: ref('stg_encounters')
+                    field: encounter_id
+    after: |
+      dbt 1.8 renamed `tests:` to `data_tests:`, and older projects still use `tests:`. Recent
+      versions also accept the test arguments nested under an `arguments:` key, so check the
+      docs for your version.
+
+  - type: quiz
+    question: |
+      Which single test from the YAML above would have failed on Monday morning, with an error
+      pointing at the cause?
+    options:
+      - accepted_values on encounter_type
+      - unique on encounter_id
+      - not_null on encounter_id
+      - relationships from diagnoses to encounters
+    answer: 0
+    explanation: |
+      `'Emergency'` isn't in the accepted set, so the test fails at the staging layer and names
+      the column and the bad value. The other tests pass, because keys are still unique,
+      non-null, and linked. A cohort-count test would also have fired, but one layer later and
+      with a vaguer message. Layered tests give you both the alarm and the diagnosis.
+
+  - type: text
+    title: Data contracts
+    text: |
+      Tests catch a broken promise. A **data contract** writes the promise down. It's an
+      agreement between the team that **produces** a dataset and the teams that **consume** it,
+      and it covers:
+
+      - **Schema**: column names, types, and nullability.
+      - **Semantics**: value sets (`'ED'`, not `'Emergency'`), units, and code systems (ICD-10-CM,
+        which version).
+      - **Guarantees**: freshness (for example, loaded by 6 a.m.) and the expected grain.
+      - **Change process**: owners, versioning, and notice before breaking changes.
+
+      The classic clinical failure is **units**. A lab system switches LDL from mg/dL to mmol/L
+      (1 mmol/L is about 38.7 mg/dL). Every value is still numeric and non-null, so every generic
+      test passes, and the model's LDL feature is now wrong by a factor of 39.
+
+      You can enforce contracts in code. The producer's CI runs contract tests before shipping,
+      and dbt's model contracts (`contract: {enforced: true}`) fail the build if column names or
+      types drift. The ownership and semantics parts need people to agree on them.
+
+  - type: think
+    interview: true
+    prompt: |
+      "You find that 0.5% of diagnosis rows are exact duplicates of another row except for the
+      row ID. What do you do?"
+    model_answer: |
+      First I'd size the impact rather than just delete them. I'd check which downstream
+      features use counts, since flags built with MAX or EXISTS are immune, but counts and cost
+      totals are inflated. Then I'd find out whether they're true duplicates or legitimate
+      repeats. I'd look at load timestamps and source message IDs and ask the data owner. A
+      double load looks different from two claim lines. If they're true duplicates, I'd
+      deduplicate once in the staging layer with a deterministic rule, keyed on the clinical
+      grain (patient, encounter, date, code) and not the surrogate ID, and I'd log before and
+      after counts. I'd add a monitor on the duplicate rate with a warning threshold, because a
+      jump from 0.5% to 5% means something changed upstream. I'd also report it to the producer
+      so it gets fixed at the source and written into the contract.
+    key_points:
+      - Assesses the downstream impact first. Count features are affected, max or exists flags are not
+      - Tells true duplicates from legitimate repeats, using load metadata and the data owner
+      - Deduplicates once in staging, on the clinical grain, with a deterministic rule
+      - Adds an ongoing monitor with thresholds rather than a one-off fix
+      - Raises it with the producer and puts it in the contract
+
+  - type: think
+    interview: true
+    prompt: |
+      "You inherit a cohort pipeline that feeds a production readmission model. How do you make
+      sure it's correct, and that it stays correct?"
+    model_answer: |
+      I'd split it into verification now and protection going forward. To verify now, I'd
+      rebuild the attrition table and reconcile it with the final cohort. Then I'd hand-check a
+      small sample of included and excluded patients against the raw data, including edge cases
+      like coverage gaps, multiple strokes, and index-day events. I'd also write a few tiny
+      fixtures with known answers to test the definition itself, not just the code. To keep it
+      correct, I'd layer tests. At the source I'd add schema and freshness checks and ideally a
+      contract with the producer. At staging, unique, not_null, relationships, and
+      accepted_values. On the cohort, one row per patient, eligibility assertions, and no
+      feature dates on or after the index. On top of that, expected-count tests per attrition
+      step with tolerances. I'd separate hard failures from warning-level monitors so people
+      don't learn to ignore alerts. Everything runs in CI on synthetic data and in production on
+      each run, and a failing test blocks the downstream model refresh.
+    key_points:
+      - Reconciles an attrition table and hand-checks sampled patients and edge cases
+      - Uses known-answer fixtures to test the definition, not only the implementation
+      - Layers tests from source (freshness, contract) through staging to cohort and features
+      - Adds expected-count regression tests per step with tolerances
+      - Separates assertions from monitors, runs tests in CI and production, and blocks downstream on failure
+
+  - type: laptop
+    title: Harden the repo's test suite
+    repo_path: 01-clinical-data-engineering/tests/test_pipeline.py
+    task: |
+      1. Create `tests/conftest.py` with a session-scoped `con` fixture that builds the database
+         once (seed 21, 700 patients).
+      2. Add the parametrized zero-row suite from this lesson. Include a planted-orphan test
+         that proves the orphan check can fail.
+      3. Add an attrition snapshot test. Compute the step counts, store them in
+         `tests/attrition_snapshot.json`, and assert equality.
+      4. Write a known-answer fixture for the age boundary (born 2002-01-01, stroke 2020-01-01),
+         watch the age test fail, and fix `age_at_index` in `sql/01_index_stroke_cohort.sql`.
+
+  - type: recap
+    points:
+      - Name issues by dimension (uniqueness, completeness, validity, consistency, timeliness). Accuracy needs an external reference
+      - A unique **technical key** says nothing about **clinical duplicates**, so test at the clinical grain
+      - Deduplicate once, in staging, with a deterministic rule and before-and-after counts
+      - A test is a query for bad rows, and **zero rows means healthy**
+      - Separate **assertions** (fail the build) from **monitors** (warn above a threshold)
+      - Beware tests that can't fail. `NOT IN` with NULLs, and tests that copy the implementation
+      - "**Expected-count regression tests** per attrition step catch silent upstream changes"
+      - dbt's `unique`, `not_null`, `relationships`, and `accepted_values` compile to failing-row queries
+      - "**Data contracts** cover schema, semantics (units, value sets), freshness, and change process"

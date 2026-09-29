@@ -1,0 +1,406 @@
+id: m03-03-docker-ci
+title: Docker and CI/CD
+summary: Images, layers, cache ordering, a slim multi-stage Dockerfile, and a GitHub Actions pipeline that lints, tests, builds, and pushes.
+minutes: 25
+status: authored
+why_it_matters: Containers and CI are baseline expectations for ML engineers in health systems and pharma.
+  You should be able to explain them clearly without a laptop and spot the security mistakes that leak secrets or PHI.
+objectives:
+  - Explain images, containers, layers, and the build cache
+  - Write a slim, reproducible multi-stage Dockerfile that runs as a non-root user
+  - Keep secrets and data out of images with .dockerignore and build secrets
+  - "Design a CI/CD pipeline: lint, test, build, scan, push, deploy"
+  - Read and write GitHub Actions YAML correctly
+key_points:
+  - Order Dockerfile instructions from least to most frequently changing for cache hits
+  - Multi-stage builds keep compilers and build tools out of the runtime image
+  - Run as a non-root user and pin base images by digest
+  - A deleted file still lives in an earlier layer; never copy secrets into an image
+  - CI on every pull request; build and deploy only from main, tagged by commit SHA
+tags: [docker, ci, security, interview]
+steps:
+  - type: text
+    title: It worked on my machine
+    text: |
+      The API from Lesson 2 runs on your laptop. On the hospital's server, it fails: Python
+      3.10 instead of 3.12, a different OpenBLAS, and nobody knows which scikit-learn the model
+      was trained with.
+
+      A **container image** solves this by packaging the code, the exact dependencies from the
+      lockfile, the model file, and a minimal OS userland into one immutable artifact with a
+      content hash. The artifact you tested in CI is, byte for byte, the one that runs in
+      production.
+
+      For a clinical model this is more than convenience. "The validated model" means code plus
+      libraries plus weights, and an image digest pins all three.
+
+  - type: text
+    title: Images, containers, layers
+    text: |
+      - An **image** is a read-only template: a stack of filesystem **layers** plus metadata
+        (the default command, environment variables, the user to run as).
+      - A **container** is a running instance of an image, with a thin writable layer on top
+        that disappears when the container is removed.
+      - Each `RUN`, `COPY`, and `ADD` in a Dockerfile creates a layer. Layers are content-hashed
+        and shared between images, so ten images based on `python:3.12-slim` store that base
+        only once.
+
+      A container is **not** a virtual machine. It shares the host's kernel and is isolated
+      with Linux namespaces and cgroups. That makes it start in seconds and also means
+      container isolation is weaker than VM isolation, which is one reason to run as non-root.
+
+  - type: text
+    title: The build cache
+    text: |
+      Docker caches each layer. On rebuild, it reuses a cached layer if the instruction and its
+      inputs are unchanged. For `COPY`, the inputs are the checksums of the copied files.
+
+      The crucial rule: **once one layer changes, every layer after it is rebuilt.**
+
+      So the order of instructions decides how fast your builds are. Dependencies change
+      rarely; your source code changes on every commit. Copy the lockfile and install
+      dependencies **first**, then copy the source. Editing `app.py` then reuses the cached
+      dependency layer and the rebuild takes seconds instead of minutes.
+
+  - type: image
+    image: m03-03-layer-cache.png
+    caption: |
+      After editing one line of app.py. Left, the source is copied before installing
+      dependencies, so the edit invalidates the install and everything after it. Right, the
+      lockfile is copied first, so the expensive install layer comes from cache.
+
+  - type: code
+    title: A slim multi-stage Dockerfile
+    language: dockerfile
+    code: |
+      # syntax=docker/dockerfile:1
+      FROM python:3.12-slim@sha256:<digest> AS builder
+      COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /bin/uv
+      WORKDIR /app
+      COPY pyproject.toml uv.lock ./
+      RUN uv sync --locked --no-install-project
+      COPY src/ ./src/
+      RUN uv sync --locked --no-editable
+
+      FROM python:3.12-slim@sha256:<digest>
+      RUN useradd --create-home --uid 10001 app
+      WORKDIR /app
+      COPY --from=builder /app/.venv /app/.venv
+      COPY models/readmit-2026.09.1.joblib ./models/readmit.joblib
+      ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+      USER app
+      EXPOSE 8000
+      CMD ["uvicorn", "readmission_service.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    after: |
+      Stage 1 installs locked dependencies (cached separately from the source), then installs
+      the package itself non-editable into `.venv`. Stage 2 starts clean and copies only the
+      virtual environment and the model. `uv`, caches, and the source tree never reach the
+      runtime image. The `<digest>` placeholder is the base image's `sha256` from your registry;
+      pinning it makes rebuilds reproducible. Update it deliberately (Dependabot or Renovate can
+      open PRs for this) rather than letting a tag change under you.
+
+  - type: quiz
+    question: |
+      In the Dockerfile above, you add a new dependency to `pyproject.toml` and update
+      `uv.lock`. Which steps rebuild?
+    options:
+      - Only the final `COPY --from=builder` step
+      - Nothing; uv detects the change at runtime
+      - Only the second `uv sync`, because it installs the project
+      - The first `uv sync` and everything after it, in both stages
+    answer: 3
+    explanation: |
+      `COPY pyproject.toml uv.lock ./` now has new file checksums, so that layer and every later
+      builder layer rebuild. The runtime stage's `COPY --from=builder` copies a changed `.venv`,
+      so it and the steps after it rebuild too. The `useradd` layer above it stays cached. That
+      is the expected cost when dependencies change; the point of the ordering is that
+      ordinary code edits don't pay it.
+
+  - type: text
+    title: Why each hardening choice matters
+    text: |
+      - **Slim base image**: `python:3.12-slim` is roughly a fifth the size of the full Debian
+        image. Fewer packages means a smaller attack surface and fewer CVEs for the scanner to
+        report. Alpine is smaller still, but its musl libc causes trouble with scientific
+        wheels, so slim Debian is the usual choice for ML.
+      - **Non-root user**: if an attacker exploits your app, they get an unprivileged user
+        rather than root inside the container, which limits what they can do to the container
+        and makes escapes harder. Many platforms (and hospital security reviews) require it.
+      - **Digest pin**: `python:3.12-slim` is a moving tag that gets new builds. A digest is
+        immutable.
+      - **Exec-form CMD** (the JSON array): the server runs as PID 1 and receives `SIGTERM`
+        directly, so it shuts down gracefully on redeploy. In shell form (`CMD uvicorn ...`)
+        the process is wrapped in `/bin/sh -c`, which typically does not forward signals.
+
+  - type: text
+    title: Keep secrets and data out of images
+    text: |
+      Everything that reaches the image can be read by anyone who can pull it. Three rules:
+
+      **1. Control the build context.** `docker build .` sends the whole directory to the
+      builder. A `.dockerignore` keeps out `.git`, `.venv`, `.env`, notebooks, and above all
+      **data**: `*.duckdb`, `*.csv`, `data/`. A synthetic dataset is harmless; a real extract
+      with PHI copied into an image is a reportable incident.
+
+      **2. Layers are forever.** `COPY .env .` followed by `RUN rm .env` leaves the file in the
+      earlier layer, recoverable with `docker save`. `ARG` and `ENV` values show up in
+      `docker history` and image metadata.
+
+      **3. Build-time secrets use BuildKit mounts.** To install from a private package index,
+      use `RUN --mount=type=secret,id=pip_token ...`; the secret is available during that one
+      step and is never written to a layer.
+
+      **Runtime** secrets (database passwords, API keys) are not in the image at all. The
+      platform injects them, ideally via managed identity and Key Vault, which is Lesson 4.
+
+  - type: quiz
+    question: |
+      A Dockerfile contains these lines. Is the storage key in the final image?
+    code: |
+      COPY credentials.json /tmp/credentials.json
+      RUN python fetch_model.py --creds /tmp/credentials.json \
+          && rm /tmp/credentials.json
+    language: dockerfile
+    options:
+      - No, because it's deleted in the same RUN step
+      - Yes, because the COPY layer still contains the file
+      - No, because /tmp is not saved in images
+      - Only if the image is built without BuildKit
+    answer: 1
+    explanation: |
+      The `rm` is in the same `RUN`, but the file arrived through a separate `COPY` layer, and
+      that layer is part of the image forever. Deleting in the same step only helps for files
+      created in that step. Use `RUN --mount=type=secret,id=creds,target=/tmp/credentials.json
+      python fetch_model.py ...` instead, or better, download the model in CI with the CI
+      identity and `COPY` only the model.
+
+  - type: code
+    title: .dockerignore
+    language: text
+    code: |
+      .git
+      .github
+      .venv
+      __pycache__/
+      *.pyc
+      .env
+      *.env
+      notebooks/
+      data/
+      *.duckdb
+      *.csv
+      *.parquet
+      tests/
+    after: |
+      A smaller context also makes builds faster. Excluding `tests/` is a choice: tests run in
+      CI against the installed package, not inside the production image.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our model image is 4 GB and takes 15 minutes to build on every commit. What would you
+      look at?"
+    model_answer: |
+      I'd check three things: what's in the image, the build cache, and the build context. For
+      size, I'd use `docker history` or a tool like dive to see which layers are big. Usual
+      culprits are a full base image instead of slim, compilers and build tools left in the
+      runtime stage, pip caches, training-only dependencies like Jupyter or a full CUDA
+      toolkit that inference doesn't need, and data or checkpoints accidentally copied in. A
+      multi-stage build fixes the tooling, a separate inference dependency set fixes the
+      extras, and `.dockerignore` fixes the context. For speed, I'd reorder so the lockfile and
+      dependency install come before the source copy, and use BuildKit cache mounts and the CI
+      cache backend so dependency layers survive between runs. If the model file is huge, I'd
+      consider pulling it from a registry at startup instead, trading build time against
+      having one immutable artifact. For a clinical service I'd lean toward keeping the model
+      in the image or pinning it by hash, so the deployed artifact stays traceable.
+    key_points:
+      - Inspect layers to find what is large (history or dive)
+      - "Slim base, multi-stage build, no caches, inference-only dependencies"
+      - Check the build context and .dockerignore for data and junk
+      - Reorder for cache hits and use CI layer caching
+      - Discusses the trade-off of baking the model in vs fetching it, with traceability in mind
+
+  - type: text
+    title: CI and CD
+    text: |
+      **Continuous integration (CI)** runs on every pull request: lint, type-check, test. A PR
+      cannot merge unless it's green. This is where Lesson 1's tests earn their keep.
+
+      **Continuous delivery/deployment (CD)** runs on `main` after merge: build the image, scan
+      it, push it to a registry, and deploy it, first to a test environment.
+
+      A typical pipeline for our service:
+
+      - **lint**: `ruff check`, `ruff format --check`
+      - **type**: `mypy src`
+      - **test**: `pytest` (unit, data, behaviour, API tests)
+      - **build**: Docker image tagged with the git commit SHA
+      - **scan**: vulnerability scan of the image (Trivy, Grype, or the cloud's scanner) and
+        fail on critical findings
+      - **push**: to the container registry
+      - **deploy**: to staging automatically; to production with an approval gate
+
+      In a clinical setting, the production step usually has a **human approval** and a link
+      to the validation evidence for that model version. Lesson 6 returns to this.
+
+  - type: code
+    title: GitHub Actions, the CI job
+    language: yaml
+    text: "`.github/workflows/service.yml`, part 1:"
+    code: |
+      name: readmission-service
+      on:
+        pull_request:
+        push:
+          branches: [main]
+
+      permissions:
+        contents: read
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          defaults:
+            run:
+              working-directory: 03-production-ml
+          steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v6
+            - run: uv sync --locked --extra dev
+            - run: uv run ruff check .
+            - run: uv run ruff format --check .
+            - run: uv run mypy src
+            - run: uv run pytest -q
+    after: |
+      `on` lists the triggers. `permissions: contents: read` gives the workflow's token the
+      minimum it needs (least privilege; the default can be broader). `uv sync --locked` fails
+      if `uv.lock` is out of date with `pyproject.toml`, so CI tests exactly the locked
+      environment. Action versions shown were current at writing; for high-assurance
+      pipelines, pin third-party actions to a full commit SHA.
+
+  - type: code
+    title: GitHub Actions, build and push
+    language: yaml
+    text: "Part 2. In the file, indent this under `jobs:`, next to `test:`."
+    code: |
+        build-push:
+          needs: test
+          if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+          runs-on: ubuntu-latest
+          permissions:
+            contents: read
+            id-token: write        # for OIDC login, no stored cloud password
+          steps:
+            - uses: actions/checkout@v4
+            - uses: azure/login@v2
+              with:
+                client-id: ${{ secrets.AZURE_CLIENT_ID }}
+                tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+                subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            - run: az acr login --name readmitacr
+            - uses: docker/setup-buildx-action@v3
+            - uses: docker/build-push-action@v6
+              with:
+                context: 03-production-ml
+                push: true
+                tags: readmitacr.azurecr.io/readmission-service:${{ github.sha }}
+    after: |
+      `needs: test` makes it wait for the test job to succeed. The `if` restricts it to pushes
+      to `main`. OIDC (`id-token: write`) lets GitHub exchange a short-lived token for Azure
+      access through a federated credential, so there's no long-lived cloud secret to leak. The
+      IDs stored as secrets are identifiers, not passwords. A scan step would go between build
+      and push.
+
+  - type: quiz
+    question: |
+      A contributor opens a pull request that changes `app.py`. With the workflow above, what
+      runs?
+    options:
+      - Only `test`; `build-push` is skipped because the event is not a push to main
+      - Both jobs; build-push pushes an image tagged with the PR's commit SHA
+      - Nothing, because `on.pull_request` has no branches listed
+      - Only `build-push`, because `test` runs only on main
+    answer: 0
+    explanation: |
+      `pull_request:` with no filters triggers on PRs to any branch, so `test` runs. The
+      `build-push` job's `if` evaluates to false for a `pull_request` event and is skipped.
+      That's the intended split: every PR is verified, but only reviewed, merged code produces a
+      deployable image. It also matters for security, because PRs from forks should not get
+      credentials to push images.
+
+  - type: text
+    title: Tags, digests, and promotion
+    text: |
+      Never deploy `:latest`. It's a mutable pointer, so "what's running in production?" has no
+      reliable answer and a rollback can't target it.
+
+      - **Tag** each image with the git commit SHA (and optionally a semantic version).
+      - **Deploy by digest** (`readmission-service@sha256:...`), which is immutable.
+      - **Promote, don't rebuild**: the exact image that passed staging is the one deployed to
+        production. Rebuilding for prod reintroduces the "same code, different artifact" risk.
+
+      Combined with the `model_version` returned by the API, you can trace any prediction back
+      to a commit, a lockfile, a model file, and the CI run that tested them.
+
+  - type: quiz
+    question: |
+      Production must be rolled back after a bad release. Which setup makes this fastest and
+      least risky?
+    options:
+      - Rebuild the previous commit and deploy the new image
+      - Re-run the old CI workflow, which will push `:latest` again
+      - Redeploy the previous image by its digest, which is still in the registry
+      - Revert the commit and wait for CI/CD to build and deploy it
+    answer: 2
+    explanation: |
+      The previous image was tested and ran in production; redeploying its digest restores
+      exactly that artifact in minutes. Rebuilding (A) or reverting (D) produces a new
+      artifact: base image layers or unpinned dependencies may differ, and it takes longer.
+      Reverting the code is still good hygiene afterwards, but it's not the rollback.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Design a CI/CD pipeline for a clinical prediction service. What would you do
+      differently from an ordinary web app?"
+    model_answer: |
+      The skeleton is the same: every pull request runs lint, type checks, and tests, and
+      only merged code on main builds an image, tagged with the commit SHA, scanned, pushed,
+      deployed to staging, and promoted to production. The differences come from the model
+      and the patients. The test stage includes data tests and model behaviour tests, such as
+      golden outputs on fixed synthetic patients, so a library upgrade can't silently change
+      scores. CI never touches PHI; fixtures are synthetic. The image pins the base by digest,
+      installs from a lockfile, and contains a specific, versioned model artifact, so the
+      digest identifies code, libraries, and weights together. Credentials come from OIDC
+      federation, not stored secrets, and the workflow token has least privilege. Production
+      deployment has a human approval tied to the validation evidence for that model version,
+      and a model change goes through the same gate as a code change. I'd deploy by digest,
+      promote the same image from staging, and keep the previous digest ready for rollback.
+    key_points:
+      - Standard skeleton of lint, type, and test on PRs, then build, scan, push, and deploy from main
+      - Adds data tests and golden-output behaviour tests, with synthetic fixtures and no PHI in CI
+      - Reproducible image with a digest-pinned base, a lockfile, and a versioned model inside
+      - OIDC instead of stored secrets, least-privilege tokens
+      - Human approval linked to validation evidence, promotion of the same digest, and rollback by digest
+
+  - type: laptop
+    title: Containerize the service and add CI
+    repo_path: 03-production-ml/Dockerfile
+    task: |
+      Write the multi-stage `Dockerfile` and `.dockerignore` above for `03-production-ml/`.
+      Build with `docker build -t readmission-service:dev .`, run with
+      `docker run --rm -p 8000:8000 readmission-service:dev`, and call `/readyz`. Check
+      `docker run --rm readmission-service:dev whoami` prints `app`, and compare
+      `docker image ls` sizes for a single-stage version vs the multi-stage one. Then add
+      `.github/workflows/service.yml` with the test job and confirm it runs on a PR.
+
+  - type: recap
+    points:
+      - An **image** is layered and immutable; a **container** is a running instance with a thin writable layer
+      - Once a layer changes, everything after it rebuilds, so copy lockfiles before source
+      - "**Multi-stage** builds keep build tools out; use slim bases, a non-root user, and digest pins"
+      - Exec-form `CMD` lets the server receive SIGTERM and shut down cleanly
+      - Secrets never go in images; deleted files persist in earlier layers; use BuildKit secret mounts
+      - "`.dockerignore` keeps data (and PHI) out of the build context"
+      - CI on every PR (lint, type, test); build, scan, push, and deploy from main only
+      - Tag by commit SHA, deploy by digest, promote the same image, and roll back by digest

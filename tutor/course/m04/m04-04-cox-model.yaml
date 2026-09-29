@@ -1,0 +1,507 @@
+id: m04-04-cox-model
+title: Cox proportional hazards models
+summary: Hazards and hazard ratios, the Cox model and its partial likelihood, fitting with lifelines,
+  checking and fixing proportional hazards, time-dependent covariates, and the hazards of hazard ratios.
+minutes: 28
+status: authored
+why_it_matters: Hazard ratios are the most reported effect measure in clinical research, and misreading
+  them is one of the most common interview checks. Knowing when a Cox model's assumptions fail, and what
+  to report instead, is what separates a careful analyst from someone who just runs the function.
+objectives:
+  - Define hazard, cumulative hazard, and hazard ratio, and relate them to risk
+  - Interpret an HR correctly and name its common misinterpretations
+  - Explain the partial likelihood and why the baseline hazard can be left unspecified
+  - Fit and read a Cox model in lifelines
+  - Check proportional hazards with Schoenfeld residuals and log(-log) plots
+  - Handle non-PH by stratification, time interactions, or RMST
+  - Use time-dependent covariates to avoid immortal time bias
+  - Explain the built-in selection bias of period-specific hazard ratios
+key_points:
+  - HR is not a risk ratio; the two are close only when events are rare
+  - The baseline hazard is left unspecified; the partial likelihood depends only on the order of event times
+  - PH means a constant HR, which appears as parallel log(-log S) curves and flat scaled Schoenfeld residuals
+  - "Non-PH: stratify, time interactions, RMST"
+  - Exposures that start during follow-up must be time-varying, or immortal time biases the HR toward benefit
+  - Period-specific HRs have built-in selection bias even in RCTs (Hernán, Epidemiology 2010)
+tags: [survival, cox, interview]
+steps:
+  - type: text
+    title: '"A 24% lower risk"'
+    text: |
+      SYN-STROKE reports HR 0.76 for recurrent stroke. The press release says: _"Zetagrel cuts
+      the risk of stroke by 24%."_ A patient reads it as: _"If I take it, my chance of another
+      stroke drops by a quarter."_ A journalist writes: _"Patients stay stroke-free 24% longer."_
+
+      All three statements are, at best, approximations, and the last one is simply wrong. An
+      interviewer who shows you a forest plot is often checking whether you know why.
+
+      This lesson builds the hazard ratio from the ground up, fits the model that produces it,
+      and then looks at when it misleads.
+
+  - type: text
+    title: Hazard vs risk
+    text: |
+      **Risk** (cumulative incidence) is a probability over a period: _P(stroke by 12 months)_ =
+      1 − S(12).
+
+      **Hazard** h(t) is an **instantaneous rate** among those still event-free: roughly the
+      probability of a stroke in the next small interval, given no stroke so far, divided by
+      the interval length. It has units (per month) and can exceed 1.
+
+      They're linked by the **cumulative hazard** H(t), the integral of h up to t:
+
+      `S(t) = exp(−H(t))`   and   `risk(t) = 1 − exp(−H(t))`
+
+      Two consequences: a constant hazard doesn't mean a constant risk per year among the
+      original cohort, and doubling the hazard does **not** double the risk unless risk is
+      small.
+
+  - type: text
+    title: The hazard ratio
+    text: |
+      The **hazard ratio** is h₁(t) / h₀(t), the ratio of instantaneous rates between arms at
+      time t.
+
+      Under **proportional hazards (PH)**, that ratio is the same at every t. Then the survival
+      curves are linked by a power:
+
+      `S₁(t) = S₀(t) ^ HR`
+
+      This makes the HR-to-risk conversion concrete. If 12-month stroke-free probability on
+      aspirin is 0.90, then with HR 0.76 it is 0.90^0.76 = 0.923 on zetagrel. Risk goes from
+      10.0% to 7.7%, a **risk ratio of 0.77**, close to the HR because the event is fairly rare.
+
+  - type: quiz
+    question: |
+      Same HR (0.76), but now in a high-risk population where 3-year risk on control is 60%. Under
+      PH, what's the approximate 3-year **risk ratio**?
+    options:
+      - "About 0.84, closer to 1 than the HR"
+      - "0.76, since the HR and risk ratio are equal under PH"
+      - "About 0.60, further from 1 than the HR"
+      - It can't be computed without the baseline hazard's shape
+    answer: 0
+    explanation: |
+      Treated survival = 0.40^0.76 ≈ 0.50, so risk ≈ 50% vs 60%, a risk ratio of about 0.84.
+      When events are common, the risk ratio is pulled toward 1 because everyone eventually has
+      the event. The HR and RR coincide only as risk tends to 0. You don't need the hazard's
+      shape: under PH, S₁ = S₀^HR at every time.
+
+  - type: text
+    title: What an HR is not
+    text: |
+      For HR = 0.76 with proportional hazards:
+
+      - ✅ "At any point during follow-up, among patients still stroke-free, the rate of stroke
+        on zetagrel is about 24% lower than on aspirin."
+      - ❌ "24% fewer patients have a stroke." That's a risk ratio, and they only approximately
+        match when events are rare.
+      - ❌ "Patients stay stroke-free 24% longer." That's a **time ratio**, from an accelerated
+        failure time model, which is a different quantity.
+      - ❌ "A 24% chance of benefit." An HR isn't a probability of anything for an individual.
+
+      A neat fact: under PH, with no censoring, the probability that a random zetagrel patient
+      has a stroke before a random aspirin patient is HR / (1 + HR) = 0.43. A useful way to
+      explain it is "slightly less than a coin flip", which shows how modest a "24% reduction"
+      is at the individual level.
+
+      Always pair an HR with **absolute** numbers: 7.7% vs 10.0% at 12 months, or about 43
+      patients treated for a year to prevent one stroke.
+
+  - type: quiz
+    question: |
+      A colleague writes: "HR 0.76 means zetagrel delays stroke by 24%." What is the best
+      correction?
+    options:
+      - It's correct, since hazard and time are inversely related
+      - That describes a time ratio from an AFT model; an HR compares instantaneous event rates
+      - It should say "reduces stroke risk by exactly 24%"
+      - HRs can only be interpreted at the median survival time
+    answer: 1
+    explanation: |
+      Delay, or stretching of time, is what accelerated failure time models estimate. A Cox HR
+      is a ratio of rates. The two agree only under a Weibull model, and even then the time
+      ratio equals HR^(−1/shape), not the HR. "Exactly 24% lower risk" confuses the HR with a
+      risk ratio.
+
+  - type: text
+    title: The Cox model
+    text: |
+      The Cox model writes each patient's hazard as a shared baseline times a covariate factor:
+
+      `h(t | x) = h₀(t) · exp(β₁x₁ + β₂x₂ + …)`
+
+      - **h₀(t)**, the baseline hazard, can have **any shape** and is **not estimated** as part
+        of fitting β. That's why the model is called semi-parametric.
+      - **exp(βⱼ)** is the HR for a one-unit increase in xⱼ, holding the others fixed.
+      - The PH assumption is built in: the ratio of two patients' hazards,
+        exp(β·(xᵢ − xⱼ)), doesn't depend on t.
+
+      There's no intercept, because any constant would be absorbed into h₀(t). This is the
+      model behind almost every HR in the medical literature.
+
+  - type: text
+    title: Partial likelihood, intuitively
+    text: |
+      How can you estimate β without knowing h₀(t)? Look only at the moments when events happen.
+
+      At each event time, ask: _given that exactly one patient in the current risk set had a
+      stroke now, what's the probability it was the one who actually did?_
+
+      `exp(xᵢβ) / Σ over j in risk set of exp(xⱼβ)`
+
+      The unknown h₀(t) appears in both the numerator and every denominator term, so it
+      **cancels**. Multiply these probabilities over all event times and you get Cox's
+      **partial likelihood**. Maximize it to estimate β.
+
+      Consequences:
+
+      - Only the **order** of event times matters, not their exact values.
+      - Censored patients count in denominators while they're at risk.
+      - Tied event times need an approximation. lifelines uses **Efron's** method, and some
+        other software defaults to **Breslow's**, which can give slightly different estimates.
+
+  - type: quiz
+    question: |
+      You refit the same Cox model with time in **days** instead of months (every time multiplied
+      by about 30.4). What happens to the coefficients?
+    options:
+      - They're divided by 30.4
+      - They're multiplied by 30.4
+      - They stay the same, because the partial likelihood depends only on the order of times
+      - The model fails because h₀(t) changes
+    answer: 2
+    explanation: |
+      Rescaling time keeps the ordering of events and risk sets, so every partial likelihood
+      term is identical and β doesn't change. The baseline hazard changes units, but it was
+      never part of the β estimate. Parametric rate models, such as Poisson rates per unit
+      time, do depend on time units. That's the source of the tempting wrong answers.
+
+  - type: code
+    title: Fitting SYN-STROKE's Cox model
+    language: python
+    code: |
+      import pandas as pd
+      from lifelines import CoxPHFitter
+
+      df = pd.read_parquet("04-clinical-trials-survival/data/adtte.parquet")
+      cols = ["time_months", "stroke", "zetagrel", "age", "nihss", "prior_stroke"]
+
+      cph = CoxPHFitter()
+      cph.fit(df[cols], duration_col="time_months", event_col="stroke")
+      cph.print_summary(decimals=2)
+
+      # Abridged, illustrative output:
+      #               coef  exp(coef)  exp(coef) lower 95%  exp(coef) upper 95%       p
+      # zetagrel     -0.27       0.76                 0.62                 0.94    0.01
+      # age           0.03       1.03                 1.02                 1.04  <0.005
+      # nihss         0.05       1.05                 1.03                 1.07  <0.005
+      # prior_stroke  0.41       1.51                 1.22                 1.86  <0.005
+    after: |
+      `cph.hazard_ratios_` gives the exp(coef) column as a Series. `zetagrel` is coded 0/1,
+      `age` is in years, and `nihss` is in points.
+
+  - type: quiz
+    question: |
+      From the output above, what's the estimated HR comparing a patient aged 75 with an otherwise
+      identical patient aged 65?
+    language: python
+    options:
+      - "1.03"
+      - "1.30"
+      - "About 1.34 (1.03¹⁰, or exp(10 × 0.03))"
+      - "10.3"
+    answer: 2
+    explanation: |
+      Effects multiply on the hazard scale. Ten one-year increments give exp(10 × 0.03) =
+      exp(0.3) ≈ 1.35, or 1.03¹⁰ ≈ 1.34 from the rounded HR. "1.30" adds 10 × 3% instead of
+      compounding, which is only approximately right. "10.3" multiplies the HR itself by 10.
+
+  - type: text
+    title: Adjusted vs unadjusted HRs in an RCT
+    text: |
+      In a randomized trial, there's no confounding to adjust for. So why put age, NIHSS and
+      prior stroke in the model?
+
+      - **Precision and power.** Adjusting for strongly prognostic, pre-specified baseline
+        covariates removes outcome variation and usually increases power. Regulators encourage
+        adjusting for stratification factors.
+      - **But the HR is non-collapsible.** The adjusted (conditional) HR is typically
+        **further from 1** than the unadjusted (marginal) HR, even with perfect balance and no
+        confounding. It's not bias. The two are different estimands: the effect for a patient
+        with given covariates versus the effect averaged over the population.
+
+      So "adjusted HR 0.72, unadjusted 0.76" isn't evidence of confounding in an RCT. It's
+      also why the summary-measure attribute of the estimand should say which HR you mean.
+
+  - type: text
+    title: Checking proportional hazards
+    text: |
+      Two standard diagnostics:
+
+      **Log(−log) plot.** Under PH, log(−log S₁(t)) = log HR + log(−log S₀(t)). Plot
+      log(−log KM) against log time for each group. The curves should be **parallel**, with a
+      vertical gap of log HR. Converging or crossing curves suggest non-PH. This works for
+      categorical variables such as treatment arm.
+
+      **Scaled Schoenfeld residuals.** At each event, the residual is the failing patient's
+      covariate value minus the risk-weighted average covariate in the risk set. Scaled
+      appropriately and plotted against time, they trace how βⱼ(t) varies. Under PH the
+      smoothed trend is **flat**. The Grambsch–Therneau test checks for a non-zero slope, and
+      works for continuous covariates as well.
+
+  - type: image
+    image: m04-04-loglog.png
+    caption: |
+      Simulated data. Left: the curves are parallel, so the HR is constant and PH holds. Right:
+      the curves cross near 9 months. The treatment arm's hazard starts lower and rises faster,
+      so the HR changes over time and a single Cox HR averages over opposite effects.
+
+  - type: quiz
+    question: |
+      On a log(−log S) plot, the zetagrel and aspirin curves are far apart in the first 3 months
+      and then gradually **converge**, without crossing. What does that suggest?
+    options:
+      - PH holds, because the curves don't cross
+      - Censoring is informative
+      - The drug becomes harmful later
+      - The HR is moving toward 1 over time, so the treatment effect on the hazard is strongest early
+    answer: 3
+    explanation: |
+      The vertical gap is log HR at each time. A shrinking gap means |log HR| is shrinking, so
+      the HR drifts toward 1. PH is violated even without crossing. It doesn't imply late harm,
+      which would need the curves to cross. As the Hernán step explains, a waning HR doesn't
+      even prove the drug's effect wanes.
+
+  - type: code
+    title: PH checks in lifelines
+    language: python
+    code: |
+      # Schoenfeld-residual tests plus advice, with residual plots per covariate
+      cph.check_assumptions(df[cols], p_value_threshold=0.05, show_plots=True)
+
+      # Or just the test table
+      from lifelines.statistics import proportional_hazard_test
+      res = proportional_hazard_test(cph, df[cols], time_transform="rank")
+      res.print_summary(decimals=3)
+    after: |
+      `check_assumptions` prints which covariates fail and suggests fixes (stratifying, adding
+      time interactions, or modelling non-linear terms). Its default threshold is 0.01. With
+      3,000 patients, trivial departures can be "significant", so judge the **size** of the
+      drift in the plots, not only the p-value.
+
+  - type: text
+    title: Fixing non-proportional hazards
+    text: |
+      What to do depends on **which** variable violates PH.
+
+      - **Stratify** on a nuisance variable, such as site or a stratification factor: each
+        stratum gets its own baseline hazard, and β is shared. In lifelines:
+        `cph.fit(..., strata=["site"])`. You lose an HR for that variable, which is fine if
+        you didn't need one.
+      - **Time interaction** for a variable you care about: let its effect change over time,
+        either piecewise (HR for months 0–3 and 3+, by splitting follow-up into episodes) or
+        smoothly (β + γ·log t). Then report time-specific HRs.
+      - **Change the summary measure**: report RMST differences or risk differences at
+        pre-specified times (lesson 3), which don't need PH.
+
+      What not to do: report one Cox HR for treatment when its effect clearly flips, as if it
+      described every patient at every time.
+
+  - type: quiz
+    question: |
+      PH checks show that `site` badly violates PH, and `zetagrel` is fine. What's the most sensible fix?
+    options:
+      - Drop site from the model
+      - Stratify the Cox model by site
+      - Add a zetagrel × time interaction
+      - Switch to logistic regression
+    answer: 1
+    explanation: |
+      Site is a nuisance variable, and a stratification factor in SYN-STROKE's randomization. A
+      separate baseline hazard per site handles its non-PH without an HR you don't need.
+      Dropping it would lose precision and ignore the design. A zetagrel × time term fixes the
+      wrong variable.
+
+  - type: text
+    title: Time-dependent covariates and immortal time
+    text: |
+      Back to Module 01's warning (m01-05). A secondary question for SYN-STROKE: _do patients who
+      start a statin after randomization have fewer recurrent strokes?_
+
+      The wrong model codes `statin_ever = 1` for anyone who started a statin at any point, and
+      uses it as a baseline covariate. A patient who started at month 6 must have been
+      stroke-free until month 6 to count as a statin user. Those 6 months are **immortal
+      time**, credited to the exposed group. The HR is biased **toward benefit**, even for a
+      drug that does nothing.
+
+      The fix is to treat statin use as a **time-dependent covariate**. Split each patient's
+      follow-up into intervals in which covariates are constant (**start–stop** or counting-
+      process format). The patient counts as unexposed from 0 to 6 and exposed from 6 onwards.
+
+  - type: code
+    title: Start-stop format and CoxTimeVaryingFitter
+    language: python
+    code: |
+      from lifelines import CoxTimeVaryingFitter
+
+      # One row per interval with constant covariates (first rows shown):
+      #  id  start  stop  statin  zetagrel  stroke
+      #   1      0     4       0         1       0
+      #   1      4    11       1         1       1
+      #   2      0     9       0         0       0
+      #   3      0     2       0         0       0
+      #   3      2    14       1         0       0
+      long = pd.read_parquet("04-clinical-trials-survival/data/adtte_long.parquet")
+
+      ctv = CoxTimeVaryingFitter()
+      ctv.fit(long, id_col="id", event_col="stroke",
+              start_col="start", stop_col="stop")
+      ctv.print_summary(decimals=2)
+    after: |
+      The event flag is 1 only on the interval in which the stroke happens. `lifelines.utils`
+      has helpers (`to_long_format`, `add_covariate_to_timeline`) to build this table from a
+      wide file plus a table of covariate changes.
+
+  - type: quiz
+    question: |
+      In the table above, patient 1 started a statin at month 4 and had a stroke at month 11. How
+      does the time-varying model use patient 1's months 0–4?
+    options:
+      - As statin-exposed time, since the patient eventually took a statin
+      - They're excluded from the analysis
+      - As unexposed time, which is exactly what removes the immortal time bias
+      - As time at risk for an event that already happened
+    answer: 2
+    explanation: |
+      Before month 4 the patient hadn't started a statin, so that interval contributes to the
+      unexposed risk sets. Crediting it to "statin" is precisely the immortal time error.
+      Excluding it would throw away valid person-time and shift time zero for part of the
+      cohort.
+
+  - type: text
+    title: What time-varying Cox does not fix
+    text: |
+      Time-dependent covariates fix the **time alignment** problem. They don't fix **confounding**.
+
+      Statin start after randomization isn't randomized. Clinicians start statins in patients
+      with high LDL, new carotid disease, or better follow-up, and those factors change over
+      time and may themselves be affected by earlier treatment. That's **time-varying
+      confounding affected by prior treatment**. A standard time-varying Cox model, even with
+      the confounders as time-varying covariates, can be biased in this setting.
+
+      The tools for this are the g-methods (inverse probability weighted marginal structural
+      models, the g-formula), within an explicit target trial emulation. That's lesson 7. For
+      interviews, the one-liner is: _time-varying covariates solve immortal time, and g-methods
+      solve time-varying confounding._
+
+  - type: text
+    title: The hazards of hazard ratios
+    text: |
+      Hernán (Epidemiology, 2010) argued that HRs are hard to interpret causally, **even in a
+      randomized trial**:
+
+      - **Built-in selection bias.** At month 12, the HR compares zetagrel and aspirin patients
+        who are **still stroke-free**. If zetagrel prevents strokes in susceptible patients, the
+        aspirin survivors have been depleted of susceptible people faster. The arms were
+        comparable at randomization but not among survivors. So period-specific HRs don't
+        have a clean causal meaning.
+      - **The average HR depends on follow-up length.** When the HR changes over time, the
+        single Cox HR is a weighted average whose weights depend on when events happen. A
+        longer trial gives a different "HR", even for the same drug.
+
+      His recommendation is to report **survival curves** or cumulative risks over time
+      (adjusted if necessary) and effects on the **absolute** scale, such as risk differences at
+      clinically relevant times. He illustrated the argument with hormone therapy and coronary
+      heart disease in the Women's Health Initiative trial.
+
+  - type: quiz
+    question: |
+      In SYN-STROKE, the HR is 0.55 for months 0–3 and 0.95 afterwards. A clinician concludes
+      "zetagrel stops working after 3 months, so stop it then." What's the best response?
+    options:
+      - The later HR compares selected survivors, so it can't by itself show that the effect wanes; a trial of stopping vs continuing at 3 months would answer that
+      - Correct; the later HR near 1 proves the drug no longer works
+      - The HRs should be averaged to 0.75, which is the true effect
+      - Period-specific HRs are always biased away from the null
+    answer: 0
+    explanation: |
+      After 3 months, the aspirin survivors are depleted of high-risk patients faster than the
+      zetagrel survivors, so the later HR can be close to 1 even if the drug still helps.
+      Waning is plausible, and in real dual antiplatelet trials the benefit concentrates early
+      while bleeding continues. But the causal question "stop or continue at 3 months?" needs a
+      comparison of those two strategies, not an interpretation of period-specific HRs.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A trial reports a hazard ratio of 0.76 for recurrent stroke. Explain what that means, and
+      what you'd want to see alongside it."
+    model_answer: |
+      It means that, at any time during follow-up, among patients who haven't yet had a stroke,
+      the instantaneous stroke rate on treatment is about 24% lower than on control, assuming
+      proportional hazards. It's not "24% fewer strokes". That would be a risk ratio, which is
+      close to the HR only when events are rare. It's not "24% longer stroke-free", which would
+      be a time ratio. Alongside it I'd want the absolute numbers: 12-month risk in each arm
+      from KM curves, the risk difference, and the number needed to treat. At 10% vs 7.7%
+      that's about 43 patients for a year. I'd check the PH diagnostics, because if the effect
+      is concentrated early the single HR hides that, and I'd want RMST or time-specific risks.
+      I'd also want the harm side in the same terms, since for an antiplatelet the decision
+      depends on strokes prevented versus major bleeds caused. And I'd note that the HR is
+      conditional on covariates if adjusted, and that later-period HRs compare selected
+      survivors, following Hernán's point.
+    key_points:
+      - Defines the HR as a ratio of instantaneous rates among those still event-free, under PH
+      - Distinguishes it from a risk ratio and a time ratio
+      - Asks for absolute risks, the risk difference, and NNT
+      - Checks proportional hazards and suggests RMST or time-specific effects
+      - Weighs benefit against harm (bleeding) on the same scale
+
+  - type: think
+    interview: true
+    prompt: |
+      "You fit a Cox model and `check_assumptions` flags the treatment variable for violating
+      proportional hazards. Walk me through what you do next."
+    model_answer: |
+      First I'd look at the size and shape of the violation, not just the p-value. With
+      thousands of patients, tiny departures are significant. I'd plot the scaled Schoenfeld
+      residuals for treatment over time and the log(-log) KM curves by arm. If the effect is
+      roughly constant with slight drift, the Cox HR is still a reasonable average summary, and
+      I'd say so. If the effect clearly changes, for example strong early and fading, or
+      crossing, I'd stop presenting one HR as the answer. For the primary question I'd use a
+      summary that doesn't need PH: RMST difference at a pre-specified horizon, or risk
+      differences at clinically relevant times with CIs. To describe the pattern, I'd fit a
+      time-varying effect, either piecewise HRs by splitting follow-up at a clinically
+      motivated point or a treatment × log(time) interaction. I'd be careful interpreting
+      later-period HRs because of survivor selection. If the violator were a nuisance covariate
+      like site, I'd simply stratify on it. Whatever I do, I'd flag whether it was
+      pre-specified, since switching summaries after seeing the data is a multiplicity problem.
+    key_points:
+      - Judges the magnitude of the violation with residual and log(-log) plots, not only the test
+      - Uses RMST or fixed-time risk differences when the effect changes over time
+      - Describes the pattern with piecewise or time-interaction HRs
+      - Stratifies when the violator is a nuisance covariate
+      - Flags pre-specification and caution with period-specific HRs
+
+  - type: laptop
+    title: Cox model, PH checks, and a time-varying statin
+    repo_path: 04-clinical-trials-survival/src/cox_analysis.py
+    task: |
+      Create `04-clinical-trials-survival/src/cox_analysis.py`. Using `data/adtte.parquet` from
+      lesson 3: (1) fit an unadjusted and an adjusted `CoxPHFitter` and compare the zetagrel HRs
+      (non-collapsibility in action); (2) run `check_assumptions` and draw log(−log) KM curves by
+      arm. Then simulate statin start times that have **no** effect on stroke, and fit (3) a
+      naive model with a baseline `statin_ever` flag and (4) a `CoxTimeVaryingFitter` on
+      start–stop data. Confirm that the naive model shows spurious "protection" and the
+      time-varying model doesn't.
+
+  - type: recap
+    points:
+      - "Hazard = instantaneous rate among the event-free; risk = 1 − exp(−cumulative hazard)"
+      - Under PH, S₁ = S₀^HR. The HR approximates the risk ratio only when events are rare, and it is never a time ratio
+      - "Cox: h₀(t) is unspecified; the partial likelihood uses only the order of events, and ties use Efron in lifelines"
+      - Adjusted and unadjusted HRs differ in RCTs because the HR is non-collapsible, not because of confounding
+      - Check PH with log(−log) plots and scaled Schoenfeld residuals, and judge the size of any violation
+      - "Non-PH fixes: **stratify** nuisance variables, **time interactions** for effects of interest, **RMST** or fixed-time risks"
+      - Exposures that start during follow-up must be time-varying, or immortal time biases toward benefit
+      - Period-specific HRs have built-in selection bias (Hernán 2010), so report curves and absolute effects

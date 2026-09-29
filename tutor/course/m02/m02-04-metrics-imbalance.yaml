@@ -1,0 +1,422 @@
+id: m02-04-metrics-imbalance
+title: "Metrics that matter: AUROC, AUPRC, thresholds, and imbalance"
+summary: The confusion matrix at a threshold, why AUROC hides low-prevalence pain, thresholds set by alert
+  budget, NNE, class weighting vs resampling, and decision curve analysis.
+minutes: 27
+status: authored
+why_it_matters: Clinical outcomes are rare, and a model is only ever used at one threshold. Knowing why
+  AUROC can mislead, what PPV at an alert budget means, and how to read a decision curve is a classic
+  interview discriminator and the language clinical partners actually care about.
+objectives:
+  - Compute sensitivity, specificity, PPV, and NPV from a confusion matrix
+  - Explain when AUPRC is more informative than AUROC, and why its baseline equals prevalence
+  - Choose thresholds by alert budget, clinical cost, or NNE
+  - "Handle imbalance: weighting, resampling, and why not to over-correct"
+  - Read a decision curve and compute net benefit
+key_points:
+  - AUROC is prevalence-invariant; PPV is not
+  - Baseline AUPRC = prevalence, so AUPRC is not comparable across populations
+  - A threshold is a workload decision; 0.5 is arbitrary
+  - NNE = 1/PPV
+  - Resampling and class weighting break calibration without improving discrimination
+  - Net benefit weighs false positives by the threshold odds (Vickers & Elkin 2006)
+tags: [metrics, imbalance, interview]
+steps:
+  - type: text
+    title: "\"AUROC 0.84!\""
+    text: |
+      Your team presents the readmission model: AUROC **0.84**. The transitional-care nurses
+      start receiving alerts. Two weeks later they have stopped opening them. About four in
+      five of the patients they called were never readmitted.
+
+      Both facts are true at once. AUROC measures **ranking** across all thresholds. The nurses
+      live at **one threshold**, in a population where readmission is uncommon. A model can rank
+      well and still produce a flag list that is mostly noise.
+
+      This lesson connects the headline metrics to the thing that actually happens on the ward:
+      a list of names, a limited number of phone calls, and a trade-off between misses and
+      wasted effort. In m02-01 you saw prevalence cap PPV. Here you'll work with it.
+
+  - type: text
+    title: The confusion matrix at one threshold
+    text: |
+      Pick a threshold t and flag every patient with score ≥ t. Each patient lands in one cell:
+
+      - **TP**: flagged and readmitted. **FP**: flagged, not readmitted.
+      - **FN**: not flagged, readmitted. **TN**: not flagged, not readmitted.
+
+      Four rates come out of it:
+
+      - **Sensitivity** (recall) = TP / (TP + FN): of the readmitted, how many did we catch?
+      - **Specificity** = TN / (TN + FP): of the non-readmitted, how many did we leave alone?
+      - **PPV** (precision) = TP / (TP + FP): of the flagged, how many were real?
+      - **NPV** = TN / (TN + FN): of the unflagged, how many were truly fine?
+
+      Sensitivity and specificity condition on the **truth**. PPV and NPV condition on the
+      **alert**, which is what a clinician sees. That's the whole reason they behave
+      differently when prevalence changes.
+
+  - type: quiz
+    question: |
+      1,000 discharges, 100 readmitted. The model flags 150 patients, and 60 of them are
+      readmitted. Which pair is correct?
+    options:
+      - Sensitivity 0.40, PPV 0.60
+      - Sensitivity 0.60, PPV 0.40
+      - Sensitivity 0.60, PPV 0.60
+      - Specificity 0.60, PPV 0.40
+    answer: 1
+    explanation: |
+      TP = 60 and FN = 40, so sensitivity = 60/100 = 0.60. FP = 90, so PPV = 60/150 = 0.40.
+      Specificity = 810/900 = 0.90 and NPV = 810/850 ≈ 0.95. The tempting swap (0.40/0.60)
+      mixes up which total you divide by. Sensitivity divides by the truly readmitted and PPV by
+      the flagged.
+
+  - type: text
+    title: AUROC is about ranking
+    text: |
+      The ROC curve plots sensitivity against 1 − specificity for every threshold. Its area has
+      a clean meaning: **AUROC is the probability that a randomly chosen readmitted patient
+      scores higher than a randomly chosen non-readmitted one.**
+
+      Because both axes condition on the true class, AUROC **does not change with prevalence**.
+      That is useful for comparing ranking ability across populations, and it is also its blind
+      spot:
+
+      - It averages over thresholds you will never use, including those that flag 90% of
+        patients.
+      - At low prevalence, a false positive rate of 10% sounds small but can mean more false
+        alarms than there are true cases.
+      - It says nothing about **calibration**: multiply every score by 0.1 and AUROC is
+        unchanged (m02-05).
+
+      Report AUROC, but never alone.
+
+  - type: text
+    title: "PR curves: the baseline is prevalence"
+    text: |
+      The precision-recall curve plots PPV against sensitivity across thresholds. Its area,
+      **AUPRC** (usually computed as **average precision**), is dominated by the top of the
+      ranking, which is where alerts actually come from.
+
+      The key fact: **a random classifier has AUPRC equal to the prevalence.** Flag patients at
+      random and precision equals the base rate at every recall. So:
+
+      - AUPRC 0.20 is poor at prevalence 20% but a 10× lift at prevalence 2%.
+      - AUPRC values are **not comparable across populations** with different prevalence.
+      - Always report prevalence next to AUPRC.
+
+      Compute it with `sklearn.metrics.average_precision_score`. Do not use the trapezoidal
+      `auc(recall, precision)`, because linear interpolation in PR space is overly optimistic
+      (Davis & Goadrich, ICML 2006). Saito & Rehmsmeier (PLoS One 2015) popularized the case for
+      PR plots on imbalanced data.
+
+  - type: image
+    image: m02-04-roc-vs-pr.png
+    caption: |
+      The same simulated score distributions, at 20% and 2% prevalence. The ROC curves lie on
+      top of each other (AUROC 0.84). The PR curve collapses from AUPRC 0.60 to 0.17 when the
+      outcome becomes rare. Dotted lines mark each random baseline, which equals the prevalence.
+
+  - type: quiz
+    question: |
+      Site A has prevalence 5% and AUPRC 0.18. Site B has prevalence 15% and AUPRC 0.35. What can
+      you conclude?
+    options:
+      - The model is clearly better at site B
+      - The model is nearly useless at site A because 0.18 is low
+      - Not much directly, because the baselines differ (0.05 vs 0.15). Compare lift, AUROC, and calibration instead
+      - AUPRC should be converted to AUROC by dividing by prevalence
+    answer: 2
+    explanation: |
+      AUPRC moves with prevalence even when ranking ability is identical. 0.18 is 3.6× its
+      baseline at site A, and 0.35 is about 2.3× at site B. Neither raw number settles which site
+      the model works better at. To compare sites, look at AUROC (prevalence-invariant),
+      calibration, and PPV at the threshold each site would use. There is no simple conversion
+      between AUPRC and AUROC.
+
+  - type: text
+    title: AUPRC is not a trump card
+    text: |
+      A common interview answer is "the data is imbalanced, so use AUPRC instead of AUROC." It's
+      half right.
+
+      AUPRC focuses on the high-score region, which matches alerting use cases. But it depends
+      on prevalence, weights errors unevenly across the ranking, and can favour improvements for
+      subgroups with higher base rates. Recent work (McDermott et al., 2024) argues that AUPRC is
+      not universally better than AUROC under imbalance and can be misleading for fairness
+      comparisons.
+
+      The senior answer is to report both with CIs and the prevalence, and then report what
+      matters for the decision: **PPV, sensitivity, and alert rate at the operating threshold**,
+      plus calibration and net benefit. Metrics summarize, but the decision happens at one point
+      on the curve.
+
+  - type: text
+    title: Thresholds are workload decisions
+    text: |
+      0.5 is almost never the right threshold. With 12% prevalence, a well-calibrated model may
+      flag almost nobody at 0.5. Three principled ways to choose:
+
+      - **Alert budget**: the team can act on k patients per day. Set the threshold at the
+        score quantile that flags that fraction. This is the most common approach in practice,
+        because capacity is real.
+      - **Target sensitivity**: "we must catch 70% of readmissions". Read the threshold off the
+        ROC or PR curve and accept the resulting PPV and workload.
+      - **Harm/benefit ratio**: if an unnecessary call costs little compared with a missed
+        readmission, a low probability threshold is justified. The decision curve below
+        formalizes this.
+
+      Choose the threshold on **validation** data and freeze it before looking at the test set.
+      A threshold tuned on the test set is another form of leakage.
+
+  - type: code
+    title: Threshold by alert budget
+    language: python
+    code: |
+      import numpy as np
+
+
+      def threshold_for_budget(val_scores, alert_fraction):
+          """Score cutoff that flags the top `alert_fraction` of patients."""
+          return np.quantile(val_scores, 1 - alert_fraction)
+
+
+      def metrics_at(y, scores, thr):
+          flag = scores >= thr
+          tp = np.sum(flag & (y == 1)); fp = np.sum(flag & (y == 0))
+          fn = np.sum(~flag & (y == 1)); tn = np.sum(~flag & (y == 0))
+          return {"alert_rate": flag.mean(), "sens": tp / (tp + fn),
+                  "spec": tn / (tn + fp), "ppv": tp / (tp + fp),
+                  "npv": tn / (tn + fn), "nne": (tp + fp) / tp}
+
+
+      thr = threshold_for_budget(p_val, alert_fraction=0.10)   # 10% of discharges
+      print(metrics_at(y_test, p_test, thr))
+    after: |
+      The threshold comes from validation scores and is then applied to the test set. If the
+      score distribution drifts in production, the alert rate drifts too. Module 03's monitoring
+      watches exactly this.
+
+  - type: quiz
+    question: |
+      Prevalence is 12%. You set `thr = np.quantile(val_scores, 0.95)` and flag
+      `scores >= thr`. What does that guarantee?
+    options:
+      - About 5% of patients are flagged, whatever the prevalence or the model quality
+      - A PPV of about 95%
+      - A specificity of 95%
+      - About 95% of readmissions are caught
+    answer: 0
+    explanation: |
+      A quantile cutoff fixes the **alert rate**. Roughly 5% of patients score above the 95th
+      percentile, on the data the quantile was computed from. PPV, sensitivity, and specificity
+      then depend on how good the ranking is. With prevalence 12% and 5% flagged, sensitivity
+      cannot exceed 5/12 ≈ 42% even with perfect ranking. Specificity will be high, but it is
+      not pinned at 95%, because the 5% is a share of all patients, not of the negatives.
+
+  - type: text
+    title: Number needed to evaluate
+    text: |
+      **NNE = 1 / PPV**: how many flagged patients someone must evaluate to find one true case.
+      At PPV 0.25, NNE is 4. This translates a metric into workload, and clinicians grasp it
+      instantly. It shows up widely in the early-warning-score literature.
+
+      NNE is not the end of the story. What you really want is outcomes **prevented**, and that
+      depends on how effective the intervention is. Suppose, hypothetically, that a follow-up
+      call program prevents 1 in 5 readmissions among patients who would otherwise be
+      readmitted. Then each prevented readmission costs NNE × 5 calls.
+
+      That arithmetic is why a model with a modest AUROC attached to an effective, cheap
+      intervention can beat a strong model attached to a weak one. When you frame a project,
+      ask about intervention effectiveness as early as you ask about data.
+
+  - type: quiz
+    question: |
+      At your alert threshold, PPV is 0.25. Suppose the call program prevents 1 in 5 readmissions
+      among patients who would have been readmitted. About how many patients must be called per
+      readmission prevented?
+    options:
+      - "4"
+      - "5"
+      - "9"
+      - "20"
+    answer: 3
+    explanation: |
+      NNE = 1/0.25 = 4 calls per true future readmission reached. Only 1 in 5 of those is
+      prevented, so 4 × 5 = 20 calls per prevented readmission. Stopping at 4 (the NNE) ignores
+      intervention effectiveness, which is the most common gap in model-value arguments. The
+      numbers here are illustrative, not an estimate for real programs.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your readmission model has an AUROC of 0.80, but the clinical team says it's useless. What
+      could be going on, and what would you check?"
+    model_answer: |
+      AUROC measures ranking over all thresholds, and the team experiences one threshold at
+      their prevalence. So I'd first compute PPV, sensitivity, and alert volume at the threshold
+      actually deployed. At 10–12% prevalence, even a good ranker can have a PPV of 20–30%, so
+      three or four of every five alerts go nowhere, and that feels useless. I'd check whether
+      the threshold matches their capacity. Too many alerts cause fatigue, and too few look
+      pointless. Then calibration: if the scores are displayed as probabilities and are
+      systematically too high, trust erodes. I'd also ask whether the model tells them anything
+      new. If it mostly flags patients they already know are high risk, the marginal value is
+      small even with a good AUROC. Timing and workflow matter too: does the alert arrive when
+      they can act, in the tool they use? Finally, is the intervention effective for the flagged
+      patients? I'd bring back PPV at a capacity-based threshold, NNE, and a decision curve, and
+      talk it through with the team.
+    key_points:
+      - Separates ranking (AUROC) from performance at the deployed threshold (PPV, alert volume)
+      - Connects low prevalence to low PPV and alert fatigue
+      - Checks calibration and whether the model adds information beyond clinical judgment
+      - Checks timing, workflow integration, and intervention effectiveness
+      - Proposes capacity-based thresholds, NNE, and decision curves
+
+  - type: text
+    title: Imbalance is mostly a threshold problem
+    text: |
+      "The data is imbalanced" usually triggers a reflex: rebalance it. Options include:
+
+      - **Class weighting**: `pos_weight` in `BCEWithLogitsLoss`, or `class_weight` in
+        scikit-learn, upweights errors on positives.
+      - **Random oversampling** of positives, or **undersampling** of negatives.
+      - **SMOTE**: synthetic positives interpolated between neighbours.
+
+      Here's the catch. A model trained with a proper probabilistic loss (log loss) on the real
+      class mix already learns the right **ranking** and the right **probabilities**. With
+      reasonable event counts, rebalancing rarely improves AUROC. What it reliably does is push
+      every predicted risk **upward**, because the model was trained on a world where the
+      outcome was far more common.
+
+      The "problem" people try to fix is usually that nothing crosses 0.5. The fix for that is a
+      sensible **threshold**, not a distorted training set. Rebalancing can help when events are
+      extremely scarce and training becomes unstable, or for some non-probabilistic learners.
+      Even then, you must correct the probabilities afterwards.
+
+  - type: text
+    title: Resampling breaks calibration
+    text: |
+      van den Goorbergh et al. (JAMIA 2022) compared random undersampling, oversampling, and
+      SMOTE against no correction for clinical risk models. The corrections produced strongly
+      **overestimated risks** without improving discrimination. Their conclusion was blunt:
+      don't correct imbalance for risk prediction unless you have a specific reason.
+
+      If you did resample, you can undo the shift in the odds. If positives were k times more
+      common, relative to negatives, in training than in reality:
+
+      logit(p_true) = logit(p_train) − log(k)
+
+      Undersampling negatives by keeping a fraction β of them is the same with k = 1/β. With
+      `pos_weight = k`, the shift is similar but only approximate. The more robust option is to
+      recalibrate on untouched validation data (Platt or isotonic scaling), which is m02-05.
+
+      Miscalibration isn't cosmetic. Decision curves, risk displays, and any threshold expressed
+      as a probability ("call if risk ≥ 15%") all assume the probabilities mean what they say.
+
+  - type: quiz
+    question: |
+      You trained on data where positives were oversampled 5× (negatives unchanged). For one
+      patient the model outputs 30%. What is their approximate real-world risk?
+    options:
+      - 30%, because oversampling doesn't change probabilities
+      - About 6%, because 30% / 5
+      - About 8%
+      - About 50%, since the training data was balanced
+    answer: 2
+    explanation: |
+      Work in odds. 0.30 corresponds to odds of 0.43. Dividing by 5 gives 0.086, which is a
+      probability of about 7.9%. Dividing the probability directly (6%) is close only for small
+      risks, because the correction is on the odds (logit) scale. Answer A is the trap this
+      lesson is about. The model's 30% describes the oversampled world, not your patients.
+
+  - type: text
+    title: "Decision curves: is using the model worth it?"
+    text: |
+      Decision curve analysis (Vickers & Elkin, Medical Decision Making 2006) asks whether acting
+      on the model beats the simple strategies of **treating everyone** or **treating no one**.
+
+      Choose a **threshold probability** pₜ, the risk at which you would intervene. That choice
+      encodes a harm/benefit ratio. At pₜ = 10%, you accept 9 unnecessary calls to reach 1
+      patient who would be readmitted, because pₜ / (1 − pₜ) = 1/9.
+
+      **Net benefit** at pₜ, for a population of N:
+
+      NB = TP/N − (FP/N) × pₜ / (1 − pₜ)
+
+      These are true positives per patient, with each false positive discounted at the threshold
+      odds. Treat none has NB = 0. Treat all has NB = prev − (1 − prev) × pₜ/(1 − pₜ).
+
+      Plot NB across the range of thresholds clinicians find reasonable. The model is useful
+      where its curve lies above both reference lines. An NB of 0.04 means the equivalent of
+      finding 4 true readmissions per 100 patients with no false alarms.
+
+  - type: image
+    image: m02-04-decision-curve.png
+    caption: |
+      A simulated, well-calibrated model at about 12% prevalence. At very low thresholds,
+      calling everyone is almost as good as using the model. Above a few percent, the model
+      adds clear net benefit. Past 12%, treat-all is worse than doing nothing. Decision curves assume
+      calibrated probabilities, which is why m02-05 comes next.
+
+  - type: quiz
+    question: |
+      At pₜ = 0.20, out of N = 1,000 patients the model yields TP = 60 and FP = 90. What is its
+      net benefit?
+    options:
+      - "0.060"
+      - "0.0375"
+      - "0.015"
+      - −0.030
+    answer: 1
+    explanation: |
+      The threshold odds are 0.20/0.80 = 0.25. NB = 60/1000 − (90/1000) × 0.25 = 0.06 − 0.0225 =
+      0.0375. Answer A ignores the false positives entirely. Answer C weights each false positive
+      at 0.5, which would correspond to pₜ ≈ 0.33. The false-positive penalty depends on the
+      threshold you chose.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Only 3% of patients have the outcome. A colleague wants to SMOTE the training data up to a
+      50/50 balance. What do you tell them?"
+    model_answer: |
+      I'd ask what problem they're trying to solve. If it's "the model never predicts above 0.5",
+      that's a threshold problem, and I'd set the threshold from the alert budget or a
+      harm/benefit ratio instead. Rebalancing 3% up to 50/50 multiplies the odds of the outcome
+      by about 32 in training, so every predicted risk is inflated. Evidence on
+      clinical risk models, for example van den Goorbergh et al. in JAMIA 2022, shows these
+      corrections mostly damage calibration without improving AUROC. SMOTE also creates
+      synthetic patients by interpolating features, which can produce implausible combinations
+      for binary and clinical variables. My default is to train with log loss on the real
+      distribution, possibly with regularization, then evaluate AUROC and AUPRC with prevalence,
+      calibration, and PPV at the operating threshold. If there were a real reason to reweight,
+      such as very few events causing unstable training, I'd use modest class weights and then
+      recalibrate on untouched validation data, and I'd show that the decision metrics improved.
+    key_points:
+      - Recognizes that the usual underlying issue is thresholding, not learning
+      - Explains that rebalancing inflates predicted risks and hurts calibration, citing evidence
+      - Notes that SMOTE can create implausible synthetic patients
+      - Defaults to the real distribution plus a proper threshold and calibration checks
+      - If reweighting is used, recalibrates afterwards and validates on decision metrics
+
+  - type: laptop
+    title: An evaluation report for the readmission model
+    repo_path: 02-pytorch-clinical-ml/src/evaluate.py
+    task: |
+      Create `02-pytorch-clinical-ml/src/evaluate.py` that takes test labels and scores from any
+      model (baselines or MLP) and prints prevalence, AUROC, and AUPRC with bootstrap 95% CIs,
+      plus a table of alert rate, sensitivity, PPV, NPV, and NNE at alert budgets of 5%, 10%, and
+      20% (thresholds chosen on validation). Then compute net benefit for pₜ from 0.02 to 0.40
+      against treat-all and treat-none. Finally, retrain the MLP with `pos_weight` equal to the
+      negative/positive ratio and compare mean predicted risk with the observed prevalence.
+
+  - type: recap
+    points:
+      - Sensitivity and specificity condition on the truth. PPV and NPV condition on the alert and move with prevalence
+      - AUROC is ranking and prevalence-invariant. It says nothing about calibration or your threshold
+      - AUPRC has baseline = prevalence, so always report it with prevalence and never compare it raw across sites
+      - Thresholds are workload decisions. Choose them on validation from the alert budget, target sensitivity, or harm/benefit
+      - "NNE = 1/PPV. Value also depends on how effective the intervention is"
+      - Rebalancing inflates risks without improving AUROC. Fix the threshold, or recalibrate if you must reweight
+      - "Net benefit = TP/N − FP/N × pₜ/(1 − pₜ). The model must beat treat-all and treat-none"

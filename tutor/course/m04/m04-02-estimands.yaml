@@ -1,0 +1,416 @@
+id: m04-02-estimands
+title: "Estimands: asking the right question"
+summary: "The ICH E9(R1) estimand framework: five attributes, intercurrent events, the five handling strategies,
+  and why missing-data handling follows from them."
+minutes: 25
+status: authored
+why_it_matters: The estimand framework is now expected in protocols and statistical analysis plans for
+  regulatory trials, and it's a favourite biostatistics interview topic. It also sharpens any analysis,
+  including observational ones, by forcing you to say which question you're answering before you pick a method.
+objectives:
+  - List the five estimand attributes and fill them in for a real trial question
+  - Identify intercurrent events (discontinuation, rescue or added therapy, death) and tell them apart from missing data
+  - Compare treatment-policy, hypothetical, composite, while-on-treatment, and principal stratum strategies
+  - Translate a strategy into a concrete time-to-event derivation
+  - Explain why missing-data handling and sensitivity analyses follow from the strategy
+key_points:
+  - The estimand precedes the estimator
+  - Intercurrent events change the question, so each needs an explicit strategy
+  - Loss to follow-up is missing data, not an intercurrent event
+  - Missing data handling follows from the strategy
+  - Sensitivity analyses test assumptions for the same estimand; supplementary analyses target different estimands
+tags: [trials, estimands, interview]
+steps:
+  - type: text
+    title: Two correct answers
+    text: |
+      Two statisticians analyze the same SYN-STROKE database and report different hazard ratios
+      for zetagrel.
+
+      - Analyst A keeps following everyone until the end of the study, including patients who
+        stopped zetagrel after a bleed. **HR 0.76.**
+      - Analyst B censors each patient when they stop study drug. **HR 0.68.**
+
+      Neither made a coding error. They answered **different questions**. A estimated the effect
+      of _being assigned_ zetagrel. B estimated something closer to the effect of _staying on_
+      zetagrel, and only under an assumption about who stops.
+
+      Before 2019, protocols often left that choice implicit. The ICH E9(R1) addendum (adopted
+      in 2019) makes it explicit: define the **estimand** first, then pick the estimator.
+
+  - type: text
+    title: Question, then method
+    text: |
+      An **estimand** is a precise description of the treatment effect a trial aims to
+      estimate. E9(R1) sets out a chain:
+
+      - **Trial objective**, in clinical words
+      - → **Estimand**: exactly what quantity answers it
+      - → **Main estimator**: the analysis that estimates it (a Cox model, a KM difference)
+      - → **Sensitivity analyses**: the same estimand under different assumptions
+
+      The order matters. "We fit a Cox model censoring at discontinuation" is an estimator. It
+      doesn't say what question it answers, or whether that question is clinically useful.
+      Choosing the estimator first is how Analyst B ended up answering a question nobody asked.
+
+  - type: text
+    title: The five attributes
+    text: |
+      E9(R1) describes an estimand with five attributes:
+
+      - **Treatment**: the treatment condition of interest and the comparator. This can be a
+        whole regimen ("zetagrel + aspirin, with any rescue medication a clinician adds").
+      - **Population**: the patients the question is about, defined by the inclusion and
+        exclusion criteria or a subgroup.
+      - **Variable (endpoint)**: what's measured for each patient, for example time to first
+        recurrent stroke.
+      - **Intercurrent events and strategies**: which post-randomization events could change
+        the meaning of the variable, and how each is handled.
+      - **Population-level summary**: how arms are compared, such as a hazard ratio, a
+        difference in 12-month risk, or a difference in restricted mean survival time.
+
+      The fourth attribute is the new one. It's where most of the thinking happens.
+
+  - type: image
+    image: m04-02-estimand-attributes.png
+    caption: |
+      The primary estimand for SYN-STROKE, one card per attribute. The intercurrent-events card
+      carries most of the design decisions: each event gets its own strategy.
+
+  - type: text
+    title: What counts as an intercurrent event
+    text: |
+      An **intercurrent event (ICE)** happens after treatment starts and either changes how
+      you interpret the endpoint or stops the endpoint from existing. In SYN-STROKE:
+
+      - **Discontinuation** of zetagrel or placebo, for example after a major bleed
+      - **Added or rescue therapy**: a patient has a TIA and is switched to open-label
+        clopidogrel, or develops atrial fibrillation (AF) and starts an anticoagulant
+      - **Carotid revascularization** during follow-up
+      - **Death from a non-stroke cause**, which makes a later stroke impossible
+
+      What's **not** an ICE: a patient who moves away and is lost to follow-up. Their strokes
+      still happen. You just don't see them. That's **missing data**. Keeping the two apart is
+      half the framework.
+
+  - type: quiz
+    question: Which of these is NOT an intercurrent event in SYN-STROKE?
+    options:
+      - Stopping study drug after a gastrointestinal bleed
+      - Starting an anticoagulant after AF is detected
+      - Withdrawing consent for follow-up and never being contacted again
+      - Dying of cancer before any recurrent stroke
+    answer: 2
+    explanation: |
+      Withdrawal of follow-up hides outcomes that still exist, so it's a missing-data problem
+      that needs assumptions and sensitivity analyses. The other three happen to the patient and
+      change what the endpoint means (bleeding, anticoagulation) or whether it can occur (death).
+      Withdrawing consent is tempting because it looks like "discontinuation", but it's the
+      data collection that stops, not the treatment.
+
+  - type: text
+    title: "Strategy 1: treatment policy"
+    text: |
+      **Treatment policy**: the ICE is treated as part of the treatment being compared. The
+      variable is used **whether or not** the ICE happened.
+
+      For discontinuation, a stroke 8 months after stopping zetagrel still counts against the
+      zetagrel arm. The question becomes: _what's the effect of a policy of starting zetagrel,
+      with the stopping and switching that happen in practice?_ This is close to what ITT has
+      always meant, now stated explicitly.
+
+      Strengths: it's close to randomization and relevant to prescribers and payers.
+      Requirement: you must **keep collecting outcomes after the ICE**. A trial that stops
+      following patients once they stop the drug can't estimate a treatment-policy effect
+      without strong assumptions.
+
+      Limitation: it can't be used for death. There is no "stroke status after death" to
+      collect.
+
+  - type: text
+    title: "Strategy 2: hypothetical"
+    text: |
+      **Hypothetical**: imagine a scenario in which the ICE doesn't occur, and estimate the
+      effect in that scenario.
+
+      In SYN-STROKE, anticoagulants for newly detected AF are a strong, effective intervention
+      that isn't part of either arm. The sponsor might ask: _what would the zetagrel effect be if
+      no patient started an anticoagulant?_
+
+      Two conditions must hold. The scenario has to be **clinically meaningful**. "If no one had
+      died" usually isn't, and "if no patient needed rescue treatment" often is. And the
+      estimate needs an **untestable assumption**: that after adjusting for measured factors,
+      patients who had the ICE would have had the same outcome risk as similar patients who
+      didn't. In practice this means modelling who has the ICE (inverse probability of
+      censoring weights, or multiple imputation), not simply dropping or censoring them.
+
+  - type: quiz
+    question: |
+      The medical team asks: "What's zetagrel's effect on recurrent stroke if patients kept taking
+      it, rather than stopping after a minor bleed?" Which strategy for discontinuation matches
+      that question?
+    options:
+      - Hypothetical
+      - Treatment policy
+      - Composite
+      - Principal stratum
+    answer: 0
+    explanation: |
+      "If they had kept taking it" describes a counterfactual scenario in which the ICE doesn't
+      happen, which is the hypothetical strategy. Treatment policy would count strokes regardless
+      of stopping, which answers "what does prescribing it achieve?". Principal stratum would
+      restrict the question to patients who would never stop on either arm, which is a
+      different population.
+
+  - type: text
+    title: "Strategy 3: composite variable"
+    text: |
+      **Composite**: the ICE becomes part of the outcome. It's informative about the result, so
+      count it.
+
+      The common case is death. Instead of "time to recurrent stroke", define "time to recurrent
+      stroke **or death**". A patient who dies of a non-stroke cause has had an event, not a
+      censoring.
+
+      Composites can also treat "needed rescue therapy" as a treatment failure, which is common
+      in diabetes and asthma trials.
+
+      The price is the one from lesson 1: the effect now mixes components. If zetagrel prevents
+      strokes but has no effect on cancer deaths, the composite HR will be diluted toward 1. It's
+      honest, but it answers a broader question.
+
+  - type: text
+    title: "Strategy 4: while on treatment (or while alive)"
+    text: |
+      **While on treatment**: only outcomes **before** the ICE count. For death this version is
+      called **while alive**.
+
+      For SYN-STROKE, a while-alive estimand asks about strokes that happen while patients are
+      alive. For a time-to-event endpoint, that points to the **cumulative incidence** of stroke
+      with death as a competing event. Lesson 5 covers this properly and shows why 1 − KM
+      overestimates risk when death is common.
+
+      A while-on-treatment estimand for discontinuation (strokes only while taking study drug,
+      maybe plus a few days) is sometimes used for **safety**. The trap is that if one arm stops
+      treatment earlier, the arms are observed over different periods, and a drug can look better
+      simply because people stop taking it.
+
+  - type: text
+    title: "Strategy 5: principal stratum"
+    text: |
+      **Principal stratum**: restrict the question to the subpopulation defined by whether the
+      ICE **would** occur, under one or both treatments.
+
+      Example: _the effect of zetagrel among patients who would not have a major bleed whichever
+      arm they were assigned to_.
+
+      The catch is in "would". You never see both potential outcomes for the same patient. A
+      patient without a bleed on zetagrel might have bled on aspirin, and vice versa. So you
+      **cannot** estimate this by selecting the non-bleeders in each arm. That comparison is
+      exactly the post-randomization selection that makes per-protocol analyses biased.
+      Principal stratum estimands need strong assumptions (monotonicity, or modelling stratum
+      membership) and are rarely primary.
+
+  - type: quiz
+    question: |
+      An analyst "estimates" the principal stratum effect among non-bleeders by comparing
+      patients without a major bleed in the zetagrel arm with patients without a major bleed in
+      the aspirin arm. What's wrong?
+    options:
+      - Nothing, because both arms were randomized
+      - It should be restricted to the safety population
+      - The comparison should use a composite endpoint instead
+      - The groups are selected on a post-randomization event, so they no longer contain the same kinds of patients
+    answer: 3
+    explanation: |
+      Zetagrel probably causes more bleeds, so its non-bleeders are a more selected (perhaps
+      healthier or lower-risk) group than aspirin's non-bleeders. Randomization protected the
+      full arms, not subsets defined after assignment. A true principal stratum analysis
+      targets patients who wouldn't bleed on **either** arm, which takes modelling and
+      assumptions.
+
+  - type: quiz
+    question: |
+      Why can't SYN-STROKE use a treatment-policy strategy for non-stroke death?
+    options:
+      - Because death is rare
+      - Because the stroke outcome doesn't exist after death, so there is nothing to collect
+      - Because regulators ban it for mortality
+      - Because death is always part of the primary endpoint
+    answer: 1
+    explanation: |
+      Treatment policy means using the outcome regardless of the ICE, which assumes the outcome
+      still exists afterwards. After death, "time to stroke" has no value. So death needs a
+      composite (stroke or death), a while-alive strategy (competing risks), or, rarely and
+      with care, a hypothetical one. Death isn't rare in a post-stroke population, which is
+      why this choice matters.
+
+  - type: text
+    title: Missing data follows from the strategy
+    text: |
+      Once the strategy is fixed, "what's missing?" has a precise answer.
+
+      - **Treatment policy**: outcomes after discontinuation are **wanted**. If they weren't
+        collected, they're missing, and the best information for imputing them comes from
+        patients who stopped treatment but stayed in follow-up (retrieved dropouts). Censoring
+        at discontinuation would silently switch to a different estimand.
+      - **Hypothetical**: outcomes after the ICE are **not relevant**, even if they were
+        collected. You censor or set them aside, but you must model who has the ICE (IPCW or
+        imputation) under a "no ICE" assumption.
+      - **Composite**: the ICE is an outcome. Nothing is missing because of it.
+      - **While on treatment / while alive**: data after the ICE aren't needed.
+
+      Genuine loss to follow-up remains missing data under every strategy. Standard censoring
+      treats it as non-informative (lesson 3), and sensitivity analyses check how much that
+      matters.
+
+  - type: code
+    title: Three derivations from the same data
+    language: python
+    text: |
+      Event times are in months from randomization. `NaN` means the event never happened.
+      `min(axis=1)` skips NaNs.
+    code: |
+      import pandas as pd
+
+      d = pd.read_parquet("04-clinical-trials-survival/data/adsl.parquet")
+      # t_stroke, t_death, t_anticoag, t_end (end of follow-up)
+
+      # A
+      end_a = d[["t_stroke", "t_death", "t_end"]].min(axis=1)
+      d["time_a"], d["event_a"] = end_a, (d["t_stroke"] <= end_a).astype(int)
+
+      # B
+      end_b = d[["t_stroke", "t_death", "t_anticoag", "t_end"]].min(axis=1)
+      d["time_b"], d["event_b"] = end_b, (d["t_stroke"] <= end_b).astype(int)
+
+      # C
+      d["time_c"] = end_a
+      d["event_c"] = (d[["t_stroke", "t_death"]].min(axis=1) <= end_a).astype(int)
+    after: |
+      All three use the same raw columns. They differ only in which times end follow-up and
+      which ones count as events. That's the estimand, written as code.
+
+  - type: quiz
+    question: |
+      In the code above, which derivation applies a **hypothetical** strategy to anticoagulant
+      start, and what does its analysis need?
+    language: python
+    options:
+      - A; nothing beyond standard censoring
+      - C; a competing-risks model
+      - B; an assumption (and usually weights) that anticoagulant starters would otherwise have had the same stroke risk as similar non-starters
+      - B; nothing, because censoring removes the anticoagulant effect
+    answer: 2
+    explanation: |
+      B censors at `t_anticoag`, which removes follow-up after the ICE, as the hypothetical
+      scenario requires. But patients who start anticoagulants (new AF) have higher stroke risk,
+      so plain censoring is **informative**. You need IPCW with predictors of anticoagulant
+      start. A treats anticoagulants by treatment policy and death by censoring (a while-alive,
+      cause-specific view). C is the stroke-or-death composite.
+
+  - type: text
+    title: Sensitivity vs supplementary
+    text: |
+      E9(R1) separates two kinds of extra analysis, and mixing them up is a common mistake.
+
+      - A **sensitivity analysis** targets the **same estimand** under different assumptions.
+        For example: what if patients lost to follow-up had a higher stroke risk than those who
+        stayed? A **tipping-point** analysis increases that assumed risk until the conclusion
+        flips, and asks whether that assumption is clinically plausible.
+      - A **supplementary analysis** targets a **different estimand**, such as the
+        hypothetical-strategy effect next to the treatment-policy primary.
+
+      So the old "ITT is primary, PP is a sensitivity analysis" framing is inaccurate. PP
+      changes the question, which makes it supplementary at best, and a biased estimator of
+      any clear estimand at worst.
+
+  - type: text
+    title: The summary measure is a choice too
+    text: |
+      The fifth attribute is also a decision, not a default.
+
+      - **Hazard ratio**: standard and efficient, but it assumes a roughly constant ratio over
+        time, and it has interpretation problems even in RCTs (lesson 4 covers Hernán's
+        "hazards of hazard ratios").
+      - **Risk difference at a fixed time**, such as 12-month stroke risk from KM curves:
+        easy to communicate and easy to turn into a number needed to treat.
+      - **RMST difference**: average stroke-free time gained over a horizon. It stays valid
+        when hazards aren't proportional (lesson 3).
+
+      Many trials report the HR as primary and a risk difference as a supportive summary. Good
+      practice pairs every relative measure with an absolute one.
+
+  - type: think
+    interview: true
+    prompt: |
+      "What is an estimand, and why did regulators think the ICH E9(R1) addendum was needed?"
+    model_answer: |
+      An estimand is a precise definition of the treatment effect a trial is trying to
+      estimate. It has five attributes: population, treatment conditions, variable, how each
+      intercurrent event is handled, and the population-level summary. The addendum exists
+      because trials used to specify analyses without specifying the question. "ITT" and
+      "per-protocol" were used as if they were questions, but they are analysis sets, and
+      intercurrent events like discontinuation or rescue medication were handled implicitly,
+      often by whatever the missing-data method did. Two analyses of the same trial could
+      answer different questions without anyone saying so. The framework puts the question
+      first and names a strategy for each intercurrent event: treatment policy, hypothetical,
+      composite, while on treatment, or principal stratum. Then the estimator, the data you
+      need to keep collecting, the missing-data handling, and the sensitivity analyses all
+      follow. In practice it also improves design: if the estimand is treatment policy, you
+      have to keep following patients after they stop the drug.
+    key_points:
+      - Defines an estimand as a precise description of the effect, with its five attributes
+      - Explains the gap it fills, since analysis sets and missing-data methods were implicitly defining the question
+      - Names the intercurrent-event strategies
+      - States that estimator, data collection, and missing-data handling follow from the estimand
+      - Distinguishes sensitivity analyses (same estimand) from supplementary analyses (different estimand)
+
+  - type: think
+    interview: true
+    prompt: |
+      "In our stroke-prevention trial, about 12% of patients stop study drug early, mostly
+      because of bleeding. A colleague proposes censoring them at discontinuation in the Cox
+      model. What do you think?"
+    model_answer: |
+      First I'd ask which question we want to answer, because censoring at discontinuation
+      silently picks a hypothetical estimand: the effect if nobody stopped. For a primary
+      analysis, the more natural question is usually treatment policy, meaning the effect of
+      starting zetagrel given that some patients will bleed and stop. Bleeding is a consequence
+      of the drug, so it belongs to the policy. That means continuing follow-up after
+      discontinuation and not censoring. If we also want the hypothetical effect, plain
+      censoring is still wrong, because discontinuation is informative. Patients who bleed may
+      be older or frailer, and they have a different stroke risk. We'd need inverse
+      probability of censoring weights based on predictors of discontinuation, and we'd
+      present it as a supplementary estimand. Operationally, I'd make sure the protocol says
+      "stop drug, stay in the study" and that sites are trained on it, because the
+      treatment-policy estimand depends on retrieving those outcomes.
+    key_points:
+      - Identifies that censoring at discontinuation implies a hypothetical estimand
+      - Argues for treatment policy as primary, because bleeding-related stopping is part of the drug's effect
+      - Notes that discontinuation is informative, so plain censoring biases even the hypothetical estimate
+      - Proposes IPCW or similar methods and labels it as supplementary
+      - Emphasizes continued follow-up after discontinuation as a design requirement
+
+  - type: laptop
+    title: Write the SYN-STROKE estimand spec
+    repo_path: 04-clinical-trials-survival/docs/estimands.md
+    task: |
+      Create `04-clinical-trials-survival/docs/estimands.md` with a primary estimand and one
+      supplementary estimand for SYN-STROKE, each with all five attributes and a strategy for
+      every intercurrent event (discontinuation, anticoagulant start, revascularization,
+      non-stroke death). Then add a function `derive_tte(df, estimand)` to
+      `04-clinical-trials-survival/src/derive.py` that returns `time` and `event` for each one,
+      and a pytest checking that `time <= t_end` and that composite events are never fewer than
+      stroke-only events.
+
+  - type: recap
+    points:
+      - "An **estimand** defines the question; the estimator comes after it"
+      - "Five attributes: treatment, population, variable, intercurrent events and strategies, summary measure"
+      - Intercurrent events change the meaning or existence of the outcome; loss to follow-up is missing data
+      - "Strategies: **treatment policy**, **hypothetical**, **composite**, **while on treatment / alive**, **principal stratum**"
+      - Treatment policy needs follow-up after the ICE; hypothetical needs a modelled no-ICE assumption
+      - Death can't be handled by treatment policy; use composite or while alive (competing risks, lesson 5)
+      - Missing-data handling and censoring rules follow from the strategy
+      - Sensitivity analyses keep the estimand; supplementary analyses change it

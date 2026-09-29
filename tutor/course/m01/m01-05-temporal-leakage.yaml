@@ -1,0 +1,393 @@
+id: m01-05-temporal-leakage
+title: Temporal leakage and time-zero thinking
+summary: Feature windows, outcome windows, prediction time, and the biases that silently inflate results.
+minutes: 25
+status: authored
+why_it_matters: Leakage is the most common reason impressive clinical models collapse in deployment,
+  and the most common trap in data science interviews. Learning to think in "time zero" makes you
+  the person on a team who catches it.
+objectives:
+  - Separate lookback, index, and outcome windows on a timeline
+  - Choose the right timestamp (event time vs recorded time) for every feature
+  - Recognize immortal time bias and look-ahead bias
+  - Design features that are available at prediction time only
+  - Write checks that catch leakage automatically
+key_points:
+  - Every feature must be knowable at the moment the prediction is made
+  - Filter on when information became available, not when the event supposedly happened
+  - Same-day events on the index date are ambiguous with date-level timestamps
+  - Split data by patient and by time, never by row
+  - Too-good-to-be-true performance is a leakage alarm
+tags: [leakage, cohort, interview]
+steps:
+  - type: text
+    title: A model that was too good
+    text: |
+      A team builds a model to predict 30-day readmission after stroke. Validation AUROC: **0.94**.
+      Everyone is thrilled. Then it goes live, and performance drops to **0.68**.
+
+      Nobody changed the code. The data pipeline was the same. What happened?
+
+      The model had been trained with information that did not exist yet at the moment it was
+      supposed to make its prediction. In training, the future was quietly visible. In
+      production, it wasn't.
+
+      That is **temporal leakage**, and it is the single most common way clinical models fool
+      their builders.
+
+  - type: text
+    title: Time zero
+    text: |
+      Every prediction happens at a specific moment: **time zero** (also called the index time or
+      prediction time). In our stroke project, time zero is the start of the index stroke
+      encounter.
+
+      Split the patient's history into three zones:
+
+      - **Lookback window**: before time zero. Features may come from here.
+      - **Time zero**: the index event. Be careful: things recorded "on" this day are ambiguous.
+      - **Outcome window**: after time zero. The label comes from here, and nothing else does.
+
+      The rule is simple to say and hard to enforce: _a feature is legal only if it would have
+      been known at time zero_.
+
+  - type: image
+    image: m01-05-leakage-timeline.png
+    caption: |
+      The three windows. The orange point looks like a pre-index feature, but it was recorded
+      after time zero. The red point is part of the outcome and must never become a predictor.
+
+  - type: quiz
+    question: |
+      You predict 30-day readmission at the moment of stroke admission. Which feature is leakage?
+    options:
+      - Number of ED visits in the 365 days before admission
+      - Whether the patient had atrial fibrillation documented last year
+      - Length of stay of the index admission
+      - Most recent LDL measured in the prior year
+    answer: 2
+    explanation: |
+      Length of stay is only known at **discharge**, days after the prediction time of
+      admission. It is also strongly tied to readmission risk, so it will look like a great
+      feature. The other three are all measured before time zero.
+
+  - type: text
+    title: Two clocks for every event
+    text: |
+      Clinical data has (at least) two timestamps for every fact:
+
+      - **Event time**: when the thing happened clinically (the encounter date).
+      - **Recorded time**: when it entered the system (the diagnosis was coded, the lab was
+        resulted, the claim was adjudicated).
+
+      These can be weeks apart. Claims can arrive 30–90 days after the service. Diagnoses get
+      added at discharge or by billing coders. Lab results come back hours or days after the
+      sample was drawn.
+
+      For leakage, **recorded time is what matters**: the model can only use what the database
+      would have contained at time zero.
+
+  - type: text
+    title: The repo has this trap built in
+    text: |
+      The synthetic dataset in `01-clinical-data-engineering/` deliberately injects
+      **implausibly late diagnosis timestamps**: diagnoses whose `diagnosis_date` is more than
+      14 days after their encounter started.
+
+      That means you have a choice when building "prior diagnosis" features:
+
+      - filter on the **encounter** date (`encounter_start < index_date`), or
+      - filter on the **diagnosis** date (`diagnosis_date < index_date`).
+
+      Only one of these respects what was knowable at time zero.
+
+  - type: quiz
+    question: |
+      An encounter started 10 days before the index stroke, but its atrial fibrillation diagnosis
+      was recorded 5 days _after_ the index date. The feature filters on `encounter_start <
+      index_date`. What happens?
+    options:
+      - The AF diagnosis is correctly excluded
+      - The AF diagnosis is included, even though it was not known at time zero
+      - The query fails because the dates disagree
+      - Nothing, because AF is a chronic condition anyway
+    answer: 1
+    explanation: |
+      Filtering on the encounter date pulls in a diagnosis that was only recorded after time
+      zero, which is look-ahead leakage. "AF is chronic" is tempting, but the question is not
+      whether the patient _had_ AF, it's whether the _system knew_ at prediction time.
+
+  - type: code
+    title: How the repo builds prior diagnoses
+    text: "From `sql/02_features.sql`:"
+    code: |
+      prior_dx AS (
+          SELECT
+              c.patient_id,
+              c.index_date,
+              MAX(CASE WHEN d.icd10_code LIKE 'I48%' THEN 1 ELSE 0 END) AS prior_af,
+              MAX(CASE WHEN d.icd10_code = 'I10' THEN 1 ELSE 0 END) AS prior_hypertension
+          FROM cohort c
+          LEFT JOIN diagnoses d
+            ON c.patient_id = d.patient_id
+           AND CAST(d.diagnosis_date AS DATE) < c.index_date
+           AND CAST(d.diagnosis_date AS DATE) >= c.index_date - INTERVAL '365 days'
+          GROUP BY 1, 2
+      )
+    after: |
+      Notice three deliberate choices: it filters on `diagnosis_date` (the recorded time), it uses
+      a **strict** `<` so index-day diagnoses are excluded, and the window conditions live in the
+      `ON` clause so patients with no prior diagnoses still get a row (with 0 after `COALESCE`).
+
+  - type: quiz
+    question: |
+      Why are the date conditions in the `ON` clause rather than a `WHERE` clause?
+    options:
+      - It runs faster in DuckDB
+      - A WHERE on the right table would drop cohort patients with no matching diagnoses
+      - WHERE cannot compare dates with intervals
+      - It makes no difference for a LEFT JOIN
+    answer: 1
+    explanation: |
+      With a LEFT JOIN, unmatched rows have NULLs in `d`. A `WHERE d.diagnosis_date < ...`
+      filter throws those rows away, silently turning the LEFT JOIN into an INNER JOIN and
+      removing patients with no history from the cohort. That changes your population, not just
+      your features.
+
+  - type: text
+    title: The index day problem
+    text: |
+      Our timestamps are dates, not minutes. So what about a lab drawn **on** the index date?
+
+      It might have been drawn in the ED an hour before the stroke was recognized, which makes it
+      usable. Or it might be a follow-up lab drawn after treatment started, which is leakage.
+      With date-level data you cannot tell.
+
+      There are three defensible policies:
+
+      - **Exclude** index-day data (conservative; what the repo does with `<`).
+      - **Include** it and document the assumption (riskier).
+      - Get **finer timestamps** and use the actual order time or result time.
+
+      The wrong policy is not deciding at all. In an interview, naming this ambiguity
+      unprompted is a strong signal.
+
+  - type: think
+    interview: true
+    prompt: |
+      An interviewer asks: "You built a model with an AUROC of 0.95 on retrospective EHR data.
+      How would you convince me it isn't leaking?"
+    model_answer: |
+      I'd start by being suspicious: 0.95 is unusually high for most clinical outcomes, so it's
+      a signal to audit. First I'd write down the prediction time and check every feature's
+      timestamp against it, using when the data was recorded or available, not the clinical
+      event date. I'd look at feature importance. If the top features are things like length of
+      stay, discharge disposition, or treatments that follow the outcome, that's a red flag. I'd
+      make sure the split is by patient and ideally by time, so the same patient or future data
+      isn't in both train and test. Then I'd run a temporal validation, training on earlier
+      years and testing on later ones, and ideally a silent prospective run where the model
+      scores patients in real time without affecting care. If performance holds in that setting,
+      I'd be much more confident.
+    key_points:
+      - Treats very high performance as a warning sign rather than a success
+      - Checks every feature against prediction time, using recorded/available time
+      - Inspects top features for post-outcome or process-of-care signals
+      - Splits by patient and by time, not by row
+      - Proposes temporal or prospective (silent) validation
+
+  - type: text
+    title: Leakage through the split
+    text: |
+      Leakage isn't only about features. It can come from **how you split the data**.
+
+      Suppose a patient has five admissions and you randomly split _admissions_ into train and
+      test. The model sees admissions 1, 2, 4 and 5 in training and is tested on admission 3. It
+      can memorize patient-specific patterns (their ID-like combination of comorbidities)
+      instead of learning general risk.
+
+      Rules of thumb:
+
+      - Split by **patient** (grouped split) so no patient appears in both sets.
+      - Prefer a **temporal** split (train on 2018–2021, test on 2022) to mimic deployment.
+      - Fit preprocessing (scalers, imputers, feature selection) on **training data only**.
+
+  - type: quiz
+    question: |
+      You standardize lab values with the mean and SD of the **full dataset**, then split into
+      train and test. What's the issue?
+    options:
+      - None; standardization is a linear transform
+      - Test-set statistics leak into training, slightly inflating performance
+      - Standardization should only be applied to the test set
+      - It breaks calibration completely
+    answer: 1
+    explanation: |
+      Any statistic computed on the full data (means, SDs, imputation values, selected features)
+      carries information about the test set. The effect is often small for scaling but can be
+      large for feature selection or target encoding. Fit on train, apply to test.
+
+  - type: text
+    title: Immortal time bias
+    text: |
+      A close cousin of leakage shows up in cohort studies.
+
+      Say you compare stroke patients who **ever filled a statin prescription within 90 days** to
+      those who didn't, and measure mortality from the stroke date. To be in the "statin" group,
+      a patient had to survive long enough to fill the prescription. That survival period is
+      **immortal time**: by construction, no deaths can occur there for the exposed group.
+
+      Result: statins look protective even if they do nothing.
+
+      The fix is to align time zero with the moment exposure status is determined, or to treat
+      exposure as **time-varying**. You'll meet this again in survival analysis (Module 04) and
+      target trial emulation.
+
+  - type: quiz
+    question: |
+      Which design avoids immortal time bias when studying statin use after stroke?
+    options:
+      - Define exposure as any statin fill in the year after stroke
+      - Exclude patients who died within 90 days
+      - Start follow-up for everyone at day 90 and define exposure by fills before day 90 (a landmark analysis)
+      - Match statin users to non-users on age and sex
+    answer: 2
+    explanation: |
+      A landmark analysis sets a common time zero (day 90) after exposure is determined, so both
+      groups have the same opportunity to experience the outcome. Excluding early deaths (B)
+      introduces selection bias, and matching (D) doesn't fix a time-alignment problem.
+
+  - type: code
+    title: Spot the leak
+    text: A colleague wrote this outcome-plus-feature query. Read it carefully.
+    code: |
+      SELECT
+          c.patient_id,
+          COUNT(DISTINCT e.encounter_id) AS encounters_365d,
+          MAX(CASE WHEN e.encounter_type = 'inpatient'
+                    AND e.encounter_start > c.index_date
+                    AND e.encounter_start <= c.index_date + INTERVAL '30 days'
+                   THEN 1 ELSE 0 END) AS readmit_30d
+      FROM index_stroke_cohort c
+      LEFT JOIN encounters e
+        ON e.patient_id = c.patient_id
+       AND e.encounter_start >= c.index_date - INTERVAL '365 days'
+       AND e.encounter_start <= c.index_date + INTERVAL '30 days'
+      GROUP BY c.patient_id
+
+  - type: quiz
+    question: In the query above, what's wrong with `encounters_365d`?
+    options:
+      - It double-counts encounters with multiple diagnoses
+      - It includes the index encounter and any encounters in the 30-day outcome window
+      - It excludes patients with no encounters
+      - Nothing; COUNT(DISTINCT) makes it safe
+    answer: 1
+    explanation: |
+      The join window was widened to `+30 days` to compute the outcome, and the feature reuses
+      the same joined rows. So `encounters_365d` counts the index encounter and every
+      readmission, which leaks the label into a feature. Build features and outcomes in
+      **separate** CTEs with their own windows, as `02_features.sql` does.
+
+  - type: text
+    title: A design decision hiding in the repo
+    text: |
+      Look at how `02_features.sql` defines readmission:
+
+      `e.encounter_start > c.index_date AND e.encounter_start <= c.index_date + INTERVAL '30 days'`
+
+      The window is anchored on the **admission** date, not the **discharge** date. The standard
+      CMS-style definition counts 30 days from discharge. Why might the repo do this? The
+      synthetic `encounters` table has **missing `encounter_end` values**, so discharge time is
+      not always known.
+
+      That's a legitimate trade-off, but it changes the meaning of the label: a patient with a
+      12-day stay has only 18 days of post-discharge follow-up. Documenting choices like this is
+      part of the job.
+
+  - type: think
+    prompt: |
+      How would you change the readmission definition to measure 30 days from discharge, and what
+      would you do about encounters with a missing `encounter_end`?
+    model_answer: |
+      Anchor the window on the index encounter's end: a qualifying readmission is an inpatient
+      encounter whose start is after the index `encounter_end` and within 30 days of it. For
+      missing end times, I'd first measure how common they are and whether they are associated
+      with the outcome. Options include imputing the end from other sources (the claim's service
+      dates, or the last diagnosis or procedure date in that encounter), excluding them and
+      reporting the exclusion in the attrition table, or running a sensitivity analysis under
+      both definitions. I'd also exclude planned readmissions and transfers if I had that
+      information, since they aren't failures of care.
+    key_points:
+      - Anchor on the index encounter's end time instead of the start
+      - Quantify how many encounters have a missing end and whether that is related to the outcome
+      - Impute from related data, exclude with documentation, or run a sensitivity analysis
+      - Consider transfers and planned readmissions
+
+  - type: text
+    title: Catching leakage automatically
+    text: |
+      Good teams don't rely on vigilance alone. They write tests that fail when leakage appears:
+
+      - **Window assertion**: for every feature source row joined, assert
+        `event_date < index_date`. Zero violations expected.
+      - **Label independence check**: features built with the outcome window removed must be
+        identical to the production features.
+      - **Suspicious-importance check**: flag any single feature with extreme importance or
+        near-perfect univariate AUROC.
+      - **Temporal holdout**: always report performance on a later time period, not just a
+        random split.
+
+      These belong in `pytest` alongside the cohort tests, which is Module 01's Milestone 5.
+
+  - type: laptop
+    title: Write a leakage test for the feature table
+    repo_path: 01-clinical-data-engineering/tests/test_pipeline.py
+    task: |
+      Add a pytest that joins `stroke_features` back to `diagnoses` and `labs` and asserts that
+      no feature source row has a date on or after the patient's `index_date`. Then deliberately
+      change `<` to `<=` in `02_features.sql` and confirm the test fails.
+
+  - type: think
+    interview: true
+    prompt: |
+      "What's the difference between data leakage and overfitting? They both give you optimistic
+      validation results."
+    model_answer: |
+      Overfitting is when the model learns noise specific to the training data, so it performs
+      worse on any new data, including a properly held-out validation set. That's why validation
+      catches it. Leakage is when the validation set itself is contaminated: information that
+      wouldn't be available at prediction time, or information from the test set, is available
+      during training or in the features. So validation looks great, and the problem only shows
+      up in deployment. Overfitting is fixed with regularization, more data, or simpler models.
+      Leakage is fixed by correcting the data pipeline, the feature timestamps, and the split.
+      More regularization won't help.
+    key_points:
+      - Overfitting is memorizing training noise, and an honest validation set detects it
+      - Leakage contaminates the evaluation itself, so validation cannot detect it
+      - Leakage shows up in deployment or temporal validation
+      - The fixes are different, with regularization for overfitting and pipeline/timestamp/split fixes for leakage
+
+  - type: quiz
+    question: |
+      Which result should make you **most** suspicious of leakage in a 30-day stroke readmission
+      model?
+    options:
+      - AUROC of 0.71 on a temporal holdout
+      - The top feature is "number of inpatient encounters in the prior year"
+      - The top feature is "discharged to skilled nursing facility", with 40% of importance
+      - Calibration slope of 0.9
+    answer: 2
+    explanation: |
+      Discharge disposition is determined at the end of the index stay, after an admission-time
+      prediction. It is also very predictive, which is exactly the leakage signature. Prior-year
+      utilization is a legitimate, well-known predictor, and 0.71 is realistic for readmission.
+
+  - type: recap
+    points:
+      - Define **time zero** first; every feature must be knowable at that moment
+      - Filter on **recorded/available time**, not the clinical event date
+      - Index-day data is ambiguous with date-level timestamps, so pick a policy and document it
+      - Put window filters in the `ON` clause of LEFT JOINs so you don't lose patients
+      - Split by **patient and time**, and fit preprocessing on training data only
+      - "**Immortal time bias** arises when exposure is defined using future information"
+      - Build features and outcomes in separate CTEs, and test for leakage automatically

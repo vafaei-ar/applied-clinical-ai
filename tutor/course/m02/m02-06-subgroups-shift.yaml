@@ -1,0 +1,444 @@
+id: m02-06-subgroups-shift
+title: Subgroups, fairness, and external validation
+summary: Subgroup evaluation with honest uncertainty, fairness criteria and why they conflict, the
+  race-based eGFR lesson, and internal vs temporal vs external validation.
+minutes: 25
+status: authored
+why_it_matters: Health equity and generalization are central to clinical AI hiring and review. Expect
+  "how would you check this is fair?" and "would this work at another hospital?" in almost every
+  interview, and expect reviewers to ask for TRIPOD+AI-style reporting.
+objectives:
+  - Run and interpret subgroup performance with confidence intervals, and avoid small-n traps
+  - Contrast demographic parity, equalized odds, and calibration within groups
+  - Explain why fairness criteria conflict when base rates differ
+  - Explain what the race-based eGFR history teaches about using race in clinical models
+  - Design internal, temporal, and external validation, and report them with TRIPOD+AI in mind
+key_points:
+  - Overall metrics average over subgroups and can hide a group where the model fails
+  - Small subgroups need CIs; wide intervals mean "unknown", not "fine"
+  - Fairness criteria are mutually incompatible when base rates differ (Kleinberg 2016, Chouldechova 2017)
+  - Bias often enters through the label and the data, not only the model
+  - Race-corrected eGFR was replaced by the race-free 2021 CKD-EPI equation
+  - Temporal validation catches drift; external validation catches site differences
+  - TRIPOD+AI (2024) is the reporting guideline for AI prediction models
+tags: [fairness, validation, subgroups, interview]
+steps:
+  - type: text
+    title: The average hides the failure
+    text: |
+      Your stroke readmission model has an AUROC of 0.71 on the temporal test set. Respectable
+      for readmission. Then someone splits the results by payer: **Commercial 0.75, Medicare 0.73,
+      Medicaid 0.66**.
+
+      Nothing in the overall number warned you. Medicaid patients are also the group with the
+      highest readmission rate, so they're the ones a transitional-care program most needs to
+      find.
+
+      A plausible mechanism: Medicaid patients have more fragmented care, so more of their prior
+      history happened at hospitals outside our data. Their `prior_af` and
+      `inpatient_visits_prior_365d` features are more often false zeros. The model isn't
+      "biased" in its code. It's working with worse information for one group.
+
+      This lesson is about finding these gaps honestly and knowing what you can and can't fix.
+
+  - type: text
+    title: Which subgroups?
+    text: |
+      Choose subgroups **before** looking at results, based on where failure is plausible or
+      consequential:
+
+      - **Demographics**: sex, race and ethnicity, age bands. In the repo: `patients.sex`,
+        `patients.race_ethnicity`, and `age_at_index` from the cohort table.
+      - **Access and payer**: `coverage.plan_type` (Commercial, Medicare, Medicaid), which is a
+        rough proxy for socioeconomic factors and care fragmentation.
+      - **Site**: the index encounter's `encounters.facility_id`.
+      - **Clinical**: stroke severity, prior stroke, key comorbidities.
+
+      Pre-specifying matters. If you slice 40 ways after the fact, some slices will look bad by
+      chance, and some real gaps will get explained away.
+
+  - type: code
+    title: Start with counts, not metrics
+    language: sql
+    text: "Before any AUROC, check how many events each subgroup has (DuckDB):"
+    code: |
+      SELECT
+          p.race_ethnicity,
+          COUNT(*)                  AS n_patients,
+          SUM(f.readmission_30d)    AS n_events,
+          ROUND(AVG(f.readmission_30d), 3) AS readmit_rate
+      FROM stroke_features f
+      JOIN patients p USING (patient_id)
+      GROUP BY p.race_ethnicity
+      ORDER BY n_patients DESC;
+    after: |
+      The number that controls your uncertainty is `n_events` (and, for specificity, the
+      non-events), not `n_patients`. A group of 300 patients with 25 readmissions supports much
+      less than its size suggests.
+
+  - type: text
+    title: Small-n pitfalls
+    text: |
+      Subgroup metrics are noisy, and the noise is larger than intuition says.
+
+      Suppose the model catches 12 of 20 readmissions in a small group: sensitivity 0.60. The 95%
+      Wilson interval is about **0.39 to 0.78**. That group could be doing better than average or
+      much worse. You can't tell.
+
+      Rules that keep you honest:
+
+      - Report a **CI for every subgroup metric**. Bootstrap within the subgroup for AUROC,
+        calibration intercept, and slope. Wilson intervals work for sensitivity and PPV.
+      - Show **event counts** next to every estimate.
+      - A wide CI that overlaps the overall estimate means **"insufficient evidence"**, not
+        "no problem".
+      - With many subgroups, expect a few to look off by chance. Treat surprises as hypotheses
+        to check (other time periods, other sites), not verdicts.
+      - Look at **calibration** by group, not just AUROC. A model can rank well within a group and
+        still be systematically wrong about that group's risk level.
+
+  - type: image
+    image: m02-06-subgroup-forest.png
+    caption: |
+      Simulated forest plot, one cohort of 4,000 patients. The dashed line is overall AUROC. Most
+      groups overlap it. Medicaid sits clearly lower. "Other" (20 events) has an interval so wide
+      it is compatible with almost anything.
+
+  - type: quiz
+    question: Based on the forest plot, which conclusion is best supported?
+    options:
+      - The model works equally well for every racial and ethnic group
+      - The model is worse for the "Other" group, whose interval reaches down to 0.59
+      - Medicaid shows a likely real gap; the "Other" and Asian estimates are too uncertain to judge
+      - Commercial patients are clearly better served than Medicare patients
+    answer: 2
+    explanation: |
+      Medicaid's whole interval sits at or below the overall estimate, with 183 events behind it,
+      so it's worth investigating. "Other" has 20 events. Its interval runs from roughly 0.59 to
+      0.83, so it neither shows a problem nor rules one out. Overlapping intervals (Commercial vs
+      Medicare) don't show a difference, and "works equally well" confuses absence of evidence
+      with evidence of absence.
+
+  - type: code
+    title: Bootstrap CI for a subgroup AUROC
+    language: python
+    code: |
+      import numpy as np
+      from sklearn.metrics import roc_auc_score
+
+      def auroc_ci(y, p, n_boot=2000, seed=0):
+          rng = np.random.default_rng(seed)
+          y, p = np.asarray(y), np.asarray(p)
+          stats = []
+          for _ in range(n_boot):
+              idx = rng.integers(0, len(y), len(y))
+              if len(np.unique(y[idx])) < 2:
+                  continue
+              stats.append(roc_auc_score(y[idx], p[idx]))
+          lo, hi = np.percentile(stats, [2.5, 97.5])
+          return roc_auc_score(y, p), lo, hi
+
+      for group, d in test_df.groupby("plan_type"):
+          est, lo, hi = auroc_ci(d["readmission_30d"], d["p_hat"])
+          print(f"{group:<11} {est:.3f} ({lo:.3f}-{hi:.3f})  events={d['readmission_30d'].sum()}")
+
+  - type: quiz
+    question: |
+      In the code above, why does the loop skip resamples where `len(np.unique(y[idx])) < 2`?
+    options:
+      - To remove outliers that would distort the interval
+      - AUROC is undefined when a resample contains only one class, which happens in small groups
+      - To make the bootstrap stratified by outcome
+      - It speeds up the loop by skipping duplicate rows
+    answer: 1
+    explanation: |
+      AUROC compares events with non-events, so a resample with no events (or no non-events)
+      can't be scored, and `roc_auc_score` raises an error. In a subgroup with only a handful of
+      events, this happens often. If it happens a lot, the group is too small for a stable
+      estimate. Skipping those resamples isn't the same as a stratified bootstrap, which would
+      resample events and non-events separately.
+
+  - type: text
+    title: Three fairness criteria
+    text: |
+      For a model that flags patients at a threshold, the criteria you'll be asked about are:
+
+      - **Demographic parity**: every group is flagged at the same rate. It ignores whether the
+        groups actually differ in risk.
+      - **Equalized odds** (Hardt, Price, and Srebro, 2016): equal **true positive rate** and
+        equal **false positive rate** across groups. Among patients who will be readmitted, each
+        group is equally likely to be caught. Among those who won't, each is equally likely to be
+        falsely flagged. _Equal opportunity_ relaxes this to equal TPR only.
+      - **Calibration within groups**: a predicted 20% means about 20% observed in every group.
+        The closely related _predictive parity_ asks for equal PPV at the threshold.
+
+      In clinical settings, demographic parity is rarely the right target. If Medicaid patients
+      truly have higher readmission risk, forcing equal flag rates means under-serving the
+      higher-need group.
+
+  - type: quiz
+    question: |
+      Medicaid patients have 17% readmission, Commercial patients 12%. Your model flags 26% of
+      Medicaid and 15% of Commercial patients. A reviewer says this violates demographic parity.
+      What's the best response?
+    options:
+      - Different flag rates can be appropriate when true risk differs; check TPR, FPR, and calibration by group
+      - Agree, and pick group-specific thresholds so both groups are flagged at 20%
+      - Remove `plan_type` from the model so the flag rates equalize
+      - Demographic parity is the legal standard in the US, so it must be satisfied
+    answer: 0
+    explanation: |
+      Flag rates should differ if need differs. The fairness questions that matter here are
+      whether readmitted patients in each group are caught equally often (TPR), whether each
+      group is falsely flagged equally often (FPR), and whether the risks are equally accurate
+      (calibration). Forcing parity would drop high-risk Medicaid patients. Removing the variable
+      doesn't guarantee anything, because other features act as proxies.
+
+  - type: text
+    title: You can't have them all
+    text: |
+      Two influential results show that the criteria conflict:
+
+      - **Kleinberg, Mullainathan, and Raghavan (2016)**: calibration within groups and balance of
+        error rates across groups can hold together only if the model predicts perfectly or the
+        groups have **equal base rates**.
+      - **Chouldechova (2017)**: at any threshold,
+        `FPR = p/(1−p) · (1−PPV)/PPV · (1−FNR)`, where `p` is the group's prevalence. If two groups
+        have equal PPV and equal FNR but different prevalence, their FPRs **must** differ.
+
+      The intuition: a calibrated model gives the higher-prevalence group higher scores on average,
+      so at any shared threshold that group has more flags, and more of its non-events get flagged.
+
+      In practice, you pick the criterion that matches the harm. For an outreach program, the
+      costly failure is missing a patient who needed help, so equal TPR plus calibration within
+      groups is usually the defensible pair. Write down the choice and why.
+
+  - type: quiz
+    question: |
+      Using Chouldechova's identity: two groups have the same PPV (0.30) and the same FNR (0.40)
+      at your threshold. Group A has 20% prevalence, group B 10%. What must be true?
+    options:
+      - The FPRs are equal, because PPV and FNR are equal
+      - Group B has a higher FPR than group A
+      - Nothing can be said without the AUROC
+      - Group A has a higher FPR than group B
+    answer: 3
+    explanation: |
+      The FPR scales with `p/(1−p)`: 0.25 for A and about 0.11 for B, with everything else
+      equal. So A's FPR is about 2.25 times B's (0.25 × 2.33 × 0.6 ≈ 0.35 vs about 0.16). Equal PPV and equal
+      error rates can't coexist when prevalence differs. This is the arithmetic behind the
+      COMPAS debate that prompted the paper.
+
+  - type: text
+    title: Bias usually enters before the model
+    text: |
+      Most fairness failures come from the **label** and the **data**, not the loss function.
+
+      - **Label choice**: Obermeyer et al. (Science, 2019) showed that a widely used care
+        management algorithm predicted **healthcare cost** as a proxy for need. Black patients
+        had lower costs at the same level of illness because of unequal access, so the algorithm
+        systematically underestimated their need.
+      - **Our label**: `readmission_30d` counts inpatient encounters **we can see**. A patient
+        readmitted to an out-of-network hospital looks like a non-event. If that happens more for
+        some groups, the label itself is biased.
+      - **Features**: missing history (the Medicaid example), different testing rates (a lab that's
+        only ordered for some patients), and coding intensity all differ by group.
+
+      Ask "is the label the same thing for every group?" before tuning thresholds.
+
+  - type: text
+    title: The race-based eGFR lesson
+    text: |
+      Kidney function is estimated from serum creatinine with an equation (eGFR). The widely used
+      MDRD and **CKD-EPI 2009** equations included a race coefficient that **increased** eGFR for
+      patients recorded as Black, based on the assumption of higher average muscle mass.
+
+      The consequence: at the same creatinine, Black patients appeared to have better kidney
+      function. That could delay CKD diagnosis, specialist referral, and transplant waitlisting.
+
+      In **2021** the NKF–ASN task force recommended dropping race, and the **CKD-EPI 2021
+      equation** was refit without it (Inker et al., NEJM 2021). US transplant policy then
+      required race-neutral eGFR, with waiting-time adjustments for affected candidates.
+
+      Lessons for model builders:
+
+      - Race is a social category, and as a predictor it usually stands in for something else
+        (access, exposures, measurement). Ask what it stands in for.
+      - A race term can improve average fit and still cause harm at decision thresholds.
+      - The repo's `labs` table has `creatinine`. If you derive eGFR as a feature, use the 2021
+        equation and document it.
+
+  - type: quiz
+    question: |
+      Should `race_ethnicity` be an input feature of the stroke readmission model?
+    options:
+      - Yes, always; more information means a fairer model
+      - No, never; removing it makes the model fair
+      - Decide explicitly, compare models with and without it, and evaluate subgroup calibration and error rates either way
+      - Include it only if it improves overall AUROC by more than 0.01
+    answer: 2
+    explanation: |
+      There's no universal answer. Dropping race doesn't remove group information (ZIP3, payer,
+      and utilization are proxies), and including it can encode access differences as "biology".
+      What you owe reviewers is a justified decision, a comparison, and subgroup evaluation in
+      both cases. Race is needed for **evaluation** even if you exclude it as a predictor. An
+      overall-AUROC rule ignores exactly the subgroup harms you're trying to catch.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you check that our 30-day readmission model is fair before it's used to pick
+      patients for a transitional-care program?"
+    model_answer: |
+      I'd start from the use: we're allocating a limited, beneficial outreach, so the main harm is
+      missing high-risk patients in some group. First I'd check the label. Readmission only counts
+      encounters we can see, so I'd look at whether out-of-network readmissions differ by payer or
+      race, because a biased label can't be fixed downstream. Then I'd pre-specify subgroups: sex,
+      race and ethnicity, age bands, payer, and site. For each I'd report event counts, AUROC,
+      calibration intercept and slope, and, at the operating threshold, TPR, FPR, and PPV, all with
+      bootstrap CIs. I'd focus on equal TPR and calibration within groups, and I'd say up front
+      that we can't also equalize FPR when base rates differ. Where I found a gap, like lower
+      performance for Medicaid, I'd look for causes such as missing history, try fixes like better
+      features or group-specific recalibration, and involve the clinical and equity teams in
+      deciding whether the remaining gap is acceptable. Finally, I'd keep monitoring these metrics
+      after launch, since fairness can drift like anything else.
+    key_points:
+      - Frames fairness around the specific decision and its harms (missed high-risk patients)
+      - Checks whether the label means the same thing across groups
+      - Pre-specified subgroups with event counts, discrimination, calibration, and threshold error rates, with CIs
+      - Names the criterion chosen (such as equal TPR plus calibration) and acknowledges the impossibility trade-off
+      - Investigates causes of gaps, involves stakeholders, and monitors after deployment
+
+  - type: text
+    title: Internal, temporal, external
+    text: |
+      Validation designs answer different questions:
+
+      - **Internal** (bootstrap, cross-validation, random split of the same data): how much of
+        the apparent performance is optimism from fitting? It's necessary but tells you little
+        about new settings.
+      - **Temporal** (train on earlier index dates, test on later ones): does the model survive
+        changes in practice, coding, and population over time? This is the minimum for anything
+        you plan to deploy. In US data, watch for the ICD-9 to ICD-10 switch in October 2015,
+        EHR migrations, and the COVID-19 period.
+      - **External or geographic** (a different hospital or health system): does it transfer
+        across case mix, prevalence, and workflows? Ideally a team that didn't build the model
+        runs it.
+      - **Internal-external cross-validation**: with multi-site data, leave one site out at a time
+        and look at how much performance varies between sites. It's a cheap preview of external
+        validation.
+
+      A prospective **silent deployment** (score live patients, show no one) comes after all of
+      these, and it's covered in Module 03.
+
+  - type: text
+    title: What real external validation found
+    text: |
+      A cautionary example: Wong et al. (JAMA Internal Medicine, 2021) externally validated a
+      widely deployed proprietary sepsis prediction model at a large academic health system. They
+      found an AUROC of about **0.63**, well below the performance the developer had reported, and
+      the model missed most sepsis cases while generating many alerts.
+
+      The pattern is common: performance in the development data is the best case. Differences in
+      prevalence, documentation, timing of data entry, and outcome definitions between sites all
+      cost performance, and calibration usually suffers most (previous lesson).
+
+      That's why regulators and journals ask what kind of validation you did, not just what the
+      AUROC was.
+
+  - type: quiz
+    question: |
+      You have stroke admissions from four facilities (`facility_id`) over 2016–2023. Which design
+      best estimates how the model will do when deployed next year at a fifth hospital?
+    options:
+      - Random 80/20 split of all patients, repeated five times
+      - Train on 2016–2021, test on 2022–2023 at the same four facilities
+      - Leave-one-facility-out, with each held-out facility's test restricted to the later years
+      - Train on all data, then report the bootstrap optimism-corrected AUROC
+    answer: 2
+    explanation: |
+      A new hospital next year is both a new site and a later time. Leaving one facility out while
+      also testing on later years mimics both shifts, and the spread across held-out facilities
+      tells you how variable performance is. A temporal split alone doesn't test site transfer, and
+      a random split or bootstrap only measures optimism within the same data.
+
+  - type: text
+    title: Naming the shift
+    text: |
+      When performance drops in validation, name the kind of shift. It points to the fix:
+
+      - **Covariate shift**: the feature distribution changes (older patients, more AF) but the
+        risk given features is the same. Discrimination may hold. Check calibration and case mix.
+      - **Label (prior) shift**: the outcome rate changes (better post-discharge follow-up lowers
+        readmissions). Mostly an intercept problem, so a recalibration update is the fix.
+      - **Concept shift**: the relationship itself changes (a new anticoagulation protocol changes
+        what `prior_af` means for risk). This needs retraining.
+
+      Real shifts mix all three, but the vocabulary makes your analysis and your interview answers
+      sharper. Module 03 turns these into monitoring checks.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We want to roll out your readmission model to three hospitals we just acquired. What
+      validation would you do before and after go-live?"
+    model_answer: |
+      Before anything, I'd confirm the model can be computed there: same feature definitions,
+      same coding and lab units, and a readmission label that captures the same events. Mapping
+      differences are a common silent failure. Then I'd pull a retrospective sample from each
+      hospital, ideally the most recent year or two, and run external validation per site:
+      discrimination and calibration with CIs, plus the subgroup breakdowns. I'd expect
+      calibration to be off, so I'd plan a local intercept or logistic recalibration fitted on
+      one period and checked on a later one, and I'd only retrain if the calibration curve's
+      shape or the discrimination was clearly worse. Next I'd run a silent period of a few weeks
+      to catch data-latency and pipeline issues that retrospective data hides. After go-live I'd
+      monitor input drift, prediction distribution, calibration as outcomes arrive about 30 days
+      later, and subgroup metrics, with pre-agreed thresholds for re-review. I'd write it up
+      following TRIPOD+AI so the results are reviewable.
+    key_points:
+      - Checks feature and label mapping at each new site first
+      - External validation per site covering discrimination, calibration, and subgroups with CIs
+      - Plans local recalibration, validated on a later period, before considering retraining
+      - Silent deployment to catch real-time pipeline issues
+      - Post-launch monitoring, accounting for the 30-day label delay, and reporting per TRIPOD+AI
+
+  - type: text
+    title: Reporting with TRIPOD+AI
+    text: |
+      **TRIPOD+AI** (Collins et al., BMJ 2024) updates the 2015 TRIPOD statement for prediction
+      models built with regression or machine learning. Journals increasingly expect it, and it's
+      a good checklist for your own project write-up. In spirit, it asks you to report:
+
+      - data sources, settings, and **dates**, and how participants were selected
+      - the **outcome definition** and the **timing of predictors** relative to prediction time
+      - sample size and number of events, and how **missing data** were handled
+      - the full development pipeline, including tuning and any recalibration
+      - performance with **both discrimination and calibration**, with uncertainty, on each
+        validation type
+      - **fairness**: performance across relevant subgroups
+      - availability of code and models, and the model's limitations and intended use
+
+      Its companion, PROBAST, is used to assess risk of bias when reviewing prediction model
+      studies. Mentioning both in an interview signals that you know how this work is judged.
+
+  - type: laptop
+    title: Subgroup and leave-one-site-out evaluation
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/subgroups.py
+    task: |
+      Create this module. Join `stroke_features` to `patients` (sex, race_ethnicity), to
+      `coverage` (plan_type active at `index_date`), and to `encounters` on the index
+      `encounter_id` (facility_id). For your held-out predictions, output a table per subgroup:
+      n, events, AUROC with bootstrap CI, calibration intercept and slope, and TPR/FPR at your
+      operating threshold. Then run leave-one-facility-out training and plot per-facility AUROC.
+      Note which subgroups have too few events to interpret.
+
+  - type: recap
+    points:
+      - Pre-specify subgroups and report **event counts and CIs**; a wide interval means "unknown"
+      - Check calibration by group, not just AUROC
+      - "Demographic parity, equalized odds, and calibration within groups conflict when base rates differ"
+      - Choose the fairness criterion that matches the harm, and write the choice down
+      - Bias often enters through the **label** (Obermeyer 2019) and missing data, not the model
+      - Race-corrected eGFR was replaced by the race-free CKD-EPI 2021 equation; ask what a race term stands in for
+      - Internal validation measures optimism, temporal catches drift, external catches site differences
+      - Report with **TRIPOD+AI**

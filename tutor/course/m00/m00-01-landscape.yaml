@@ -1,0 +1,369 @@
+id: m00-01-landscape
+title: How a clinical AI system actually gets built
+summary: Follow one prediction model from raw EHR rows to a bedside alert, see which role owns each
+  stage, and get the map for the rest of the course.
+minutes: 25
+status: authored
+why_it_matters: Interviewers test whether you see the whole pipeline, not just the model. Most real
+  failures happen outside the model, and the people who get hired are the ones who can see them coming.
+objectives:
+  - "Trace the lifecycle: question, data, cohort, features, model, validation, deployment, monitoring, evidence"
+  - Name the roles (data engineer, ML engineer, research scientist, biostatistician, clinical informaticist)
+    and their hand-offs
+  - "Explain why clinical AI differs from ad-tech ML: stakes, label quality, shift, regulation, workflow"
+  - Place each course module on the lifecycle map
+key_points:
+  - The Epic Sepsis Model external validation is a cautionary tale about evidence, not code
+  - The model is a small fraction of the work
+  - A model only helps if it changes a clinical action, so workflow integration and alert fatigue matter
+  - "Evidence ladder: retrospective AUROC, then temporal/external validation, then silent deployment, then a prospective study"
+tags: [big-picture, interview]
+steps:
+  - type: text
+    title: A model used by hundreds of hospitals
+    text: |
+      Epic's sepsis prediction model shipped inside one of the most widely used EHRs in the US.
+      Hospitals switched it on and it began paging clinicians about patients at risk.
+
+      In 2021, Wong et al. (JAMA Internal Medicine) checked it independently at Michigan Medicine,
+      across roughly 38,000 hospitalizations. They found:
+
+      - AUROC of about **0.63**, well below what the developer had reported
+      - It **missed about two thirds** of patients who developed sepsis
+      - It alerted on about **18% of all** hospitalized patients
+
+      Nobody had to find a bug. The code did what it was written to do. What was missing was
+      **evidence** that it worked in that hospital, on those patients, inside that workflow.
+
+      This course is about everything around the model that decides whether it helps patients.
+
+  - type: text
+    title: The map
+    text: |
+      Every clinical AI system, whether it's a readmission score, a sepsis alert, or an LLM that
+      summarizes charts, goes through the same nine stages:
+
+      1. **Question**: what decision will this change?
+      2. **Data**: pull and clean EHR and claims data
+      3. **Cohort + label**: who is in the study, and what counts as the outcome
+      4. **Features**: what's known at prediction time
+      5. **Model**: train something, starting with a baseline
+      6. **Validation**: honest estimates of performance and calibration
+      7. **Deployment**: make it run on live data, reliably
+      8. **Monitoring**: notice when it breaks or drifts
+      9. **Evidence**: show it improves care
+
+      Failures can start at any stage. The famous ones usually start at stage 1, 3, or 9.
+
+  - type: image
+    image: m00-01-lifecycle.png
+    caption: |
+      The lifecycle, the role that usually owns each stage, and the course module that teaches it.
+      Keep this map in mind: every lesson plugs into one of these boxes.
+
+  - type: text
+    title: Stage 1 starts from the action
+    text: |
+      A strong project starts from a decision, not a dataset. Before anything else, write down:
+
+      - **Who** will act on the output (a nurse, a pharmacist, a care manager)?
+      - **When** is the prediction made (time zero), and how far ahead does it look (the horizon)?
+      - **What** will they do differently (call a rapid response, schedule a follow-up visit)?
+      - **What does it cost** when the model is wrong in each direction?
+
+      "Predict readmission" is not a question. "At discharge after an ischemic stroke, flag
+      patients whose 30-day readmission risk is high enough that a nurse should call them within
+      48 hours" is one. Module 02 starts with this framing.
+
+  - type: quiz
+    question: Which project framing is ready to build?
+    options:
+      - Use deep learning on all our EHR data to predict adverse outcomes
+      - Predict 30-day mortality for every patient in the hospital
+      - At 07:00 each day, rank ward patients by 24-hour deterioration risk so the charge nurse can pick 3 for early review
+      - Find the best-performing model for sepsis on a public benchmark
+    answer: 2
+    explanation: |
+      Option C names the time zero (07:00), the horizon (24 h), the population (ward patients),
+      the user (the charge nurse), and the capacity (3 reviews). That tells you how to build the
+      label, the features, and the threshold. The others name a method or an outcome but no
+      decision, so any model would "succeed" without helping anyone.
+
+  - type: text
+    title: "Stages 2–4: where most of the work is"
+    text: |
+      Data, cohort, and features are Module 01. The running project for the whole course lives
+      in `01-clinical-data-engineering/`: a synthetic dataset of 5,000 adults across eight tables
+      (`patients`, `coverage`, `encounters`, `diagnoses`, `procedures`, `medications`, `labs`,
+      `claims`).
+
+      From it you'll build an **index ischemic-stroke cohort** (first ED or inpatient encounter
+      with an `I63%` diagnosis, age 18+, 365 days of continuous coverage) with pre-index features
+      and a **30-day readmission** label.
+
+      The dataset deliberately includes the defects real data has: duplicate diagnosis rows,
+      missing discharge times, coverage gaps, and diagnoses recorded weeks late. Handling those is
+      what the job is really like.
+
+  - type: text
+    title: The model is the small box
+    text: |
+      A well-known diagram from Sculley et al. ("Hidden Technical Debt in Machine Learning
+      Systems", NeurIPS 2015) shows the ML code as a tiny box surrounded by much bigger ones: data
+      collection, verification, feature extraction, serving, monitoring, configuration.
+
+      Clinical teams report the same thing. A common rule of thumb is that model training is well
+      under a fifth of the effort. That's an estimate from experience, not a measured statistic,
+      but nobody who has shipped a clinical model argues with it.
+
+      Two practical consequences:
+
+      - A better architecture rarely rescues a bad label or a leaky feature.
+      - In interviews, talking about cohort logic, validation, and monitoring signals more
+        experience than talking about model architecture.
+
+  - type: quiz
+    question: |
+      Your readmission model's AUROC is 0.66 and your manager wants it higher. What's usually the
+      most productive first step?
+    options:
+      - Audit the label definition and check which information is missing at prediction time
+      - Tune hyperparameters with a larger search
+      - Switch from gradient boosting to a transformer
+      - Add dropout and weight decay
+    answer: 0
+    explanation: |
+      Readmission is a hard outcome, and gains usually come from the data: is the label capturing
+      readmissions to other hospitals? Are useful pre-index signals (prior utilization, labs,
+      social factors) missing? Architecture and tuning changes typically move AUROC by a point or
+      two on tabular EHR data. Regularization addresses overfitting, which isn't the problem
+      described.
+
+  - type: text
+    title: "Stages 7–8: shipping and staying alive"
+    text: |
+      A validated model on a laptop helps no one. Module 03 turns the readmission model into a
+      tested FastAPI service in a Docker container, with CI, a deployment, and drift monitoring.
+
+      But deployment is also a **workflow** problem:
+
+      - Where does the output appear? A pop-up alert, a worklist, a dashboard?
+      - Does it reach the person who can act, at a moment when they can act?
+      - How many alerts per shift can that person absorb?
+
+      **Alert fatigue** is real: when most alerts are false, clinicians learn to dismiss them all,
+      including the true ones. A model with decent AUROC can still fail in practice because its
+      alerts are too frequent to be taken seriously.
+
+  - type: quiz
+    question: |
+      A deterioration alert has a positive predictive value (PPV) of 10%. On average, how many
+      alerts does a nurse evaluate for each patient who truly deteriorates?
+    options:
+      - "1"
+      - "5"
+      - "10"
+      - "90"
+    answer: 2
+    explanation: |
+      This is the **number needed to evaluate**, 1 / PPV = 1 / 0.10 = 10. Nine of every ten
+      alerts are false. "90" is the number of false alerts per hundred, not per true case. Asking
+      "how many alerts per true case, and can the team afford that?" is often more useful to
+      clinicians than any AUROC.
+
+  - type: text
+    title: "Stage 9: evidence"
+    text: |
+      Retrospective AUROC answers a narrow question: "could this score have ranked past patients
+      well, at this site, with this data extract?"
+
+      Clinicians and health-system leaders need answers to harder questions:
+
+      - Does it hold up on **later years** and **other hospitals**? (temporal and external validation)
+      - Does it work on **live data**, with real feed delays and missing values? (silent deployment)
+      - Does using it **improve outcomes** without unacceptable side effects? (prospective study)
+
+      Each step up the ladder is more expensive and more convincing. Module 04 covers trials and
+      target trial emulation, the tools for the top rungs.
+
+  - type: image
+    image: m00-01-evidence-ladder.png
+    caption: |
+      The evidence ladder. Most published clinical models only report the first rung. The Epic
+      Sepsis Model story is what happens when a model skips straight to wide use.
+
+  - type: quiz
+    question: What is the main purpose of a silent deployment?
+    options:
+      - To train the model on live data before anyone sees it
+      - To measure real-time performance, alert volume, and data problems without affecting care
+      - To satisfy the FDA requirement that all models run silently first
+      - To let clinicians get used to the alerts before they count
+    answer: 1
+    explanation: |
+      In silent mode the model scores live patients but nobody sees the output. You learn what
+      retrospective data can't tell you: feed delays, missing values, real alert rates, and
+      performance on current patients. It is not a training phase, and it is good practice
+      rather than a universal regulatory requirement. Option D describes a soft launch, where
+      clinicians do see the alerts.
+
+  - type: text
+    title: Who owns what
+    text: |
+      Clinical AI is a team sport. Job titles vary, but the responsibilities look like this:
+
+      - **Data engineer**: pipelines from the EHR and claims warehouse, data quality, freshness.
+      - **Data scientist / biostatistician**: cohort and label definitions, study design,
+        validation, calibration, uncertainty.
+      - **ML engineer**: training infrastructure, packaging, serving, monitoring.
+      - **Research scientist**: new methods, harder problems (images, text, time series, LLMs).
+      - **Clinical informaticist**: usually a clinician with informatics training who owns
+        workflow fit, alert design, clinical governance, and adoption.
+
+      Bugs hide in the **hand-offs**. The label a statistician defined in a protocol isn't quite
+      the label the engineer coded. The feature computed in the warehouse isn't computed the same
+      way in the live feed. Being the person who understands both sides of a hand-off is one of
+      the most valuable things you can be.
+
+  - type: quiz
+    question: |
+      After go-live, the readmission score works correctly, but it only shows up in a report that
+      care managers open once a week, so most flagged patients are called too late. Whose area is
+      this, first and foremost?
+    options:
+      - The data engineer, since the data is delayed
+      - The biostatistician, since the horizon is wrong
+      - The ML engineer, since the model needs retraining
+      - The clinical informaticist, since it's a workflow and delivery problem
+    answer: 3
+    explanation: |
+      The data arrives on time and the model is fine. What fails is **when and where** the output
+      reaches the person who acts. Designing the delivery (a daily worklist, a task in the
+      discharge workflow) is the informaticist's core job, working with the engineers. Retraining
+      would not change when care managers open the report.
+
+  - type: text
+    title: Why clinical AI is different
+    text: |
+      If you come from ad-tech or product ML, five things change:
+
+      - **Stakes**: a wrong prediction can harm a patient, and some harms are irreversible.
+      - **Label quality**: outcomes come from billing codes, documentation, and follow-up that
+        is often missing. "Sepsis" or "readmission" depends on the definition you choose.
+      - **Shift**: practice, coding, populations, and EHR builds change, and one hospital is not
+        like another.
+      - **Regulation and governance**: some software counts as a medical device, and all of it
+        handles protected health information (Modules 03 and 06).
+      - **Workflow**: you can't A/B test freely. The model acts through busy people, so its value
+        depends on how it fits their work.
+
+      You'll meet these five constraints again and again.
+
+  - type: quiz
+    question: |
+      In ad-tech, the label "clicked" is recorded almost perfectly. Which statement about a
+      "sepsis" label built from EHR data is most accurate?
+    options:
+      - It is equally reliable, since it comes from diagnosis codes
+      - It depends heavily on the definition (codes, Sepsis-3 criteria, chart review), and each gives a different cohort
+      - It is always noisier, so models should not be trained on it
+      - It only matters for rare outcomes
+    answer: 1
+    explanation: |
+      Code-based, criteria-based (such as Sepsis-3), and chart-review definitions of sepsis
+      identify overlapping but different patients and onset times. The model learns whatever the
+      label encodes, and so does the evaluation. That doesn't make training impossible (C). It
+      means the label definition is a design decision you must defend. Module 07 works through
+      this in the sepsis design case.
+
+  - type: think
+    interview: true
+    prompt: |
+      "The Epic sepsis model did much worse in an independent validation than the developer
+      reported. If our hospital were considering a vendor model like that, what would you want to
+      see before we switched it on?"
+    model_answer: |
+      First I'd want to understand why a gap like that happens, because it tells me what to check.
+      The usual reasons are different patient populations and documentation practices, a different
+      label definition (a vendor's sepsis label might be code-based while a validation uses
+      clinical criteria), and features that capture clinician behaviour, so the model partly
+      flags patients clinicians already suspect.
+
+      Before go-live I'd ask the vendor for its label definition, features, and development
+      population, then run a local retrospective validation using our own agreed-upon sepsis
+      definition, reporting discrimination, calibration, and alert burden at candidate
+      thresholds. Then I'd run it silently on live data for a few weeks to check real alert
+      volume, lead time before clinicians acted, and subgroup performance. Only then would I pilot
+      it on a few units, with a threshold set by how many alerts the teams can handle, and a
+      monitoring plan with a named owner.
+    key_points:
+      - Explains plausible causes of the gap (population, label definition, clinician-behaviour features)
+      - Requires local validation with a local label definition, not vendor-reported metrics
+      - Reports calibration and alert burden, not just AUROC
+      - Uses silent deployment before any clinician sees alerts
+      - Staged rollout with a capacity-based threshold and ongoing monitoring
+
+  - type: text
+    title: The course follows one story
+    text: |
+      One project runs through every module so the pieces connect:
+
+      - **M01**: build the stroke cohort, features, and readmission label, with tests.
+      - **M02**: train and evaluate a readmission model (baselines, then PyTorch), with
+        calibration and subgroup checks.
+      - **M03**: ship it as a FastAPI service in Docker with CI, and monitor drift.
+      - **M04**: analyse a synthetic secondary-prevention trial (time to recurrent stroke), then
+        emulate a trial from the M01 observational data.
+      - **M05**: build and evaluate an LLM/RAG assistant over stroke guidelines and discharge
+        summaries.
+      - **M06**: map the schema to FHIR and OMOP, and cover HIPAA and platforms.
+      - **M07**: system-design case studies and interview storytelling.
+
+      Next lesson: the three failure modes (leakage, bias, and shift) that show up in every one.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how you'd take a 30-day readmission model for stroke patients from idea to
+      something used in practice."
+    model_answer: |
+      I'd start with the decision: at discharge, a transitions-of-care nurse can call a limited
+      number of patients, so the model should rank patients for that call list. That fixes time
+      zero at discharge and the horizon at 30 days. Next I'd define the cohort and label with a
+      clinician: first ischemic stroke admission, adults, enough prior coverage for a real
+      lookback, and an unplanned readmission label. I'd check how many readmissions to other
+      hospitals we'd miss.
+
+      I'd build features only from data available at discharge, start with a logistic regression
+      baseline, then try gradient boosting. I'd validate on a later time period and report AUROC,
+      calibration, and performance by subgroup. Then I'd deploy as a service, run it silently to
+      confirm live performance and volume, and set the threshold from the nurses' capacity. After
+      launch I'd monitor input drift, calibration, and whether calls happen. Finally I'd evaluate
+      impact with a staged rollout, because a good score only matters if readmissions actually
+      go down.
+    key_points:
+      - Starts from the action and the user, which fixes time zero and horizon
+      - Defines cohort and label carefully, including known label gaps
+      - Uses only features available at prediction time, and a simple baseline first
+      - Temporal validation with calibration and subgroups
+      - Silent deployment, a capacity-based threshold, monitoring, and a real impact evaluation
+
+  - type: laptop
+    title: Run the Module 01 pipeline end to end
+    repo_path: 01-clinical-data-engineering/README.md
+    task: |
+      Follow the Quick start in the README: create the virtual environment, generate the data,
+      load DuckDB, build the cohort, and run `pytest -q`. Then open the DuckDB file and record
+      three numbers in your notes: total patients, patients with any `I63%` diagnosis, and rows
+      in `index_stroke_cohort`. The gap between the last two is your first look at how much
+      eligibility rules shrink a cohort.
+
+  - type: recap
+    points:
+      - "Nine stages: question, data, cohort + label, features, model, validation, deployment, monitoring, evidence"
+      - Start from the **clinical action**, which fixes the user, time zero, horizon, and capacity
+      - The model is the small box, and most failures start in the label, the data, or the evidence
+      - "**PPV and alerts per true case** matter to clinicians more than AUROC"
+      - "Evidence ladder: retrospective, then temporal/external, then silent, then prospective"
+      - Bugs hide in **hand-offs** between roles
+      - Clinical AI differs in stakes, labels, shift, regulation, and workflow

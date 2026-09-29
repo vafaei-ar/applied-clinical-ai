@@ -1,0 +1,424 @@
+id: m02-07-experiment-tracking
+title: Experiment tracking with MLflow
+summary: Runs, parameters, metrics, artifacts, data and code versions, honest run comparison, and the
+  model registry with aliases; what a reproducible experiment record looks like.
+minutes: 25
+status: authored
+why_it_matters: Every clinical AI team eventually has to answer "which data and code produced the model
+  that scored this patient?". MLflow is the tool named most often in job posts for that, and lineage
+  questions come up in interviews and audits.
+objectives:
+  - Log params, metrics, artifacts, models, and the code and data versions for every run
+  - Choose between a local store, a tracking server, and a managed service, and know where PHI can end up
+  - Compare runs without p-hacking a leaderboard
+  - Register model versions and promote them with aliases (champion and challenger)
+  - Trace lineage from a single prediction back to the data snapshot and commit
+key_points:
+  - A run is only reproducible if it records code (git SHA), data (hash or version), config, and environment
+  - Params are inputs logged once; metrics are numbers that can have steps
+  - Autolog is a convenience, not a substitute for logging your clinical evaluation
+  - Select on validation, touch the test set once, and log every run, including failures
+  - Registry aliases (champion/challenger) replace the deprecated stages; promotion and rollback are alias moves
+  - The artifact store can hold patient-level data, so treat it as PHI storage
+tags: [mlflow, mlops, reproducibility, interview]
+steps:
+  - type: text
+    title: '"Which model is this?"'
+    text: |
+      Six months after launch, a quality reviewer asks about a patient flagged high-risk by your
+      stroke readmission model: which model version scored her, what data it was trained on, and
+      what its validation calibration was.
+
+      You find `model_final_v2_fixed.pkl` on a shared drive, a notebook that has been edited since,
+      and a `stroke_features` table that `02_features.sql` has rebuilt a dozen times with
+      `CREATE OR REPLACE`.
+
+      You can't answer. Nobody did anything wrong on any single day. The problem is that nothing
+      recorded the links between data, code, run, and deployed model.
+
+      Experiment tracking is the habit, and the tooling, that keeps those links.
+
+  - type: text
+    title: What a reproducible run records
+    text: |
+      To rebuild a result, you need five things:
+
+      - **Code**: the exact commit (git SHA), from a **clean** working tree.
+      - **Data**: a version you can get back, such as a content hash, a snapshot date, or a Delta
+        table version. A table **name** is not a version.
+      - **Config**: hyperparameters, feature list, split dates, random seeds, threshold.
+      - **Environment**: package versions (a lock file or conda/pip spec), and ideally the
+        container image.
+      - **Outputs**: metrics, plots, and the model file itself.
+
+      MLflow gives you a place to put all five for every run, and a UI and API to query them.
+      Module 03 adds the environment piece properly with Docker.
+
+  - type: text
+    title: MLflow vocabulary
+    text: |
+      - **Experiment**: a named group of runs, such as `stroke-readmission`.
+      - **Run**: one execution of your training code, with a unique `run_id`.
+      - **Params**: inputs as key-value strings (`C=0.5`, `split_date=2022-01-01`). Logged once
+        per run. Logging the same key again with a different value is an error.
+      - **Metrics**: numbers, optionally with a `step` (per-epoch loss). Can be logged many times.
+      - **Tags**: free-form metadata (git SHA, data hash, "purpose: ablation").
+      - **Artifacts**: files, such as plots, subgroup tables, and model cards.
+      - **Models**: a saved model in MLflow's format, with its dependencies, signature, and an
+        input example, so it can be loaded later with `mlflow.pyfunc.load_model`.
+      - **Registry**: named models with numbered versions and aliases. More on that below.
+
+  - type: code
+    title: A minimal tracked run
+    language: python
+    code: |
+      import mlflow
+      from sklearn.linear_model import LogisticRegression
+      from sklearn.metrics import brier_score_loss, roc_auc_score
+
+      mlflow.set_tracking_uri("http://localhost:5000")  # omit for a local store
+      mlflow.set_experiment("stroke-readmission")
+
+      params = {"C": 0.5, "max_iter": 1000}
+      with mlflow.start_run(run_name="logreg-baseline") as run:
+          mlflow.log_params(params)
+          mlflow.log_param("split", "train<2021, val=2021, test>=2022")
+          model = LogisticRegression(**params).fit(X_train, y_train)
+
+          p_val = model.predict_proba(X_val)[:, 1]
+          mlflow.log_metrics({"val_auroc": roc_auc_score(y_val, p_val),
+                              "val_brier": brier_score_loss(y_val, p_val)})
+          mlflow.log_artifact("reports/reliability_val.png")
+          model_info = mlflow.sklearn.log_model(
+              sk_model=model, name="model", input_example=X_train.head(5))
+    after: |
+      `name="model"` is the MLflow 3 spelling. MLflow 2.x used `artifact_path="model"`, which you'll
+      still see in older code. Logging an `input_example` also infers the model **signature**
+      (expected columns and types), which catches schema mismatches at serving time.
+
+  - type: quiz
+    question: What happens when this PyTorch training loop runs inside a single MLflow run?
+    code: |
+      for epoch in range(20):
+          train_loss = train_one_epoch(model, loader, opt)
+          val_auroc = evaluate(model, val_loader)
+          mlflow.log_param("lr", scheduler.get_last_lr()[0])
+          mlflow.log_metric("val_auroc", val_auroc, step=epoch)
+          scheduler.step()
+    language: python
+    options:
+      - It logs 20 values of lr and a val_auroc curve
+      - It fails once the learning rate changes, because a param can't be re-logged with a new value
+      - It logs only the last lr, silently overwriting the earlier ones
+      - It fails because metrics need unique names per epoch
+    answer: 1
+    explanation: |
+      Params are immutable inputs. The first epoch logs `lr`, and when the scheduler changes it,
+      logging `lr` again with a different value raises an `MlflowException`. Anything that changes
+      during training belongs in a **metric** with `step=epoch`, such as
+      `mlflow.log_metric("lr", ..., step=epoch)`. Metrics with steps are how MLflow draws curves,
+      so they don't need unique names.
+
+  - type: text
+    title: Autolog, and its limits
+    text: |
+      `mlflow.autolog()` (or a flavor like `mlflow.sklearn.autolog()` or `mlflow.xgboost.autolog()`)
+      patches the library so that fitting a model logs its params, some training metrics, and the
+      model itself, without extra code.
+
+      Useful, with caveats:
+
+      - It logs what the **library** knows, like training scores and hyperparameters. It doesn't
+        know your temporal split, calibration, subgroup table, or threshold. Log those yourself.
+      - For PyTorch, `mlflow.pytorch.autolog()` targets **PyTorch Lightning**. A hand-written
+        training loop needs explicit `log_metric` calls.
+      - It can log a lot. Large models and many runs fill the artifact store quickly.
+
+      A good pattern: autolog for the boilerplate, plus explicit logging for everything clinical.
+
+  - type: text
+    title: Pin the code and the data
+    text: |
+      **Code.** When you run a script from inside a git repo, MLflow usually records the commit in
+      the `mlflow.source.git.commit` tag. Don't rely on that alone. Uncommitted edits aren't
+      captured, and notebooks often lose the link. Log the SHA yourself and refuse to run tracked
+      experiments on a dirty tree.
+
+      **Data.** In our repo, `02_features.sql` uses `CREATE OR REPLACE TABLE`, so
+      `stroke_features` means something different after every rebuild. Record:
+
+      - a hash of the exact training file (or of the sorted table contents),
+      - the hash of the SQL that built it, and the raw data snapshot or generator seed,
+      - the split boundaries.
+
+      One caveat: Parquet files with identical rows can have different bytes (writer version,
+      row order), so a content hash of sorted rows is more robust than a file hash. MLflow's
+      dataset tracking (`mlflow.data` plus `mlflow.log_input`) stores a digest and the source for
+      you.
+
+  - type: code
+    title: Logging git SHA and data hash
+    language: python
+    code: |
+      import hashlib, subprocess
+      import mlflow
+
+      def sha256(path):
+          h = hashlib.sha256()
+          with open(path, "rb") as f:
+              for block in iter(lambda: f.read(1 << 20), b""):
+                  h.update(block)
+          return h.hexdigest()
+
+      git = lambda *a: subprocess.check_output(["git", *a], text=True).strip()
+      if git("status", "--porcelain"):
+          raise RuntimeError("Commit your changes before a tracked run")
+
+      with mlflow.start_run():
+          mlflow.set_tags({"git_sha": git("rev-parse", "HEAD"),
+                           "features_sql_sha256": sha256("sql/02_features.sql"),
+                           "data_sha256": sha256("data/stroke_features.parquet")})
+          ds = mlflow.data.from_pandas(train_df, name="stroke_features",
+                                       source="data/stroke_features.parquet",
+                                       targets="readmission_30d")
+          mlflow.log_input(ds, context="training")
+
+  - type: quiz
+    question: |
+      A run's only record of its data is the tag `table=stroke_features`. Why is that not enough?
+    options:
+      - Tags can't hold table names; use a param instead
+      - MLflow can only track data stored in Parquet
+      - It is enough as long as the git SHA is logged
+      - The table is rebuilt with CREATE OR REPLACE, so the name doesn't identify the rows used
+    answer: 3
+    explanation: |
+      A name points at whatever the table contains **now**. The rows can change with a new
+      generator seed, a fixed bug in the SQL, or new raw data, while the name stays the same. The
+      git SHA pins the SQL, but not the raw data it ran on. You need a content hash, a snapshot
+      date, or a table version (for example Delta time travel, Module 06) to get the same rows
+      back.
+
+  - type: text
+    title: Where runs live
+    text: |
+      MLflow has two stores: a **backend store** for run metadata (params, metrics, tags) and an
+      **artifact store** for files (models, plots).
+
+      - **Local**: with no tracking URI, everything goes to your machine (a `mlruns/` folder, or a
+        local SQLite database in recent versions). Fine for solo exploration, invisible to teammates.
+      - **Tracking server**: `mlflow server` with a database backend (such as PostgreSQL) and
+        object storage for artifacts (S3, Azure Blob, GCS). This is what a team shares.
+      - **Managed**: Databricks has MLflow built in, and Azure ML and SageMaker offer
+        MLflow-compatible tracking. You get authentication and access control without running a
+        server yourself.
+
+      Clinical caveat: artifacts often include **patient-level data**, such as prediction files,
+      error-analysis samples, and input examples. That makes the artifact store PHI storage, with
+      the access control, encryption, and audit requirements that come with it (Module 06).
+
+  - type: quiz
+    question: |
+      A teammate logs `val_predictions.csv` (patient_id, index_date, p_hat, readmission_30d) as an
+      artifact for every run, and the tracking server's bucket is readable by the whole analytics
+      department. What's the main concern?
+    options:
+      - Patient-level data now sits in a store that isn't governed as PHI
+      - The CSV files will make the UI slow
+      - MLflow can't store CSV files as artifacts
+      - None; artifacts are encrypted by MLflow automatically
+    answer: 0
+    explanation: |
+      With real data, identifiers plus dates plus outcomes are PHI. Logging them turns the
+      artifact store into a PHI system, so it needs minimum-necessary access, encryption, and
+      audit logging. Alternatives are logging only aggregate outputs, dropping identifiers, or
+      keeping the tracking server inside the governed environment. MLflow itself doesn't encrypt
+      artifacts. That depends on how the storage is configured.
+
+  - type: code
+    title: Comparing runs in code
+    language: python
+    code: |
+      runs = mlflow.search_runs(
+          experiment_names=["stroke-readmission"],
+          filter_string="metrics.val_auroc > 0.70 and tags.data_sha256 = '3f9a1c...'",
+          order_by=["metrics.val_auroc DESC"],
+      )
+      cols = ["run_id", "params.C", "metrics.val_auroc", "metrics.val_cal_slope"]
+      print(runs[cols].head(10))
+    after: |
+      `search_runs` returns a pandas DataFrame, so you can compare runs with the tools you already
+      use. Filtering on the data hash makes sure you compare runs trained on the **same** data. A
+      "better" run on a different snapshot doesn't tell you anything about the model.
+
+  - type: text
+    title: Don't p-hack your own leaderboard
+    text: |
+      Tracking makes it easy to run 300 configurations and sort by a metric. That creates a
+      quiet bias: the top of the list is partly the best model and partly the luckiest noise.
+      The more you try, the more the winner's score is inflated (the winner's curse).
+
+      Habits that keep the comparison honest:
+
+      - **Select on validation, not test.** Choose the final candidate using validation metrics,
+        then evaluate it on the temporal test set **once**.
+      - **Pre-specify the primary metric**, such as validation AUROC with a calibration slope
+        constraint, before the sweep.
+      - **Log every run**, including failures and abandoned ideas, and report how many
+        configurations you tried.
+      - **Rerun finalists with several seeds.** If the gap between two models is smaller than the
+        run-to-run spread, they're tied.
+      - **Prefer the simpler model** when the difference is within the CI.
+
+  - type: quiz
+    question: |
+      You tried 150 configurations, choosing among them with **test-set** AUROC. The best reached
+      0.752, and your logistic regression baseline gets 0.741. Bootstrap CIs are about ±0.02. What
+      should you conclude?
+    options:
+      - The best configuration is better and should be deployed
+      - The comparison is biased and inconclusive; reselect on validation, then test the finalist once
+      - The baseline is better because it has fewer parameters
+      - Run 150 more configurations to be sure
+    answer: 1
+    explanation: |
+      Picking the best of 150 on the test set turns the test set into a validation set, so 0.752
+      is optimistic. Even taken at face value, the 0.011 gap is well inside the CI. The honest
+      path is to select on validation, confirm the finalist against the baseline on an untouched
+      test set, and prefer the baseline if they're tied. More configurations make the selection
+      bias worse.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How do you make sure a model result you report today can be reproduced six months from
+      now?"
+    model_answer: |
+      I make the run record carry everything needed to rebuild it. Code: every tracked run comes
+      from a committed, clean tree, and the git SHA is logged, with the script refusing to run
+      otherwise. Data: I log a content hash of the training table, the hash of the SQL that built
+      it, the raw snapshot or its version, and the split dates, because table names get
+      overwritten. Config: all hyperparameters, feature lists, seeds, and the decision threshold
+      as params. Environment: a lock file, and for anything deployed, the container image digest.
+      Outputs: validation metrics including calibration, the plots, the subgroup table, and the
+      model itself in MLflow format with a signature. The final model is registered, so the
+      version links back to the run. Then I actually test it. Periodically someone rebuilds a
+      registered model from its record and checks that the metrics match within tolerance.
+      Otherwise "reproducible" is only a hope.
+    key_points:
+      - Code pinned by git SHA from a clean tree
+      - Data pinned by content hash or version, plus the build SQL and split dates
+      - Config and seeds as params, environment via lock file or container digest
+      - Metrics, plots, and model logged, and the model registered with a link back to the run
+      - Actually tests reproducibility by rebuilding from the record
+
+  - type: text
+    title: The model registry
+    text: |
+      The **registry** turns "a model file from some run" into a governed object:
+
+      - A **registered model** has a name, such as `stroke-readmit`.
+      - Each registration creates a **version** (1, 2, 3, ...). A version is immutable and points
+        to the run and artifact that produced it.
+      - An **alias** is a mutable, named pointer to one version: `@champion` for what production
+        serves, `@challenger` for the candidate in shadow evaluation.
+      - Tags on versions record review status, such as `validation=passed`.
+
+      The older fixed **stages** (Staging, Production, Archived) and
+      `transition_model_version_stage` are **deprecated** since MLflow 2.9 in favor of aliases and
+      tags. Unity Catalog models on Databricks support only aliases. Expect older tutorials to
+      use stages, and don't copy them.
+
+  - type: code
+    title: Register, alias, load
+    language: python
+    code: |
+      import mlflow
+      from mlflow import MlflowClient
+
+      client = MlflowClient()
+      mv = mlflow.register_model(model_info.model_uri, "stroke-readmit")
+
+      client.set_registered_model_alias("stroke-readmit", "challenger", mv.version)
+      client.set_model_version_tag("stroke-readmit", mv.version,
+                                   "validation", "temporal-2023-passed")
+
+      # After review: promote by moving the alias
+      client.set_registered_model_alias("stroke-readmit", "champion", mv.version)
+      client.delete_registered_model_alias("stroke-readmit", "challenger")
+
+      # The service (Module 03) loads by alias, never by a hard-coded version
+      model = mlflow.pyfunc.load_model("models:/stroke-readmit@champion")
+    after: |
+      Promotion and rollback are both one call: point `champion` at a different version. The
+      service code doesn't change. It has to reload the model (on restart or on a schedule) to pick
+      up the new version, and it should log which version answered each request.
+
+  - type: quiz
+    question: |
+      Version 8 became `@champion` on Monday. By Thursday, monitoring shows its calibration has
+      drifted badly at one hospital. Version 7 was fine. What's the fastest safe rollback?
+    options:
+      - Call transition_model_version_stage to move v8 to "Archived"
+      - Delete version 8 from the registry
+      - Point the champion alias back at version 7 and have the service reload
+      - Retrain on the latest data and register version 9
+    answer: 2
+    explanation: |
+      Aliases exist for this. Moving `@champion` to v7 is one call, and any service that loads
+      `models:/stroke-readmit@champion` picks it up on reload. Deleting v8 destroys the evidence
+      you need to investigate. Stage transitions are the deprecated API. Retraining is a fix for
+      later, not a rollback.
+
+  - type: image
+    image: m02-07-lineage.png
+    caption: |
+      Lineage chain. Each hop stores an ID for the previous one: the service logs the model
+      version, the version points to its run, and the run holds the git SHA, the dataset digest,
+      params, and metrics. Break any link and the chain can't be followed back.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A clinician disputes a high-risk flag for a specific patient last March. Walk me through
+      how you'd trace that prediction back to the data and code that produced the model."
+    model_answer: |
+      It starts at serving. Each prediction log should hold the request ID, timestamp, model name
+      and version, and the input features or a hash of them. From the log I get, say,
+      `stroke-readmit` version 7. The registry maps version 7 to its source run. The run gives me
+      the git SHA, the params including split dates and threshold, the dataset digest and the hash
+      of the feature SQL, the validation metrics, and the reliability and subgroup artifacts. With
+      those I can check out the commit, rebuild the feature table from the recorded snapshot,
+      confirm the hash matches, and reload the exact model to rescore the patient's inputs as
+      logged. Then I can answer the clinical question: which features drove the score, and whether
+      the model was known to be miscalibrated for patients like her. If any link is missing, like
+      a service that doesn't log the version, I'd call that out as a gap to fix. It's also the
+      kind of traceability that regulators expect (Module 03).
+    key_points:
+      - Starts from the prediction log, which records model name and version plus inputs
+      - Registry version maps to the source run
+      - Run holds git SHA, data digest, SQL hash, params, metrics, and artifacts
+      - Rebuilds and verifies the hash, then reloads the exact model to rescore
+      - Names missing links as gaps and connects to regulatory traceability
+
+  - type: laptop
+    title: Track the readmission training runs
+    repo_path: 02-pytorch-clinical-ml/src/train.py
+    task: |
+      Create a training script for the logistic regression baseline on `stroke_features` and wrap
+      it in an MLflow run. Log params (including split dates and seed), the git SHA and a data
+      hash as tags, the dataset with `mlflow.log_input`, validation AUROC, Brier, and calibration
+      slope, the reliability plot as an artifact, and the model with an input example. Run
+      `mlflow ui`, compare three values of `C`, register the best on validation as
+      `stroke-readmit`, set `@champion`, and load it back with `models:/stroke-readmit@champion`.
+
+  - type: recap
+    points:
+      - A reproducible run records **code, data, config, environment, and outputs**
+      - Params are logged once; anything that changes during training is a metric with a step
+      - Log the **git SHA** from a clean tree and a **content hash** of the data, since table names aren't versions
+      - Autolog is boilerplate relief; log calibration, subgroups, and splits yourself
+      - The artifact store can hold PHI, so govern it that way
+      - Select on validation, test once, log every run, and treat gaps within the noise as ties
+      - Registry versions are immutable, and aliases (**@champion**, **@challenger**) move; stages are deprecated
+      - Every hop from prediction to data should carry an ID you can follow back

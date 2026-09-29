@@ -1,0 +1,450 @@
+id: m03-01-package-and-test
+title: 'From notebook to package: structure, typing, and tests'
+summary: src layout, pyproject, type hints, Ruff, lockfiles, and a test pyramid that includes tests of model behaviour.
+minutes: 25
+status: authored
+why_it_matters: Hiring managers read your repo before they read your CV. A clean package with meaningful
+  tests is the fastest signal that you can ship a clinical model, not just train one.
+objectives:
+  - Organize a src-layout Python package with pyproject.toml
+  - Use type hints, a type checker, and Ruff as a linter and formatter
+  - Write unit, integration, and data tests for ML code, using fixtures with tiny synthetic data
+  - "Test model behaviour: invariance, directional expectation, and golden-output tests"
+  - Explain the difference between dependency ranges and a lockfile
+key_points:
+  - Pure functions (data in, data out, no hidden I/O) are the testable core of an ML pipeline
+  - The src layout forces tests to run against the installed package, not whatever is in the working directory
+  - Fixtures with tiny synthetic data make tests fast and deterministic
+  - Model behaviour tests catch failures that a single AUROC number hides
+  - Libraries declare ranges; deployed services pin exact versions in a lockfile
+tags: [python, testing, packaging, interview]
+steps:
+  - type: text
+    title: The notebook that could not be shipped
+    text: |
+      Your Module 02 readmission model works. It lives in `train_final_v3.ipynb`, cell 47 depends
+      on a variable from cell 12, and the feature code is copy-pasted into three places.
+
+      Now the health system wants it as a service. An engineer asks three questions:
+
+      - "Can I import your feature function without running the notebook?"
+      - "How do I know it still gives the same answer after I upgrade pandas?"
+      - "What happens if `latest_ldl_prior_365d` is missing?"
+
+      If the honest answer to each is "run the notebook and look", the model is not shippable.
+      This lesson turns it into a **package with tests**, the first step of Module 03's path:
+      package, serve, containerize, deploy, monitor, govern.
+
+  - type: text
+    title: The src layout
+    text: |
+      We will build the service in a new folder, `03-production-ml/`:
+
+      ```
+      03-production-ml/
+        pyproject.toml
+        uv.lock
+        src/readmission_service/
+          __init__.py
+          features.py     # pure feature logic
+          model.py        # load, predict
+          app.py          # FastAPI (next lesson)
+        tests/
+          conftest.py
+          test_features.py
+          test_model_behaviour.py
+      ```
+
+      The code lives under `src/`, not at the top level. That looks like pointless nesting, but
+      it has one important effect: `import readmission_service` only works once the package is
+      **installed** (`pip install -e .`). Your tests then exercise the same import path your
+      Docker image will use, and a missing file in the package fails in CI, not in production.
+
+      `01-clinical-data-engineering/` in the repo already uses this layout. Look at its
+      `src/clinical_data_engineering/` folder.
+
+  - type: code
+    title: pyproject.toml is the single source of truth
+    language: toml
+    text: Trimmed from the repo's `01-clinical-data-engineering/pyproject.toml`, adapted for the service.
+    code: |
+      [build-system]
+      requires = ["setuptools>=75", "wheel"]
+      build-backend = "setuptools.build_meta"
+
+      [project]
+      name = "readmission-service"
+      version = "0.1.0"
+      requires-python = ">=3.11"
+      dependencies = ["numpy>=2.0", "pandas>=2.2", "scikit-learn>=1.5"]
+
+      [project.optional-dependencies]
+      dev = ["pytest>=8.3", "ruff>=0.7", "mypy>=1.11"]
+
+      [tool.setuptools.packages.find]
+      where = ["src"]
+
+      [tool.ruff]
+      line-length = 100
+      target-version = "py311"
+
+      [tool.ruff.lint]
+      select = ["E", "F", "I", "B", "UP"]
+    after: |
+      One file declares the package, its runtime dependencies, dev-only tools, and tool
+      settings. `setup.py`, `setup.cfg`, `requirements-dev.txt` and a separate `.flake8` are no
+      longer needed for a project like this.
+
+  - type: quiz
+    question: |
+      A test imports `readmission_service` and passes on your laptop, but CI fails with
+      `ModuleNotFoundError`. The project uses a flat layout (package at the repo root) locally
+      and CI runs `pytest` from a different directory. What does the src layout change?
+    options:
+      - Nothing; this is a CI caching bug
+      - It makes Python search `src/` automatically for every project
+      - It makes imports depend on the installed package, so the laptop would fail the same way until you install it
+      - It removes the need for `__init__.py`
+    answer: 2
+    explanation: |
+      With a flat layout, Python finds the package because the current directory is on
+      `sys.path`, so tests pass by accident depending on where you run them. The src layout
+      removes that accident: nothing imports until `pip install -e .` (or a `pythonpath`
+      setting) makes it importable, so laptop and CI behave the same. Python does not search
+      `src/` on its own; the repo's pytest config adds `pythonpath = ["src"]` explicitly.
+
+  - type: text
+    title: Pure functions are the testable core
+    text: |
+      The most useful refactor is to separate **logic** from **I/O**.
+
+      A pure function takes data in and returns data out. It does not read files, call a
+      database, check the clock, or depend on global state. Feature engineering, preprocessing,
+      and post-processing (turning a probability into a risk tier) should all be pure.
+
+      I/O lives at the edges: a thin function loads the DuckDB table, another saves the model,
+      and the API layer reads the request.
+
+      Why it matters: a pure `build_features(df)` can be tested with a 5-row DataFrame in
+      milliseconds. A function that opens `clinical.duckdb` inside itself needs the whole
+      pipeline to run before you can test anything.
+
+  - type: code
+    title: Type hints document the contract
+    language: python
+    code: |
+      from typing import Literal
+
+      import pandas as pd
+
+      RiskTier = Literal["low", "medium", "high"]
+
+      FEATURES: list[str] = [
+          "age_at_index", "prior_af", "prior_hypertension", "prior_diabetes",
+          "encounters_prior_365d", "ed_visits_prior_365d",
+          "inpatient_visits_prior_365d", "latest_ldl_prior_365d",
+      ]
+
+
+      def risk_tier(prob: float, high: float = 0.25, medium: float = 0.12) -> RiskTier:
+          """Map a calibrated probability to the tier shown to care managers."""
+          if not 0.0 <= prob <= 1.0:
+              raise ValueError(f"probability out of range: {prob}")
+          if prob >= high:
+              return "high"
+          return "medium" if prob >= medium else "low"
+
+
+      def select_features(df: pd.DataFrame) -> pd.DataFrame:
+          missing = set(FEATURES) - set(df.columns)
+          if missing:
+              raise KeyError(f"missing feature columns: {sorted(missing)}")
+          return df[FEATURES]
+    after: |
+      Hints do nothing at runtime. Their value comes from a type checker (`mypy` or `pyright`)
+      in CI and from editors that flag mistakes as you type. `Literal` makes the allowed outputs
+      explicit, which will reappear in the API schema next lesson. The tier cut-offs here are
+      illustrative; in a real project they come from the Module 02 decision-curve and capacity
+      analysis.
+
+  - type: quiz
+    question: |
+      A colleague calls `risk_tier(0.3, 0.1, 0.2)` expecting `"high"`, since both cut-offs are
+      below 0.3. `mypy` passes. What goes wrong?
+    options:
+      - Nothing; 0.3 is above both cut-offs so it returns "high"
+      - mypy should have flagged the swapped arguments
+      - The function raises ValueError
+      - It returns "medium" because the arguments are swapped
+    answer: 0
+    explanation: |
+      0.3 ≥ `high` (0.1), so the first check returns `"high"`. The call is still a bug waiting
+      to happen: `high=0.1, medium=0.2` is incoherent, and a probability of 0.15 would be
+      labelled "high" too. Type checkers only check **types**; two floats in the wrong order
+      are type-correct. That is why you also validate invariants (for example, assert
+      `medium < high`) and write tests. Keyword arguments (`high=..., medium=...`) at call
+      sites help too.
+
+  - type: text
+    title: Ruff, one tool for lint and format
+    text: |
+      **Ruff** is a fast Python linter and formatter written in Rust. It replaces flake8, isort,
+      many flake8 plugins, and (via `ruff format`) Black for most teams.
+
+      - `ruff check .` finds bugs and smells: unused imports, undefined names, mutable default
+        arguments (`B006`), outdated syntax (`UP`).
+      - `ruff check --fix .` applies safe fixes.
+      - `ruff format .` formats code so diffs show logic, not whitespace.
+
+      Run both in CI and as a pre-commit hook. The point is not style purity: it's that code
+      review time goes to clinical logic instead of arguing about commas.
+
+  - type: text
+    title: A test pyramid for ML
+    text: |
+      Classic software has unit, integration, and end-to-end tests. ML code needs two more
+      layers, because data and models fail in ways code does not.
+
+      - **Unit tests** (many, milliseconds): pure functions like `risk_tier` and
+        `select_features`.
+      - **Data tests**: schema, types, ranges, uniqueness, and leakage rules on real pipeline
+        outputs (one row per patient, no age under 18, no feature dated on or after
+        `index_date`).
+      - **Model behaviour tests**: does the trained model respond sensibly to controlled
+        changes in input?
+      - **Integration tests** (few, seconds): generate data, load, build features, train or
+        load the model, predict, and check the whole chain.
+
+      The repo's `tests/test_pipeline.py` is an integration test that also asserts data rules
+      (no duplicate patients, no underage patients, coverage satisfied).
+
+  - type: image
+    image: m03-01-test-pyramid.png
+    caption: |
+      Many fast unit tests at the base, fewer and slower tests toward the top. Data and model
+      behaviour tests are the ML-specific layers. A tiny synthetic fixture feeds all of them.
+
+  - type: code
+    title: Fixtures with tiny synthetic data
+    language: python
+    text: "`tests/conftest.py` makes a small, hand-readable DataFrame available to every test."
+    code: |
+      from pathlib import Path
+
+      import pandas as pd
+      import pytest
+
+      ASSETS = Path(__file__).parent / "assets"
+
+
+      @pytest.fixture
+      def patients() -> pd.DataFrame:
+          return pd.DataFrame({
+              "patient_id": ["P1", "P2", "P3"],
+              "age_at_index": [54, 71, 88],
+              "prior_af": [0, 1, 1],
+              "prior_hypertension": [1, 1, 0],
+              "prior_diabetes": [0, 0, 1],
+              "encounters_prior_365d": [1, 4, 9],
+              "ed_visits_prior_365d": [0, 1, 3],
+              "inpatient_visits_prior_365d": [0, 1, 2],
+              "latest_ldl_prior_365d": [110.0, None, 72.0],
+          })
+
+
+      @pytest.fixture(scope="session")
+      def trained_model():
+          from readmission_service.model import load_model
+          return load_model(ASSETS / "model-small.joblib")
+    after: |
+      Three rows you can read at a glance, including an edge case (a missing LDL). The default
+      fixture scope is `function`: each test gets a fresh copy, so one test mutating the frame
+      cannot break another. The model is loaded once per session because it's read-only and
+      slow to load. For bigger synthetic sets, call the repo's `generate_dataset(tmp_path,
+      n_patients=300, seed=7)` with a **fixed seed**, as `tests/test_generator.py` does.
+
+  - type: quiz
+    question: |
+      One test does `patients.loc[0, "age_at_index"] = 17` to check the underage rule. If the
+      `patients` fixture were declared with `scope="session"`, what could happen?
+    options:
+      - Nothing; pytest copies session fixtures for each test
+      - Other tests that run later would see the modified age, so results depend on test order
+      - pytest refuses to run tests that modify fixtures
+      - The fixture is rebuilt automatically when modified
+    answer: 1
+    explanation: |
+      Session-scoped fixtures are created once and shared. Mutating one leaks state into every
+      later test, giving order-dependent failures that are painful to debug. Use the default
+      function scope for mutable data, and reserve wider scopes for expensive, read-only
+      objects like a loaded model.
+
+  - type: text
+    title: Model behaviour tests
+    text: |
+      A validation AUROC tells you how the model ranks a population. It says nothing about
+      whether it behaves sensibly for one patient. Behaviour tests, popularized for NLP by
+      Ribeiro et al.'s CheckList (ACL 2020), fill that gap:
+
+      - **Invariance**: changes that should not matter don't change the output. Changing
+        `patient_id`, or reordering columns, must leave the prediction identical.
+      - **Directional expectation**: changes with a known clinical direction move the output
+        that way, or at least not the opposite way. Adding prior inpatient admissions should
+        not lower readmission risk.
+      - **Golden outputs**: a fixed set of inputs has stored reference predictions. After any
+        change (new pandas, new scikit-learn, re-serialized model), predictions must match
+        within a small tolerance.
+      - **Minimum functionality**: outputs are probabilities in [0, 1], shapes are right, and
+        missing LDL is handled without crashing.
+
+  - type: code
+    title: A directional test
+    language: python
+    code: |
+      from readmission_service.features import select_features
+
+
+      def test_more_admissions_do_not_lower_risk(trained_model, patients):
+          base = patients.copy()
+          more = patients.copy()
+          more["inpatient_visits_prior_365d"] += 2
+          more["encounters_prior_365d"] += 2   # keep features consistent
+
+          p_base = trained_model.predict_proba(select_features(base))[:, 1]
+          p_more = trained_model.predict_proba(select_features(more))[:, 1]
+
+          assert (p_more >= p_base - 1e-6).all()
+    after: |
+      (`trained_model` is a scikit-learn `Pipeline` with an imputer, so the missing LDL is
+      handled inside the model.) Two details matter. The test raises `encounters_prior_365d` too, because an inpatient
+      stay is also an encounter; an impossible input would make the test meaningless. And it
+      allows a tiny tolerance. For a logistic regression this should hold exactly. For a tree
+      ensemble or neural network it is **not guaranteed**, so either add monotonic constraints
+      in training (gradient-boosting libraries support this) or assert it on average and
+      investigate violations.
+
+  - type: quiz
+    question: |
+      Your golden-output test starts failing after upgrading scikit-learn: predictions differ in
+      the 4th decimal place for 3 of 50 golden patients. What's the best response?
+    options:
+      - Delete the golden test; it's too brittle
+      - Regenerate the golden file immediately so CI goes green
+      - Loosen the tolerance until it passes, then move on
+      - Investigate the change log, confirm the difference is numerical and clinically irrelevant, then update the goldens in a reviewed commit
+    answer: 3
+    explanation: |
+      The test did its job: it surfaced a behaviour change that no one intended. Small numeric
+      differences after an upgrade are common and often harmless, but you want a human to
+      decide that and leave a record. Silently regenerating (B) or loosening tolerances (C)
+      turns the test into decoration. Deleting it (A) removes your only guard against a
+      serialization or preprocessing change that shifts every risk score.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How do you test a machine learning model? Unit tests don't really apply when the output
+      is a probability."
+    model_answer: |
+      I'd push back a little: most of an ML system is ordinary code, and I unit test all of it,
+      the feature logic, preprocessing, and the probability-to-action mapping, with tiny
+      hand-built fixtures. Then I add two layers that are specific to ML. Data tests run on
+      pipeline outputs: schema, ranges, uniqueness, and leakage rules like "no feature source
+      dated on or after the index date." Model behaviour tests check the trained artifact:
+      invariance to things that shouldn't matter like IDs or column order, directional
+      expectations such as more prior admissions not lowering readmission risk, and golden
+      outputs on a fixed set of patients so any change in predictions after a library upgrade
+      or re-serialization is caught. A small end-to-end integration test runs the whole path on
+      synthetic data with a fixed seed. Performance thresholds like AUROC or calibration belong
+      in a validation gate before release, not in every unit test run, because they're slow
+      and noisy.
+    key_points:
+      - Most of the system is ordinary code, so unit-test pure functions with tiny fixtures
+      - Data tests on pipeline outputs (schema, ranges, uniqueness, leakage)
+      - "Behaviour tests: invariance, directional expectation, golden outputs"
+      - An end-to-end integration test on seeded synthetic data
+      - Metric thresholds belong in a release/validation gate rather than every unit test run
+
+  - type: text
+    title: Ranges vs lockfiles
+    text: |
+      The repo's `pyproject.toml` says `pandas>=2.2`. That's a **range**: any compatible
+      version is fine. Ranges are right for a **library**, because it must coexist with other
+      packages in someone else's environment.
+
+      A deployed **service** is different. It should run with exactly the versions you tested.
+      A **lockfile** records the full resolved tree, including transitive dependencies, with
+      exact versions and usually hashes:
+
+      - `uv lock` writes `uv.lock`; `uv sync --locked` installs exactly that, and fails if the
+        lock is out of date.
+      - The pip-tools equivalent is `pip-compile --generate-hashes` producing a pinned
+        `requirements.txt`.
+
+      For clinical models, pinning is also about **validity**: the model you validated is the
+      code plus the exact numeric libraries. A silent NumPy or scikit-learn upgrade is a model
+      change. The serialized model file itself should be versioned too, which Lesson 6 covers.
+
+  - type: quiz
+    question: |
+      Your service's Docker build runs `pip install -r requirements.txt`, where the file says
+      `scikit-learn>=1.5`. The model was pickled with 1.5.2. Six months later a fresh build
+      pulls a newer major-feature release. What's the most likely risk?
+    options:
+      - The build fails, so the risk is only downtime
+      - The model may fail to load or, worse, load with a warning and behave differently
+      - None; pickles are portable across library versions
+      - Only training is affected, not prediction
+    answer: 1
+    explanation: |
+      scikit-learn does not guarantee that pickles load correctly across versions and warns
+      about it (`InconsistentVersionWarning`). Loading may fail, or it may succeed while
+      internals changed. Both break the link between the validated model and the running one.
+      Lock versions for the service, and keep golden-output tests to catch it.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how you'd turn a data scientist's notebook into production code. What
+      do you do first?"
+    model_answer: |
+      First I'd make it reproducible as-is: pin the environment, fix random seeds, and record
+      the current outputs, so I have a reference to refactor against. Then I'd pull the logic
+      out of the notebook into a src-layout package: pure functions for feature engineering,
+      preprocessing, and post-processing, with I/O at the edges. As I extract each piece I
+      write a test that compares its output to the notebook's recorded output, which gives me
+      characterization tests before I change anything. I'd add type hints, Ruff, and a type
+      checker in CI, then data tests on the feature table and behaviour tests on the model,
+      including golden outputs. Configuration like thresholds and paths moves to config, not
+      code. Only then would I wrap it in an API. I'd keep the notebook for exploration but make
+      it import from the package so there's one implementation.
+    key_points:
+      - Freeze the environment and record current outputs as a reference first
+      - Extract pure functions into a src-layout package with I/O at the edges
+      - Characterization tests comparing refactored code to the notebook's outputs
+      - Add linting, typing, data tests, and behaviour tests in CI
+      - One implementation, with the notebook importing from the package
+
+  - type: laptop
+    title: Scaffold 03-production-ml with tests
+    repo_path: 03-production-ml/
+    task: |
+      Create `03-production-ml/` with the src layout above and a `pyproject.toml` modelled on
+      `01-clinical-data-engineering/pyproject.toml`. Put `FEATURES`, `select_features`, and
+      `risk_tier` in `src/readmission_service/features.py`. Write `tests/conftest.py` with the
+      3-patient fixture and tests for: `risk_tier` edges (0.0, exactly 0.12, exactly 0.25,
+      1.0, and 1.2 raising `ValueError`), and `select_features` raising on a missing column.
+      Train a small logistic regression on the Module 01 `stroke_features.csv`, save it, and
+      add one invariance test (changing `patient_id`) and one directional test. Run
+      `ruff check .`, `ruff format --check .`, and `pytest`.
+
+  - type: recap
+    points:
+      - The **src layout** makes tests run against the installed package, like production
+      - "`pyproject.toml` holds dependencies, dev tools, and tool config in one place"
+      - Keep logic in **pure functions** and push I/O to the edges
+      - Type hints plus a checker catch type errors, but not wrong values; tests do that
+      - "**Ruff** handles linting and formatting; run it in CI"
+      - "ML adds **data tests** and **model behaviour tests** (invariance, direction, golden outputs)"
+      - Tiny synthetic **fixtures** with fixed seeds keep tests fast and deterministic
+      - Libraries use ranges; services **lock** exact versions, because a library upgrade is a model change

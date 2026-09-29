@@ -1,0 +1,475 @@
+id: m07-02-design-rag-assistant
+title: "System design: a clinical-guideline RAG assistant"
+summary: Design and evaluate an LLM assistant that answers clinicians' questions from institutional
+  guidelines, with citations, abstention, and governance.
+minutes: 30
+status: authored
+why_it_matters: LLM system design interviews are increasingly common in health tech. This case applies
+  Module 05 end to end, and the same structure works for any retrieval-grounded clinical assistant.
+objectives:
+  - Scope users, risk tiers, and success metrics
+  - Design ingestion, retrieval, generation, and guardrails
+  - Build an offline evaluation and an online monitoring plan
+  - Handle PHI, versioning, and governance
+key_points:
+  - Refuse or redirect questions outside scope, especially patient-specific treatment decisions
+  - Version the corpus and log the snapshot, prompt, and model behind every answer
+  - Human review of high-risk answers and of samples from production
+  - Evaluate retrieval and generation separately so you can localize failures
+tags: [system-design, llm, interview]
+steps:
+  - type: text
+    title: A fluent, cited, wrong answer
+    text: |
+      A resident asks the hospital's new guideline assistant about blood pressure targets after
+      thrombolysis for stroke. The answer is clear, well formatted, and cites the stroke
+      protocol, but the **2019 version**. The protocol was revised last year, and the old PDF was
+      never removed from the index.
+
+      Nothing about this looks like a "hallucination". The model faithfully summarized the source
+      it was given. The failure was in **corpus management**, not in the LLM.
+
+      That's the lesson of this case: in a guideline assistant, most of the risk sits in the
+      pipeline around the model. The prompt is:
+
+      _"Design an assistant that answers clinicians' questions using our institution's clinical
+      guidelines and protocols, with citations."_
+
+  - type: text
+    title: The plan for 45 minutes
+    text: |
+      Same discipline as the sepsis case, with LLM-specific stages:
+
+      - **Clarify** (~5 min): users, question types, channel, what's out of scope
+      - **Risk and success** (~5 min): risk tiers, metrics, launch criteria
+      - **Ingestion** (~6 min): parsing, chunking, metadata, versioning
+      - **Retrieval** (~5 min): hybrid search, filters, reranking
+      - **Generation and guardrails** (~7 min): grounding, citations, abstention, checks
+      - **Evaluation** (~8 min): golden set, component metrics, human review
+      - **Deployment, PHI, governance** (~5 min)
+      - **Monitoring** (~4 min)
+
+      Module 05 teaches each piece. Here you put them together under time pressure.
+
+  - type: text
+    title: "1. Clarify"
+    text: |
+      - **Users**: nurses, residents, pharmacists? Each asks different questions with different
+        risks.
+      - **Question types**: finding policies ("who do I page for a code stroke?"), processes
+        ("what's the tenecteplase checklist?"), numbers ("the BP target after thrombolysis"),
+        and patient-specific judgment ("should _my_ patient get thrombolysis?").
+      - **Corpus**: how many documents, which formats (PDFs with tables, intranet pages, order
+        sets), who owns them, how often they change.
+      - **Channel**: in the EHR sidebar, a chat tool, the intranet? Can users paste patient data?
+      - **Scope**: one hospital or many with local variations? English only?
+
+      Then state an assumption: "I'll assume about 2,000 guideline documents across several
+      hospitals, used by nurses and residents from an EHR sidebar, with the goal of fast,
+      cited answers to protocol questions, not patient-specific recommendations."
+
+  - type: think
+    interview: true
+    prompt: |
+      "Before designing this guideline assistant, what would you clarify, and why?"
+    model_answer: |
+      I'd start with users and question types, because they set the risk. A nurse asking who to
+      page is low risk. A resident asking for a dose or an eligibility threshold is high risk,
+      and a question about whether a specific patient should get a treatment is really a request
+      for clinical decision support, which I'd scope out or handle very differently.
+
+      I'd ask about the corpus: size, formats, whether dosing tables live in PDFs, who owns each
+      document, and how often versions change, since stale or superseded documents are the main
+      failure mode. I'd ask about sites, because the same question can have different answers at
+      different hospitals. Finally the channel and privacy: if it's in the EHR, users will paste
+      patient details, so PHI handling and the deployment environment have to be decided up
+      front. And I'd ask what success means to the sponsor: time saved, fewer protocol
+      deviations, or fewer pages to pharmacy.
+    key_points:
+      - Separates question types by risk (lookup, process, numeric, patient-specific)
+      - Asks about corpus size, formats, ownership, and version churn
+      - Asks about multi-site variation
+      - Raises channel and PHI exposure early
+      - Asks how the sponsor defines success
+
+  - type: text
+    title: "2. Risk tiers and scope"
+    text: |
+      Not all answers carry the same risk. Design behaviour per tier:
+
+      - **Low** (where is the policy, who to call): answer with a link.
+      - **Medium** (process steps): answer with citations to specific sections.
+      - **High** (doses, thresholds, eligibility criteria): **quote the source verbatim** with
+        the section and version, show the effective date, and apply stricter verification.
+      - **Out of scope** (patient-specific treatment decisions, diagnosis, anything not in the
+        corpus): don't answer. Redirect to the relevant guideline section and the right human.
+
+      A useful principle: the assistant helps clinicians **find and read** the guideline faster.
+      It doesn't make the decision. That keeps the clinician able to check the basis of every
+      answer, which also matters for regulation (more below).
+
+  - type: quiz
+    question: Which request should the assistant decline to answer directly and redirect instead?
+    options:
+      - What's the pager number for the stroke team at our main campus?
+      - What does our protocol list as contraindications to IV thrombolysis?
+      - "My patient is 82, on apixaban, last known well 3 hours ago. Should I give tenecteplase?"
+      - Which version of the sepsis order set is current?
+    answer: 2
+    explanation: |
+      Option C asks for a patient-specific treatment decision, which is out of scope. The
+      assistant can show the contraindication section and the anticoagulant guidance, but the
+      decision belongs to the clinician and the stroke team. B looks high risk too, but it asks
+      what the document says, which is exactly the assistant's job (with verbatim quotes and
+      citations).
+
+  - type: text
+    title: Success metrics and launch gates
+    text: |
+      Agree on metrics before building, including thresholds that must be met to launch:
+
+      - **Answer correctness**, graded by clinicians on a golden question set
+      - **Citation faithfulness**: every claim is supported by the cited passage
+      - **Retrieval recall@k**: the right section is among the retrieved passages
+      - **Abstention**: declines when the corpus has no answer, and answers when it does
+      - **High-risk error rate**: unsupported or wrong numbers in the high-risk tier, where the
+        launch gate is effectively zero on the test set, confirmed by human review
+      - **Latency and cost** per question
+      - After launch: usage, time saved, thumbs-down rate, and clinician trust
+
+      "Clinicians like it" is not a launch gate. A number on a fixed test set is.
+
+  - type: text
+    title: "3. Ingestion: the corpus is the product"
+    text: |
+      - **Parse carefully.** Guidelines are PDFs with multi-column layouts, tables, and
+        flowcharts. Dosing tables must survive parsing, so check a sample by eye.
+      - **Chunk by structure.** Split on section headings, keep tables whole, and prefix each
+        chunk with its document and section title so it makes sense on its own.
+      - **Attach metadata.** Document ID, version, effective date, review date, owner, site,
+        and status (active or superseded).
+      - **Version the corpus.** Every index build is an immutable snapshot with an ID. Answers
+        log the snapshot ID, so you can reproduce any answer later.
+      - **Sync with the source of truth.** When the policy system retires a document, the index
+        must drop it on the next build. That's exactly the bug from the opening story.
+
+  - type: quiz
+    question: |
+      The team chunks every document into fixed 300-token windows. What's the most likely
+      clinical failure?
+    options:
+      - Retrieval becomes too slow
+      - A dosing table gets split, so a chunk has the doses without the weight bands or drug names they belong to
+      - The LLM can't read chunks shorter than 500 tokens
+      - Embeddings can't represent numbers
+    answer: 1
+    explanation: |
+      Fixed windows cut through tables and lists. A chunk with "0.25 mg/kg, max 25 mg" but no
+      header for which drug or indication is a recipe for a confidently wrong answer. Structure-
+      aware chunking (by heading, tables whole, with titles prefixed) prevents it. Speed (A)
+      isn't the issue, and C and D aren't true.
+
+  - type: text
+    title: "4. Retrieval"
+    text: |
+      - **Hybrid search**: BM25 (keyword) plus dense embeddings. Clinical questions are full of
+        exact tokens, such as drug names, abbreviations (tPA, TNK), and unit names, which keyword
+        search handles well and embeddings sometimes blur.
+      - **Metadata filters**: only active documents, only the user's site (plus system-wide
+        documents). Apply them **inside** the search, not afterwards.
+      - **Reranking**: a cross-encoder reranks the top 30–50 candidates down to the best 5–8.
+      - **Query handling**: expand local abbreviations with a curated synonym list.
+
+      Measure retrieval on its own with labelled question-to-section pairs: recall@k and MRR.
+      If the right passage isn't retrieved, no prompt can save the answer (Module 05, lesson 3).
+
+  - type: code
+    title: Spot the bug
+    language: python
+    text: A retrieval function from the prototype.
+    code: |
+      def retrieve(question: str, site: str, k: int = 5) -> list[Chunk]:
+          hits = index.search(question, top_k=k)  # hybrid BM25 + dense
+          hits = [
+              h for h in hits
+              if h.meta["status"] == "active" and site in h.meta["sites"]
+          ]
+          return rerank(question, hits)[:k]
+
+  - type: quiz
+    question: What goes wrong with the `retrieve` function above?
+    options:
+      - The reranker should run before the search
+      - Filtering after taking the top 5 can leave few or no active, on-site chunks, even when good ones exist further down
+      - List comprehensions are too slow for retrieval
+      - "`site in h.meta[\"sites\"]` always returns False"
+    answer: 1
+    explanation: |
+      If superseded versions or other sites' protocols fill the top 5, post-filtering throws them
+      away and leaves little or nothing. That leads to spurious abstentions or answers from weak
+      evidence. The fix: filter inside the search (most vector stores support metadata filters)
+      or over-fetch (for example, `top_k=50`), filter, then rerank to `k`. Reranking needs
+      candidates first, so A is backwards.
+
+  - type: text
+    title: "5. Generation: grounded or silent"
+    text: |
+      The generation step has one job: answer **only** from the retrieved passages, and say so
+      when they don't contain the answer.
+
+      - The prompt gives numbered passages and instructs the model to cite passage IDs for each
+        claim, to quote numbers verbatim, and to answer "not found in current guidelines" when
+        the passages don't answer the question.
+      - Use **structured output** so downstream checks can read it (below).
+      - Low temperature, and a **pinned model version**. A vendor silently updating the model
+        behind an alias is a real change that needs re-evaluation.
+      - Show the answer with its citations as links to the exact section, plus the document's
+        effective date.
+
+  - type: code
+    title: A structured answer
+    language: python
+    code: |
+      from typing import Literal
+      from pydantic import BaseModel, Field
+
+      class Citation(BaseModel):
+          chunk_id: str
+          quote: str = Field(description="Exact supporting text from the chunk")
+
+      class Answer(BaseModel):
+          status: Literal["answered", "not_in_corpus", "out_of_scope"]
+          answer: str | None = None
+          citations: list[Citation] = []
+          risk_tier: Literal["low", "medium", "high"]
+    after: |
+      Requiring a verbatim `quote` per citation makes checking cheap: the quote must appear in
+      the cited chunk character for character. An explicit `status` makes abstention a normal
+      output, not a failure, so you can measure it.
+
+  - type: text
+    title: Guardrails before and after
+    text: |
+      **Before generation**
+
+      - A **scope classifier** routes patient-specific decision requests to a redirect response.
+      - A **PHI detector** applies whatever policy you chose (block, warn, or allow inside an
+        approved environment).
+
+      **After generation**
+
+      - **Quote check**: every cited quote appears verbatim in its chunk.
+      - **Claim support check**: an entailment model or an LLM judge confirms each sentence is
+        supported by its cited passage.
+      - **Numeric check**: every number in the answer appears in a cited passage.
+      - If a check fails on a high-risk answer, return the relevant passages without a summary
+        rather than an unverified answer.
+
+  - type: quiz
+    question: |
+      The cited chunk says: BP below 185/110 **before** thrombolysis, and at or below 180/105 for
+      24 hours **after**. The assistant answers "keep BP below 185/110 for 24 hours after
+      thrombolysis." Which check catches this?
+    options:
+      - A claim-level support check (entailment or judge) on that sentence, or human review
+      - The quote check
+      - The numeric check, since every number must appear in the source
+      - None are needed because the citation is correct
+    answer: 0
+    explanation: |
+      Every number in the answer appears in the chunk, so the numeric check **passes**, and the
+      quote check can pass too if the quote is copied correctly. The error is in how the
+      numbers are attached to the timing. Only a check of whether the sentence is supported
+      catches that. That's why high-risk answers need layered checks, and why showing the
+      verbatim quote next to the answer is a strong safety design.
+
+  - type: image
+    image: m07-02-architecture.png
+    caption: |
+      Three lanes: offline ingestion builds a versioned index, the online path guards,
+      retrieves, generates, and verifies each answer, and the evaluation and monitoring lane
+      watches everything.
+
+  - type: text
+    title: "6. Evaluation, layer by layer"
+    text: |
+      Build a **golden set** with clinicians: a few hundred real questions, stratified by risk
+      tier, site, and user role. Include:
+
+      - answerable questions with the correct section and answer
+      - **unanswerable** questions (not covered by any document)
+      - **out-of-scope** questions (patient-specific decisions)
+      - **version traps** (questions whose answer changed in the latest revision)
+
+      Score each layer separately:
+
+      - **Retrieval**: recall@k, MRR
+      - **Generation**: faithfulness to the passages, correctness, completeness
+      - **Abstention**: precision and recall of "not in corpus"
+      - **Safety**: high-risk error rate, confirmed by clinician review
+
+      Separating layers tells you where to fix. A wrong answer with the right passage retrieved
+      is a generation problem. A wrong answer without it is a retrieval problem.
+
+  - type: quiz
+    question: |
+      On the golden set, 18% of answers are wrong. In 15 of every 18 wrong answers, the correct section
+      was not in the retrieved passages. What should the team work on first?
+    options:
+      - Prompt engineering to reduce hallucination
+      - Switching to a larger LLM
+      - Adding more examples to the prompt
+      - Retrieval (chunking, hybrid search, filters, reranking), since most errors happen before generation
+    answer: 3
+    explanation: |
+      Five in six errors are retrieval misses: the model never saw the right text. A better
+      prompt or a bigger model can't fix that, and a bigger model may just produce more
+      convincing wrong answers. This is why you evaluate retrieval separately (Module 05, lesson
+      3) before tuning generation.
+
+  - type: text
+    title: LLM judges, carefully
+    text: |
+      A few hundred questions graded by clinicians is feasible once. Re-grading every time
+      something changes isn't. LLM-as-judge makes regression testing practical, if you:
+
+      - **Calibrate** the judge against clinician grades on a labelled subset, and report
+        agreement (for example, Cohen's kappa).
+      - Watch for known biases: preferring longer answers, preferring its own model family's
+        style, and being swayed by confident wording.
+      - Give it a rubric and the source passages, and ask for specific checks ("is each claim
+        supported?") rather than a vague 1–10 score.
+      - Keep **humans on the high-risk slice** and on a random sample of everything else.
+
+      Module 05, lesson 4 covers generation evaluation in depth.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you evaluate this guideline assistant before launch?"
+    model_answer: |
+      I'd build a golden set with clinicians, a few hundred real questions collected from nurses,
+      residents, and pharmacists, stratified by risk tier and site. Each has the correct source
+      section and a reference answer. It would deliberately include unanswerable questions,
+      out-of-scope patient-specific questions, and version traps where the latest revision
+      changed the answer.
+
+      Then I'd evaluate in layers: retrieval recall@k and MRR against the labelled sections;
+      generation faithfulness and correctness given the retrieved passages; abstention precision
+      and recall; and a high-risk error rate reviewed by clinicians. I'd use an LLM judge for
+      scale, but only after checking its agreement with clinician grades. Add adversarial tests
+      like prompt injection and ambiguous abbreviations, and measure latency and cost.
+
+      Launch gates would be agreed in advance, for example recall@5 above a target, zero
+      unsupported numeric claims in the high-risk tier, and good abstention on unanswerable
+      questions. After that, a limited pilot with sampled human review. The golden set becomes
+      a regression suite that runs on every corpus, prompt, or model change.
+    key_points:
+      - Golden set built with clinicians and stratified by risk tier, site, and role
+      - Includes unanswerable, out-of-scope, and version-trap questions
+      - Evaluates retrieval, generation, abstention, and safety separately
+      - LLM judge calibrated against clinicians, with humans on high-risk answers
+      - Pre-agreed launch gates, a pilot, and a regression suite for every change
+
+  - type: text
+    title: "7. PHI, governance, and regulation"
+    text: |
+      **PHI.** If the tool lives in the EHR, users will paste patient details, whatever the
+      policy says. Either detect and block it, or run the whole stack (LLM, logs, vector store)
+      in an environment approved for PHI, with a business associate agreement (BAA) with the
+      LLM vendor where required. Logs of questions are PHI. Access, retention, and any reuse for
+      improvement need governance approval (Module 06).
+
+      **Governance.** Each document has an owner who approves its inclusion. A release is a
+      tuple: corpus snapshot, prompt version, model version, and evaluation results, signed off
+      before it goes live.
+
+      **Regulation.** In the US, whether clinical decision support software is regulated as a
+      medical device depends partly on whether the clinician can independently review the basis
+      for the output. Showing sources and staying a reference tool helps, but it isn't a
+      guarantee. Involve regulatory experts early. This is a simplification of a detailed area
+      covered in Module 03, lesson 6.
+
+  - type: quiz
+    question: |
+      Which change should trigger the full regression suite before release?
+    options:
+      - Only a change to the LLM model version
+      - Only a new corpus snapshot
+      - Any of these, whether a new corpus snapshot, a prompt change, or a model version update
+      - None of them, since monitoring will catch problems in production
+    answer: 2
+    explanation: |
+      Each one can change answers. A new snapshot can drop or duplicate documents, a prompt tweak
+      can change abstention behaviour, and a model update can change faithfulness. That's why a
+      release is the full tuple, and why the golden set has to be automated. Relying on
+      production monitoring means clinicians find the regressions for you.
+
+  - type: text
+    title: "8. Monitoring"
+    text: |
+      - **Usage and outcomes**: questions per day, abstention rate, out-of-scope rate,
+        thumbs-down rate, and click-through to cited sources.
+      - **Sampled human review**: each week, clinicians grade a stratified sample, with high-risk
+        answers oversampled.
+      - **Retrieval health**: share of queries with no passage above the relevance threshold,
+        which points to corpus gaps.
+      - **Corpus freshness**: documents past their review date, and new guideline releases not
+        yet ingested.
+      - **Drift in questions**: new topics (a new drug on formulary, a new protocol) that the
+        golden set doesn't cover yet, which then get added to it.
+      - **Latency and cost** per question, with budgets.
+
+      Every thumbs-down and every incident becomes a new test case.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A clinician reports that the assistant gave an outdated answer about a stroke protocol.
+      Walk me through your response."
+    model_answer: |
+      First, triage: how dangerous is the gap between the old and new answer? If it's a
+      high-risk threshold, I'd immediately block that topic or show only the source link while we
+      investigate, and let the clinical owner know.
+
+      Then I'd reproduce it from the logs. Because every answer records the corpus snapshot,
+      prompt version, and model version, I can replay the exact question. I'd check where it
+      failed: was the old version still marked active in the index, was the metadata wrong, did
+      retrieval rank the old version above the new one, or did the model ignore the newer
+      passage? The fix depends on the cause, for example fixing the sync with the policy system
+      so retired documents drop out, filtering strictly on status, or adding a check that flags
+      multiple versions of the same document.
+
+      Next, I'd search the logs for other answers that cited the retired version and tell the
+      affected users if needed. Finally, I'd add the question as a version-trap test, run the
+      regression suite, release the fix, and write a short incident review so the process
+      improves, not just the one document.
+    key_points:
+      - Triages severity and contains risk quickly
+      - Reproduces using logged snapshot, prompt, and model versions
+      - Localizes the cause (corpus sync, metadata, retrieval ranking, generation)
+      - Finds other affected answers and informs users
+      - Adds a regression test and does an incident review
+
+  - type: laptop
+    title: Start the golden set for Module 05
+    repo_path: 05-clinical-llm-evaluation/
+    task: |
+      Create `05-clinical-llm-evaluation/eval/golden_questions.yaml` with 12 questions about a
+      stroke guideline you can access (for example, a public stroke guideline or an institutional
+      protocol you are allowed to use). For each, record: `question`, `risk_tier`,
+      `expected_status` (answered, not_in_corpus, out_of_scope), `source_section`, and
+      `reference_answer`. Include at least 2 unanswerable, 2 out-of-scope, and 2 numeric
+      high-risk questions. Module 05 will run the evaluation harness against this file.
+
+  - type: recap
+    points:
+      - Most risk sits in the **pipeline around the LLM**, especially corpus versioning
+      - Tier questions by risk, and redirect patient-specific decisions
+      - Chunk by structure, keep tables whole, attach version and status metadata
+      - Hybrid retrieval with filters **inside** the search, then rerank
+      - Structured output with verbatim quotes makes verification and abstention measurable
+      - Layered checks, because a numeric check alone misses numbers attached to the wrong condition
+      - Evaluate retrieval, generation, abstention, and safety **separately**
+      - "A release = corpus snapshot + prompt + model + eval results, and every change reruns the suite"
+      - Logs are PHI, and every incident becomes a regression test

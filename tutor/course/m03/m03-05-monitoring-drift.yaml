@@ -1,0 +1,489 @@
+id: m03-05-monitoring-drift
+title: 'Monitoring in production: drift, performance, and alerts'
+summary: Data, prediction, and concept drift; PSI and KS; missingness; delayed labels; silent mode; and alert thresholds people don't learn to ignore.
+minutes: 28
+status: authored
+why_it_matters: Clinical models rarely fail loudly. They decay quietly after an upstream change, and the
+  labels that would reveal it arrive months later. Designing monitoring for that reality is one of the
+  strongest senior signals in an interview.
+objectives:
+  - Distinguish data (covariate), prediction, label, and concept drift
+  - Recognize upstream changes (lab units, ICD mapping, interfaces) as the most common cause of drift
+  - Monitor input missingness and data quality per feature and per site
+  - Compute and interpret PSI and KS, knowing their limits
+  - Monitor performance when labels arrive weeks later, and recognize intervention feedback loops
+  - Use silent (shadow) mode before go-live
+  - Design alert thresholds that avoid alarm fatigue
+key_points:
+  - Upstream changes such as lab units, ICD mapping, and interface breaks are the most common cause of drift
+  - Monitor missingness; it often moves before anything else
+  - PSI's 0.1 and 0.25 cut-offs are industry heuristics, not statistical tests
+  - With large samples, KS p-values flag trivial shifts; look at effect size
+  - Performance monitoring lags by the outcome window plus data latency
+  - Silent mode before go-live catches skew, drift, and workflow problems safely
+  - Alerts need tiers, persistence, minimum sample sizes, owners, and runbooks
+tags: [monitoring, drift, mlops, interview]
+steps:
+  - type: text
+    title: Nothing broke, and that was the problem
+    text: |
+      The readmission service has run for four months. Latency is fine, error rate is zero,
+      `/readyz` is green.
+
+      In week 15, one hospital upgraded its coding software. Hypertension that used to be
+      coded `I10` is now often coded more specifically, as hypertensive heart or kidney
+      disease (`I11.x`, `I12.x`). Recall that `02_features.sql` builds `prior_hypertension`
+      with `d.icd10_code = 'I10'`, an exact match. At that site, the feature's prevalence
+      falls from 62% to 30% overnight. The model's risk scores drift down. The care-management
+      team gets fewer high-risk referrals and assumes it's a quiet month.
+
+      No error was raised. Every value was valid, so Lesson 2's input validation passed. The
+      labels that would show falling sensitivity won't be complete for two months.
+
+      That's what monitoring is for: catching the failures that **don't** throw exceptions.
+
+  - type: text
+    title: Layers of monitoring
+    text: |
+      Think in layers, from fastest signal to slowest:
+
+      - **Service health**: uptime, latency percentiles, 4xx/5xx rates, restarts (Lessons 2
+        and 4). Minutes.
+      - **Data quality**: schema, ranges, **missingness**, category values, volume per site.
+        Hours to days.
+      - **Input drift**: has the distribution of each feature changed versus training? Days
+        to weeks.
+      - **Prediction drift**: has the distribution of risk scores, or the share flagged high
+        risk, changed? Days to weeks.
+      - **Performance**: discrimination and calibration against real outcomes. Months, because
+        labels are delayed.
+      - **Impact**: are readmissions actually falling for flagged patients? Quarters, and
+        needs careful study design.
+
+      The earlier layers are **proxies**. They can't prove the model got worse, but they are
+      the only signals you have while you wait for labels.
+
+  - type: text
+    title: Kinds of drift
+    text: |
+      Write the model as learning P(Y | X) from data with distribution P(X).
+
+      - **Data drift** (covariate shift): P(X) changes. An older population, a new referral
+        hospital, a coding change. The relationship P(Y | X) may be intact.
+      - **Prediction drift**: the distribution of model outputs changes. Usually a consequence
+        of data drift; cheap to monitor because it's one number per patient.
+      - **Label shift** (prior shift): the base rate P(Y) changes, for example a new
+        post-discharge clinic lowers readmissions overall.
+      - **Concept drift**: P(Y | X) itself changes. The same patient profile now has a
+        different risk, because care changed (new anticoagulation practice, a transitional-care
+        program, a pandemic). Only labels reveal it.
+
+      The key interview point: input and prediction drift are **detectable immediately but may
+      not hurt**. Concept drift **hurts but is detectable only with labels**.
+
+  - type: quiz
+    question: |
+      A hospital launches a transitional-care nurse program for all stroke discharges. Six
+      months later, patients with the same features are readmitted less often. The feature
+      distributions are unchanged. What kind of drift is this?
+    options:
+      - Data drift, because the population changed
+      - Concept drift, because the relationship between features and outcome changed
+      - Prediction drift, because scores changed
+      - No drift, since input distributions are stable
+    answer: 1
+    explanation: |
+      P(X) is stable, so input monitoring sees nothing. What changed is P(Y | X): the same
+      profile now carries lower risk because care improved. The model is now miscalibrated,
+      over-predicting, and only outcome labels reveal it. The tempting option D is exactly the
+      trap of relying on input drift alone.
+
+  - type: text
+    title: The usual culprit is upstream
+    text: |
+      In practice, the most common cause of a production model going wrong isn't the world
+      changing slowly. It's **something upstream changing suddenly**:
+
+      - **Lab units or methods**: a site reports LDL in mmol/L, creatinine in µmol/L instead
+        of mg/dL (a factor of about 88), or switches assay with a different reference range.
+      - **Code sets and mappings**: the annual ICD-10-CM update (effective each October 1), a
+        new coding tool, or a revised mapping table that changes which codes feed a feature.
+      - **Interfaces and EHR changes**: an HL7 feed breaks and a field arrives empty; an EHR
+        upgrade renames an order; a new hospital joins the network with different practices.
+      - **Pipeline changes**: a refactor changes a join, a default value, or a time window.
+
+      Two defences. **Talk to the data owners**: get on the change-notification list for lab,
+      coding, and interface teams. And **monitor per site and per feature**, because a change
+      at one site gets diluted in network-wide averages.
+
+  - type: quiz
+    question: |
+      Look at the feature from the hook. Which change makes it fail most robustly?
+    code: |
+      MAX(CASE WHEN d.icd10_code = 'I10' THEN 1 ELSE 0 END) AS prior_hypertension
+    language: sql
+    options:
+      - Replace it with `d.icd10_code LIKE 'I1%'`
+      - Impute prior_hypertension from blood pressure readings instead
+      - Drop the feature because coding is unreliable
+      - Map a reviewed code list (for example I10 through I16 as clinically agreed) in a versioned table, and monitor the feature's prevalence per site
+    answer: 3
+    explanation: |
+      A reviewed, versioned code list makes the definition explicit and auditable, and it can
+      be updated when code sets change. Monitoring prevalence per site catches the next
+      surprise. `LIKE 'I1%'` (A) is tempting but sweeps in codes a clinician may not want (the
+      I10–I1A block includes secondary and other hypertension categories), and the definition
+      must match what the model was trained on, so changing it means retraining and
+      revalidating. Dropping the feature (C) throws away signal instead of managing it.
+
+  - type: text
+    title: Watch missingness first
+    text: |
+      Missingness is the cheapest and often the **earliest** drift signal. When an interface
+      breaks, values don't turn strange, they disappear.
+
+      Suppose `latest_ldl_prior_365d` is missing for 20% of patients in training (the Module
+      01 generator injects missing lab values on purpose, and many patients simply had no
+      LDL test). If a site's missing rate jumps to 70%, the model silently falls back on its
+      imputation for most patients. Scores shift, and no validation rule fires, because
+      `null` is an allowed value (Lesson 2).
+
+      Track per feature, per site, per day:
+
+      - share missing
+      - share at a default or sentinel value (0, -1, 999)
+      - volume of requests or batch rows (a site going quiet is a signal too)
+
+      For numeric features, compute drift statistics on the **non-missing** values and track
+      the missing rate **separately**, so a jump in either is visible on its own.
+
+  - type: text
+    title: PSI, the population stability index
+    text: |
+      PSI comes from credit-risk modelling and is the most widely used drift score in industry.
+
+      Bin the feature using the **reference** (training) distribution, usually into 10
+      quantile bins. For each bin i, let e_i be the reference share and a_i the current share.
+      Then:
+
+      **PSI = Σ (a_i − e_i) · ln(a_i / e_i)**
+
+      Each term is non-negative, so PSI is 0 when the distributions match and grows as they
+      diverge. (It is the symmetric form of KL divergence.)
+
+      Common rules of thumb:
+
+      - **< 0.1**: little change
+      - **0.1 – 0.25**: moderate change, worth watching
+      - **> 0.25**: large change, investigate
+
+      These cut-offs are **heuristics** from practice, not derived from any statistical test.
+      Use them as a starting point and tune them to your features and sample sizes.
+
+  - type: image
+    image: m03-05-shifted-distributions.png
+    caption: |
+      Simulated reference and current distributions of predicted risk. The mean predicted
+      risk fell from about 15% to 11%, giving PSI = 0.29. Prediction drift like this is
+      usually the first thing care managers notice ("fewer high-risk patients lately").
+
+  - type: code
+    title: PSI in a few lines
+    language: python
+    code: |
+      import numpy as np
+
+
+      def psi(reference, current, n_bins=10, eps=1e-4):
+          reference = reference[~np.isnan(reference)]   # missingness tracked separately
+          current = current[~np.isnan(current)]
+          edges = np.unique(np.quantile(reference, np.linspace(0, 1, n_bins + 1)))
+          edges[0], edges[-1] = -np.inf, np.inf          # catch out-of-range values
+          ref = np.histogram(reference, edges)[0] / len(reference)
+          cur = np.histogram(current, edges)[0] / len(current)
+          ref, cur = np.clip(ref, eps, None), np.clip(cur, eps, None)  # avoid log(0)
+          return float(np.sum((cur - ref) * np.log(cur / ref)))
+    after: |
+      Details that matter: bins come from the reference only; open-ended outer bins catch new
+      extremes; `np.unique` handles tied quantiles in count features like
+      `ed_visits_prior_365d`; and `eps` keeps an empty bin from producing infinity. For binary
+      or categorical features, use the categories themselves as bins. Quantile bins on a 0/1
+      feature collapse into a single bin, and PSI would always be 0.
+
+  - type: quiz
+    question: |
+      Reference shares across four bins are 0.25, 0.25, 0.25, 0.25. This month's shares are
+      0.10, 0.20, 0.30, 0.40. Roughly what is the PSI, and how would the usual rule of thumb
+      classify it?
+    options:
+      - About 0.23, moderate, worth watching
+      - About 0.02, stable
+      - About 0.45, large shift
+      - It can't be computed without the raw data
+    answer: 0
+    explanation: |
+      Terms: (−0.15)·ln(0.4) ≈ 0.137, (−0.05)·ln(0.8) ≈ 0.011, (0.05)·ln(1.2) ≈ 0.009,
+      (0.15)·ln(1.6) ≈ 0.071. Sum ≈ 0.23, just under the 0.25 heuristic. Note that the most
+      extreme bins contribute most. A shift this systematic would deserve a look even though it
+      doesn't cross the "investigate" line, which is one reason not to treat the cut-offs as
+      hard rules.
+
+  - type: quiz
+    question: |
+      At one hospital, `prior_hypertension` prevalence drops from 62% to 38%. Treating it as a
+      two-category feature, PSI ≈ 0.23. What's the right reading?
+    options:
+      - Below 0.25, so no action needed
+      - PSI is invalid for binary features
+      - A 24-point drop in a comorbidity's prevalence is clinically implausible overnight and should be investigated regardless of the PSI band
+      - The model should be retrained on the new data right away
+    answer: 2
+    explanation: |
+      PSI compresses a change into one number whose scale depends on the number of bins. For
+      binary features, the prevalence itself is more interpretable, and a sudden drop of this
+      size signals a data change, not a population change. Retraining immediately (D) would
+      teach the model the coding artifact. Find the cause first; the fix may be upstream.
+
+  - type: text
+    title: KS and the p-value trap
+    text: |
+      The **two-sample Kolmogorov–Smirnov (KS) test** compares two samples of a continuous
+      variable. Its statistic **D** is the largest vertical gap between the two empirical CDFs,
+      from 0 (identical) to 1 (no overlap). `scipy.stats.ks_2samp(reference, current)` returns
+      D and a p-value.
+
+      The trap is the p-value. With 20,000 reference rows and 20,000 current rows (a few months
+      across a large network), a D of just 0.02 gives p < 0.001. Monitoring samples are large
+      and grow over time, so:
+
+      - Monitor the **statistic** (D, or PSI) against a threshold chosen for practical
+        importance, not p < 0.05.
+      - If you do use p-values across many features and sites, you're running dozens of tests
+        a week, and false alarms are guaranteed without correction.
+
+      KS is also designed for continuous data; for counts with many ties or for categories,
+      use PSI or a chi-square comparison instead.
+
+  - type: quiz
+    question: |
+      A dashboard compares 20,000 recent patients to the 20,000-patient training reference:
+      KS p < 0.001 for `age_at_index`, with D = 0.02. The median age moved from 71 to 71.5.
+      What does this mean?
+    options:
+      - A severe shift; pause the model
+      - A statistically detectable but practically trivial shift, because the sample is huge
+      - The KS test is broken
+      - Age has concept drift
+    answer: 1
+    explanation: |
+      D = 0.02 means the CDFs differ by at most 2 percentage points, and half a year of median
+      age won't change readmission risk meaningfully. The tiny p-value reflects sample size, not
+      importance. Alerting on p-values like this is a fast route to alarm fatigue.
+
+  - type: image
+    image: m03-05-psi-over-time.png
+    caption: |
+      Simulated weekly PSI of prior_hypertension at one site, with the rule-of-thumb bands.
+      Weekly noise stays near zero, then the coding change produces a sustained jump. Sustained
+      is the key word: alert on persistence, not a single point.
+
+  - type: text
+    title: Monitoring with delayed labels
+    text: |
+      For a 30-day readmission model, the label for a patient scored today exists at the
+      earliest 30 days later, and in practice later still. Readmissions to other hospitals
+      may only show up in **claims**, which arrive 30–90 days after service (Module 01's
+      recorded-time lesson). So complete labels for this month's patients arrive roughly
+      **2–4 months** later.
+
+      A practical design:
+
+      - **Now**: data quality, missingness, input drift, prediction drift, share flagged high
+        risk, all per site.
+      - **When labels mature**: on patients whose outcome window has closed and whose data has
+        settled, compute AUROC, **observed/expected ratio** (calibration-in-the-large),
+        calibration slope, and sensitivity at the operating threshold, per site and per
+        subgroup (Module 02's subgroup lesson).
+      - **Use rolling windows with confidence intervals.** With about 200 stroke discharges a
+        month at a site and a 15% readmission rate, a single month has only around 30 events,
+        which is far too few for a stable AUROC.
+
+      Report performance by **cohort month** (when the patient was scored), not by the month
+      the label arrived, so changes line up with the upstream events that caused them.
+
+  - type: text
+    title: When the model changes its own labels
+    text: |
+      There's a subtler problem. If care managers act on high-risk flags (follow-up calls,
+      early clinic visits) and it works, flagged patients are readmitted **less often** than
+      the model predicted.
+
+      Monitoring then shows the model as **over-predicting** for exactly the patients it helped.
+      Naively retraining on these outcomes would teach it that those profiles are lower risk,
+      and it would stop flagging them. The intervention hides the model's value and can
+      degrade the next version.
+
+      Mitigations:
+
+      - **Log the intervention** alongside the prediction (was the patient contacted?).
+      - Evaluate calibration on **patients who didn't receive the intervention**, knowing they
+        differ from those who did.
+      - Where ethical and approved, use designs that keep a comparison, such as a staggered
+        rollout across sites or a randomized evaluation. Module 04's trial and target-trial
+        methods apply here.
+
+      Lesson 6 returns to this as a reason retraining can make things worse.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Design the monitoring for our 30-day readmission model. Labels don't arrive for two to
+      three months. What do you track, and what would make you pull the model?"
+    model_answer: |
+      I'd set up layers. Service health first: latency, error rates, and readiness, with pages
+      for outages. Then data quality per feature and per site: schema, ranges, missing rates,
+      sentinel values, and row volume, because upstream changes like a lab unit switch or a
+      coding update are the most likely failure. Then input drift using PSI on each feature,
+      and prediction drift on the score distribution and the share flagged high-risk, again
+      per site, since a change at one hospital gets diluted network-wide. When labels mature,
+      I'd compute AUROC, the observed-to-expected ratio, calibration slope, and sensitivity at
+      the operating threshold on rolling windows with confidence intervals, by cohort month,
+      site, and key subgroups. I'd also log which patients were contacted, because successful
+      interventions make the model look miscalibrated. Pull criteria would be agreed with the
+      clinical owner in advance: a data-integrity failure that makes scores invalid, like a
+      broken feed or unit change, means suspend immediately and show "score unavailable";
+      confirmed calibration or sensitivity below a pre-set floor on mature labels triggers a
+      review and possibly rollback. Drift alone triggers investigation, not automatic removal.
+    key_points:
+      - Layers from service health to data quality, input drift, prediction drift, then labelled performance
+      - Per-site and per-feature monitoring, especially missingness, because upstream changes are the likely cause
+      - Delayed-label metrics (discrimination, calibration, sensitivity at threshold) on rolling windows with CIs by cohort month and subgroup
+      - Recognizes that interventions distort observed outcomes and logs them
+      - Pre-agreed action thresholds, with integrity failures suspending the model and drift triggering investigation
+
+  - type: text
+    title: Silent mode before go-live
+    text: |
+      Before clinicians see a single score, run the service in **silent mode** (also called
+      shadow mode): it receives real, live data, scores every patient, and stores predictions,
+      but nothing is shown and no care decision depends on it.
+
+      Silent mode answers questions retrospective validation can't:
+
+      - Are live features identical to what the offline pipeline would compute? (training-
+        serving skew, Lesson 2)
+      - Are the score distribution and flag rate what we expected? Would the care team be
+        able to handle that many flags a day?
+      - Do timing and data latency hold up, for example is the LDL actually available when
+        the batch runs at 6 a.m.?
+      - Once labels mature, does performance on truly prospective patients match validation?
+
+      A few weeks to a few months is common, depending on volume and how long labels take.
+      The same pattern is used later to shadow a **challenger** model beside the live one
+      (Lesson 6).
+
+  - type: quiz
+    question: |
+      During a silent-mode run, the model flags 40 patients a day as high risk. Retrospective
+      validation predicted about 12, and the care team can handle 15. Feature drift is low.
+      What's the most useful next step?
+    options:
+      - Go live; silent mode is only about technical checks
+      - Lower the threshold so more patients are flagged
+      - Compare live features to offline recomputation for the same patients, and check calibration of the flag rate, before deciding on the threshold with the clinical team
+      - Retrain the model on the silent-mode data
+    answer: 2
+    explanation: |
+      A threefold flag rate with low input drift points to skew (live features computed
+      differently) or a threshold that doesn't translate to live data. Diff the features first.
+      Then set the operating point with the care team's capacity in mind, as in Module 02's
+      metrics lessons. Going live (A) would swamp the team and train them to ignore the
+      flags. Lowering the threshold (B) makes it worse.
+
+  - type: text
+    title: Alerts people don't learn to ignore
+    text: |
+      Clinicians know **alert fatigue** well: when most alerts are false, people stop reading
+      them. Monitoring systems cause the same problem for engineers. Eight features × five sites
+      × weekly checks is 40 tests a week; even at a 1% false alarm rate, you'll see one every
+      few weeks, and real teams run far more than 40.
+
+      Design principles:
+
+      - **Tier by severity.** _Page_ only for things that make scores invalid now: service
+        down, schema violations, missingness spikes, volume dropping to zero. _Ticket_ for
+        sustained drift. _Dashboard_ for everything else, reviewed weekly.
+      - **Require persistence.** For example PSI > 0.25 for two consecutive weeks, not one
+        noisy point.
+      - **Require a minimum sample.** No drift statistic on 20 patients.
+      - **Alert on what matters most.** Weight by feature importance; prediction drift and flag
+        rate are often better summary alerts than 40 feature alerts.
+      - **Every alert has an owner and a runbook**: who looks, what to check first (upstream
+        change log, per-site breakdown), and what the decision options are.
+      - **Review alerts regularly** and retire or retune the ones that never lead to action.
+
+  - type: quiz
+    question: |
+      Which alert rule is best for input drift on the readmission model?
+    options:
+      - Page on-call when any feature's KS p-value is below 0.05 on any day
+      - Don't alert on drift; wait for labelled performance
+      - Send an email for every PSI above 0.1
+      - Open a ticket when a top feature's PSI exceeds 0.25 at a site for two consecutive weeks with at least 100 patients each week
+    answer: 3
+    explanation: |
+      Option D combines a practically meaningful threshold, persistence, a minimum sample, focus
+      on important features, per-site granularity, and the right severity (ticket, not page).
+      Option A pages people for noise from large-sample p-values and daily multiple testing.
+      Option C floods inboxes until they're filtered. Option B gives up the only early warning
+      you have when labels take months.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your monitoring shows the PSI of `latest_ldl_prior_365d` jumped to 0.4 last week at one
+      hospital. Walk me through what you do."
+    model_answer: |
+      First I'd check whether it's real: enough patients that week, and whether the shift
+      persists into this week. Then I'd look at the raw distribution rather than the PSI. If
+      values cluster around 2 to 5, that's almost certainly mmol/L instead of mg/dL. If the
+      missing rate jumped, it's probably an interface problem. If there's a step change in the
+      median, maybe a new assay or a reference-lab switch. I'd check the upstream change log
+      and ask the lab and interface teams. At the same time I'd assess impact: how much did
+      the scores and the high-risk flag rate at that site move, since LDL may not be a major
+      driver. If scores are materially wrong, I'd suspend scoring for that site and show
+      "unavailable" rather than wrong numbers, tell the clinical owner, and fix the data
+      upstream or add an explicit unit conversion with validation, not retrain on the bad
+      data. Afterwards I'd add a unit check to the data-quality layer so this particular
+      failure pages instead of waiting for a weekly drift review.
+    key_points:
+      - Confirms the signal with sample size and persistence
+      - Looks at the raw distribution and missing rate to diagnose (unit change, interface failure, assay change)
+      - Checks upstream change logs and talks to data owners
+      - Assesses impact on scores and flags, and suspends the site if scores are invalid
+      - Fixes at the source rather than retraining, and adds a specific check afterwards
+
+  - type: laptop
+    title: Simulate an upstream change and catch it
+    repo_path: 03-production-ml/src/readmission_service/monitoring.py
+    task: |
+      Create `monitoring.py` with the `psi` function above, a categorical PSI for binary
+      features, and a `missing_rate` function. Build a reference from the Module 01
+      `stroke_features.csv`. Make a "current" copy where you (1) divide
+      `latest_ldl_prior_365d` by 38.67 for a random 30% of rows (mg/dL to mmol/L), (2) set
+      `prior_hypertension` to 0 for half of the patients who have it, and (3) blank LDL for
+      another 20%. Print PSI and missing rate per feature, and the PSI of the model's predicted
+      probabilities. Which change moved predictions most? Add tests with tiny arrays where you
+      know the answer (identical samples give PSI of about 0).
+
+  - type: recap
+    points:
+      - The dangerous failures raise no errors; monitoring exists to catch them
+      - "Layers: service health, data quality, input drift, prediction drift, labelled performance, impact"
+      - "**Data drift** is immediate but may not hurt; **concept drift** hurts but needs labels"
+      - Upstream changes (lab units, ICD mapping, interfaces) are the usual culprit, so monitor per site
+      - Track **missingness** separately; it often moves first
+      - "PSI < 0.1 / 0.1–0.25 / > 0.25 are **heuristics**; KS p-values mislead at large n"
+      - Labels lag by the outcome window plus claims latency; use rolling windows with CIs by cohort month
+      - Successful interventions distort outcomes, so log them
+      - Run **silent mode** before go-live, and alert with tiers, persistence, minimum samples, owners, and runbooks

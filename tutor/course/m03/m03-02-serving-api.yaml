@@ -1,0 +1,444 @@
+id: m03-02-serving-api
+title: Serving predictions with FastAPI
+summary: 'Designing a prediction API: Pydantic validation, loading the model once, versioned routes, errors, health vs readiness, audit logging, and batch vs online.'
+minutes: 25
+status: authored
+why_it_matters: Most clinical models reach clinicians through an API or a scheduled batch job. Interviewers
+  expect you to design an endpoint on a whiteboard and to talk precisely about validation, failure, and audit.
+objectives:
+  - Build a FastAPI endpoint with Pydantic v2 request and response models
+  - Load the model once at startup with a lifespan handler
+  - Version routes and report the model version with every prediction
+  - Validate inputs, reject out-of-range values, and return meaningful errors
+  - Separate liveness (health) from readiness, and add request IDs and audit logs
+  - Choose online vs batch scoring for a clinical use case
+key_points:
+  - Load the model once at startup, never per request
+  - Reject out-of-range or unexpected inputs instead of guessing
+  - Health says the process is alive; readiness says it can serve correct predictions
+  - Every prediction is traceable to a request ID, input, output, and model version
+  - Many clinical use cases are better served by batch scoring than a real-time API
+tags: [fastapi, api, pydantic, interview]
+steps:
+  - type: text
+    title: The LDL that was 2.8
+    text: |
+      Your readmission model goes live behind an API. One hospital in the network sends LDL in
+      **mmol/L** instead of mg/dL. An LDL of 110 mg/dL arrives as 2.8.
+
+      The model has never seen an LDL below 30. It doesn't crash. It returns a confident
+      probability for a patient with apparently extraordinary cholesterol control, and a care
+      manager acts on it.
+
+      An API is not just a way to call `predict()` over HTTP. It is the **contract** between
+      your model and the rest of the hospital, and its first job is to refuse inputs the model
+      was never validated on. In this lesson we build `03-production-ml/src/readmission_service/app.py`
+      for the Module 02 model.
+
+  - type: text
+    title: Anatomy of a prediction service
+    text: |
+      A minimal clinical prediction service has five parts:
+
+      - **Schemas**: typed request and response models that validate inputs and document the API.
+      - **Model loading**: the artifact is loaded once, when the process starts.
+      - **Routes**: `POST /v1/predict` for scoring, plus `/healthz` and `/readyz` for the
+        platform.
+      - **Error handling**: bad input gets a clear 4xx; internal failures get a 5xx without
+        leaking stack traces or patient data.
+      - **Observability**: a request ID on every call, structured logs, and an audit record
+        of input, output, and model version.
+
+      **FastAPI** is the common Python choice: it builds on Pydantic for validation, generates
+      OpenAPI docs at `/docs` automatically, and runs on an ASGI server such as Uvicorn.
+
+  - type: image
+    image: m03-02-request-flow.png
+    caption: |
+      One request's path through the service. Validation rejects bad inputs before the model
+      runs. Every response, success or failure, carries the request ID, and each prediction
+      writes an audit record with the model version.
+
+  - type: code
+    title: The request schema is the contract
+    language: python
+    code: |
+      from typing import Annotated
+
+      from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+      Count = Annotated[int, Field(ge=0, le=365)]
+
+
+      class PatientFeatures(BaseModel):
+          model_config = ConfigDict(extra="forbid")
+
+          age_at_index: int = Field(ge=18, le=110)
+          prior_af: bool
+          prior_hypertension: bool
+          prior_diabetes: bool
+          encounters_prior_365d: Count
+          ed_visits_prior_365d: Count
+          inpatient_visits_prior_365d: Count
+          latest_ldl_prior_365d: Annotated[float, Field(ge=10, le=400)] | None = None  # mg/dL
+
+          @model_validator(mode="after")
+          def visits_consistent(self) -> "PatientFeatures":
+              if self.inpatient_visits_prior_365d > self.encounters_prior_365d:
+                  raise ValueError("inpatient visits cannot exceed total encounters")
+              return self
+    after: |
+      Every field matches a column of the Module 01 `stroke_features` table. `Field(ge=, le=)`
+      gives range checks, and the LDL range rejects the 2.8 from the hook. `None` is allowed
+      because "no LDL in the past year" is a real, expected state that the model was trained to
+      handle. `extra="forbid"` rejects unknown fields, and the `model_validator` checks a rule
+      that spans two fields. The age limits follow the cohort definition (18+); an unvalidated
+      population is out of scope.
+
+  - type: quiz
+    question: |
+      A client sends `"latest_ldl_prior_365d": 2.8` and also an extra field
+      `"ldl_unit": "mmol/L"`. What does the service above return?
+    options:
+      - 200 with a prediction, ignoring the unit field
+      - 422 Unprocessable Content, listing both the LDL range error and the forbidden extra field
+      - 400 Bad Request with a generic message
+      - 500, because the model cannot handle the value
+    answer: 1
+    explanation: |
+      FastAPI validates the body with Pydantic before your function runs. Pydantic collects
+      **all** errors, not just the first, so the 422 response lists the range violation and
+      the `extra_forbidden` error, each with its location. Without `extra="forbid"`, Pydantic's
+      default is to silently ignore unknown fields, so a client's attempt to tell you the unit
+      would be thrown away without anyone noticing.
+
+  - type: quiz
+    question: |
+      Same schema. A client sends `"age_at_index": "71"` (a string) and `"prior_hypertension": 1`.
+      What happens by default?
+    options:
+      - Both are accepted and converted to 71 and True
+      - Both are rejected with 422 because the types are wrong
+      - Age is rejected, the boolean is accepted
+      - Both are accepted but stored as strings
+    answer: 0
+    explanation: |
+      Pydantic v2 runs in **lax mode** by default: a numeric string becomes an int, and 0/1
+      become booleans. That's usually convenient for JSON clients. If you need exact types, set
+      `ConfigDict(strict=True)` or use `StrictInt` on specific fields. Know which mode you're
+      in, because "it validated" does not always mean "the client sent exactly this type".
+
+  - type: text
+    title: Reject, don't guess
+    text: |
+      When an input is out of range, there's a temptation to be helpful: clip LDL to 30,
+      impute a missing age, convert units by guessing from the magnitude.
+
+      For a clinical model, **refuse instead**. A 422 is visible: the calling system logs it,
+      an integration engineer investigates, the unit mismatch gets fixed at the source. A
+      silently "fixed" input produces a plausible-looking score that nobody questions.
+
+      There are two kinds of missingness to keep separate:
+
+      - **Expected missingness** the model was trained on (no LDL in the past year): accept
+        `null` and let the model's imputation handle it, exactly as in training.
+      - **Unexpected missingness** (no age): reject. The model has no validated behaviour.
+
+      The exact limits (why 10–400 for LDL?) are a clinical and data decision. Set them from
+      the training distribution plus physiological plausibility, and document them.
+
+  - type: code
+    title: Load once with lifespan
+    language: python
+    code: |
+      from contextlib import asynccontextmanager
+
+      from fastapi import FastAPI
+
+      from readmission_service.model import load_model
+
+
+      @asynccontextmanager
+      async def lifespan(app: FastAPI):
+          app.state.model = load_model("models/readmit.joblib")  # startup
+          yield
+          app.state.model = None  # shutdown: release resources
+
+
+      app = FastAPI(title="Readmission risk", lifespan=lifespan)
+    after: |
+      Code before `yield` runs once when the server starts, before it accepts requests. Code
+      after it runs on shutdown. The older `@app.on_event("startup")` decorator is deprecated in
+      favour of `lifespan`. Loading at startup means a broken or missing model file fails the
+      deployment immediately, instead of failing the first patient's request.
+
+  - type: quiz
+    question: |
+      A colleague writes the endpoint like this. What's the main problem?
+    code: |
+      @app.post("/v1/predict")
+      def predict(req: PredictRequest) -> PredictResponse:
+          model = joblib.load("models/readmit.joblib")
+          prob = float(model.predict_proba(to_frame(req.features))[0, 1])
+          return PredictResponse(...)
+    language: python
+    options:
+      - "`def` should be `async def` for FastAPI to work"
+      - The response model is missing, so no validation happens
+      - joblib cannot load scikit-learn models
+      - Loading from disk on every request adds latency and fails per request if the file is bad
+    answer: 3
+    explanation: |
+      Deserializing a model can take hundreds of milliseconds and a lot of memory, on every
+      call, and a corrupt or missing file becomes an error at request time. Load once in
+      `lifespan`. On the tempting option A: a plain `def` endpoint is correct here. FastAPI runs
+      `def` endpoints in a thread pool, which is what you want for CPU-bound scikit-learn code.
+      An `async def` endpoint that calls blocking `predict_proba` would block the event loop.
+
+  - type: code
+    title: The versioned predict route
+    language: python
+    code: |
+      @app.post("/v1/predict", response_model=PredictResponse)
+      def predict(req: PredictRequest, request: Request) -> PredictResponse:
+          model = request.app.state.model
+          rid = request.state.request_id
+          try:
+              prob = model.predict_one(req.features)
+          except Exception:
+              log.exception("prediction failed", extra={"request_id": rid})
+              raise HTTPException(status_code=500, detail="prediction failed")
+
+          audit.info("prediction", extra={
+              "request_id": rid, "encounter_id": req.encounter_id,
+              "model_version": model.version, "probability": prob,
+          })
+          return PredictResponse(
+              encounter_id=req.encounter_id, probability=prob,
+              risk_tier=risk_tier(prob), model_version=model.version,
+          )
+    after: |
+      `/v1/` is the **API** version: the shape of the request and response. The
+      `model_version` in the body is the **model** version. They change independently. You can
+      retrain the model (new weights, same schema) without a new route, but adding a required
+      feature is a breaking change that needs `/v2/` while `/v1/` keeps serving existing
+      clients. The 500 detail is deliberately generic; the stack trace goes to logs, not to the
+      caller.
+
+  - type: quiz
+    question: |
+      The model is retrained on newer data. Same features, same output format, better
+      calibration. What should change in the API?
+    options:
+      - Nothing visible, except that `model_version` in each response changes
+      - Move to `/v2/predict` so clients know the model changed
+      - Keep the same version string to avoid confusing clinicians
+      - Rename the response field `probability` to `probability_v2`
+    answer: 0
+    explanation: |
+      The contract (fields, types, meaning) is unchanged, so the route version stays. The model
+      version must change, because every prediction has to be traceable to the exact artifact
+      that produced it, for audit, monitoring, and incident review. Bumping the route (B) for
+      every retrain forces all clients to redeploy for no contract change. Hiding the change
+      (C) breaks traceability.
+
+  - type: text
+    title: Health vs readiness
+    text: |
+      Container platforms (Kubernetes, Azure Container Apps) probe your service. The two probes
+      answer different questions:
+
+      - **Liveness** (`/healthz`): is the process alive and responsive? If it fails repeatedly,
+        the platform **restarts** the container. Keep it trivial: no database calls, no model
+        call.
+      - **Readiness** (`/readyz`): can this instance serve **correct** predictions right now?
+        Model loaded, required config present, any dependency it truly needs reachable. If it
+        fails, the platform **stops routing traffic** to it but does not restart it.
+
+      The classic mistake is a liveness probe that checks a downstream database. When the
+      database blips, every replica fails liveness, gets restarted at the same time, and a
+      brief outage becomes a long one.
+
+  - type: code
+    title: Two probes, two meanings
+    language: python
+    code: |
+      @app.get("/healthz")
+      def healthz() -> dict[str, str]:
+          return {"status": "ok"}
+
+
+      @app.get("/readyz")
+      def readyz(request: Request):
+          model = getattr(request.app.state, "model", None)
+          if model is None:
+              return JSONResponse(status_code=503, content={"status": "model not loaded"})
+          return {"status": "ready", "model_version": model.version}
+    after: |
+      Returning 503 tells the load balancer to route elsewhere. Reporting `model_version` on
+      readiness also makes it easy to confirm which model a newly deployed revision is serving.
+
+  - type: text
+    title: Request IDs and audit logs
+    text: |
+      Six weeks later a physician asks: "Why did your model flag this patient as high risk on
+      Tuesday?" You need to answer from records, not memory.
+
+      - A **request ID** (from the caller's `X-Request-ID` header, or a new UUID) is attached to
+        every log line and returned in the response header. It links the EHR's log, the
+        gateway's log, and yours.
+      - An **audit record** per prediction stores the request ID, time, caller identity, the
+        validated input, the output, and the model version. Stored securely, retained per
+        policy, and queryable.
+
+      Two cautions. Audit records contain PHI (an encounter ID is an identifier under HIPAA),
+      so they belong in an access-controlled store, not in general debug logs. And 422 error
+      bodies echo the offending input by default, so don't forward raw validation errors to
+      logs that aren't meant to hold PHI.
+
+  - type: code
+    title: Request ID middleware
+    language: python
+    code: |
+      import uuid
+
+      from fastapi import Request
+
+
+      @app.middleware("http")
+      async def add_request_id(request: Request, call_next):
+          request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+          request.state.request_id = request_id
+          response = await call_next(request)
+          response.headers["X-Request-ID"] = request_id
+          return response
+    after: |
+      Middleware wraps every request, including health checks and validation failures. A
+      related idea is **idempotency**: if the service also writes the score back to the EHR, a
+      client retry after a timeout could create a duplicate. Deduplicating on a client-supplied
+      request or idempotency key makes retries safe.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Design the API for a 30-day readmission risk model that care managers will see in the
+      EHR. What does the request look like, what does the response look like, and what can go
+      wrong?"
+    model_answer: |
+      I'd expose POST /v1/predict with a typed request: an encounter identifier plus the model's
+      features, each with types and ranges drawn from the training data and clinical
+      plausibility, with unknown fields rejected and units fixed in the contract. Expected
+      missingness like no recent LDL is allowed as null; anything else missing is a 422. The
+      response returns the probability, a risk tier mapped from agreed thresholds, the model
+      version, and the request ID, and I'd consider returning the top contributing factors if
+      clinicians need to see why. The model loads once at startup; I'd have a liveness probe
+      that's trivial and a readiness probe that checks the model is loaded. Failure modes:
+      upstream unit or coding changes, which validation catches; missing data; the service
+      being down, where the EHR should show "score unavailable" rather than a stale or default
+      score; and silent drift, which needs monitoring. Every prediction is audit-logged with
+      input, output, model version and request ID in a PHI-appropriate store. I'd also ask
+      whether this needs to be real-time at all, because a nightly batch may be simpler and
+      safer.
+    key_points:
+      - Typed request with ranges, units, and rejection of unknown fields; expected nulls allowed
+      - Response includes probability, tier, model version, and request ID
+      - Model loaded once; separate liveness and readiness probes
+      - "Names failure modes: unit/coding changes, missing data, downtime handled explicitly, drift"
+      - Audit logging in a PHI-appropriate store, and questions whether online scoring is needed
+
+  - type: text
+    title: Online or batch?
+    text: |
+      Not every clinical model needs a real-time API.
+
+      **Batch scoring**: a scheduled job (say 6 a.m. daily) scores every current inpatient and
+      writes results to a table the EHR or care-management worklist reads. Simple, cheap, easy
+      to rerun, easy to monitor as a whole population, and failures are visible before anyone
+      starts work.
+
+      **Online scoring**: the EHR calls the API when a clinician opens a chart or at a trigger
+      event (admission, discharge order). Needed when inputs change within minutes and the
+      decision can't wait: sepsis alerts, deterioration scores, a risk shown at the moment of
+      ordering.
+
+      Readmission prevention is usually a **care-management** workflow: nurses plan follow-up
+      calls and appointments over days. A daily batch is often enough, and many health systems
+      run readmission models this way. The same package serves both modes: the batch job imports
+      `readmission_service` and calls the same `predict` function the API uses, so both share
+      one validated implementation.
+
+  - type: quiz
+    question: |
+      Which situation most clearly needs **online** scoring rather than a nightly batch?
+    options:
+      - Ranking discharged stroke patients for follow-up phone calls this week
+      - Monthly reporting of predicted vs observed readmissions by hospital
+      - Flagging patients at risk of in-hospital deterioration from vitals charted every hour
+      - Selecting patients for a post-discharge clinic referral during morning huddle
+    answer: 2
+    explanation: |
+      Deterioration depends on inputs that change hour to hour, and the useful window for action
+      is short, so a nightly score would be stale. The other three are decisions made on a daily
+      or slower cadence where a batch job is simpler and just as timely. Choosing batch when it
+      fits is a sign of judgment, not a lack of ambition.
+
+  - type: text
+    title: Latency, measured the right way
+    text: |
+      When online scoring is needed, set a latency budget with the integration team (for
+      example, "p95 under 300 ms end to end") and measure **percentiles**, not averages. A mean
+      of 50 ms can hide a p99 of 2 s, and clinicians feel the slow tail.
+
+      For a logistic regression or small gradient-boosted model, inference itself takes well
+      under a millisecond. Latency comes from everything else: network hops, JSON parsing,
+      fetching features from the EHR, and cold starts when a scaled-to-zero container wakes up.
+      If the API has to **fetch** the features itself (rather than receive them), feature
+      retrieval usually dominates, and it adds a new failure mode: the features at serving time
+      must be computed exactly as in training, or you get **training-serving skew**.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your model performed well offline, but predictions from the live API look different from
+      what the same patients got in the validation set. How do you investigate?"
+    model_answer: |
+      I'd suspect training-serving skew before model decay, because the gap appeared immediately.
+      First I'd take a sample of live requests from the audit log and recompute features for
+      those same encounters with the offline pipeline, then diff them feature by feature. Common
+      causes are a different code path for features online, units or coding differences at a
+      source system, default values filling in for missing data, timing differences where the
+      online system sees data as of a different moment than the training snapshot, and
+      categorical encodings that don't match. I'd also confirm the service is running the model
+      version I think it is, via the version in responses, and that library versions match the
+      lockfile. The long-term fix is one shared feature implementation used by both training
+      and serving, validation on inputs, and a golden-output test that runs the deployed
+      container against known patients.
+    key_points:
+      - Suspects training-serving skew first when the gap is immediate
+      - Diffs online features against offline recomputation for the same encounters
+      - "Lists causes: separate code paths, units/codes, defaults for missing, timing, encodings"
+      - Verifies the model version and library versions actually deployed
+      - Fix with one shared feature implementation, input validation, and golden tests on the container
+
+  - type: laptop
+    title: Build and test the prediction API
+    repo_path: 03-production-ml/src/readmission_service/app.py
+    task: |
+      Create `app.py` with the schema, lifespan, request ID middleware, `/healthz`, `/readyz`,
+      and `/v1/predict`, loading the model you trained in Lesson 1. Then write
+      `tests/test_api.py` using `fastapi.testclient.TestClient` inside a `with TestClient(app)
+      as client:` block (the `with` is what runs the lifespan). Test: a valid request returns
+      200 with `model_version`; LDL of 2.8 returns 422; an unknown field returns 422; the
+      `X-Request-ID` you send comes back. Open `http://127.0.0.1:8000/docs` after
+      `uvicorn readmission_service.app:app --reload` to see the generated OpenAPI docs.
+
+  - type: recap
+    points:
+      - The API is a **contract**; Pydantic `Field` ranges and `extra="forbid"` enforce it
+      - Pydantic v2 is **lax** by default (strings to ints); use strict mode where it matters
+      - Reject unexpected or out-of-range inputs with 422; accept only the missingness the model was trained on
+      - Load the model once in **lifespan**; use plain `def` for CPU-bound predict
+      - "`/v1/` versions the API contract; `model_version` in every response versions the model"
+      - Liveness restarts, readiness routes traffic; never check dependencies in liveness
+      - Request IDs and audit records make every prediction traceable, in a PHI-appropriate store
+      - Ask whether batch scoring is enough before building a real-time service

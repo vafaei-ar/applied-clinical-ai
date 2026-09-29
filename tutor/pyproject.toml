@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clinical-ai-tutor"
+version = "0.1.0"
+description = "A Telegram tutor that teaches the Applied Clinical AI course from your phone"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "aiogram>=3.20,<4",
+  "aiosqlite>=0.21,<1",
+  "anthropic>=1.9,<2",
+  "pydantic>=2.8,<3",
+  "pydantic-settings>=2.8,<3",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+figures = ["matplotlib>=3.9", "numpy>=2.0"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.7"]
+
+[project.scripts]
+clinical-tutor = "clinical_tutor.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clinical_tutor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # the formatter owns line length; long strings are allowed

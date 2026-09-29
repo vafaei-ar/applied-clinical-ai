@@ -1,0 +1,478 @@
+id: m06-02-privacy-governance
+title: "Privacy and governance: HIPAA, de-identification, and IRB"
+summary: PHI, the HIPAA Privacy and Security Rules, covered entities and business associates, Safe Harbor
+  vs Expert Determination, limited data sets and DUAs, minimum necessary, IRB waivers, and re-identification risk.
+minutes: 27
+status: authored
+why_it_matters: Mishandling PHI ends projects and careers, and "can I put this data in that tool?" comes
+  up weekly in clinical AI work. Interviewers check that you know the rules, and know when to ask the
+  privacy office, before you touch data.
+objectives:
+  - Identify PHI and the 18 Safe Harbor identifiers, including the rules for dates, ages, and ZIP codes
+  - Distinguish covered entities from business associates and explain when a BAA is needed
+  - Contrast Safe Harbor and Expert Determination, and explain limited data sets with DUAs
+  - Apply the minimum necessary standard and basic Security Rule safeguards to ML work
+  - Know when IRB review is needed and what a waiver of authorization requires
+  - Explain why "de-identified" and synthetic data can still carry re-identification risk
+key_points:
+  - PHI is individually identifiable health information held by a covered entity or business associate
+  - Vendors that handle PHI for a covered entity are business associates and need a BAA
+  - Safe Harbor allows the year only, "90 or older" for high ages, and ZIP3 only for areas over 20,000 people
+  - Expert Determination is the flexible, documented, context-specific alternative
+  - A limited data set keeps dates and 5-digit ZIPs, is still PHI, and requires a DUA
+  - Minimum necessary means only the data needed for the purpose
+  - The IRB, not the researcher, decides whether review or a waiver applies
+  - De-identified and synthetic data can still be re-identified, so assess the risk
+tags: [privacy, hipaa, governance, interview]
+steps:
+  - type: text
+    title: "\"It's de-identified, right?\""
+    text: |
+      A colleague hands you a CSV of stroke patients for a quick experiment: no names or MRNs, but
+      admission dates, 5-digit ZIP codes, ages (one patient is 93), and discharge notes. The plan is to
+      paste some notes into a public chatbot to test summarization.
+
+      Under HIPAA, this file is **not de-identified**. Full dates, 5-digit ZIPs, and an age over 89 are
+      all identifiers, and free-text notes are full of them. Sending it to a vendor without the right
+      agreement could be an impermissible disclosure.
+
+      This lesson gives you the working knowledge to spot that immediately.
+
+      ⚠️ **This is an educational summary of US rules, not legal advice.** Real decisions belong to
+      your institution's privacy office, compliance team, and IRB, and other laws may apply.
+
+  - type: text
+    title: What HIPAA covers, and who
+    text: |
+      HIPAA (1996) has three rules that matter here:
+
+      - The **Privacy Rule**: when protected health information may be used or disclosed.
+      - The **Security Rule**: safeguards for **electronic** PHI.
+      - The **Breach Notification Rule**: what happens when unsecured PHI is compromised.
+
+      It applies to **covered entities**: health plans, health care clearinghouses, and health care
+      providers that conduct standard electronic transactions (in practice, nearly all hospitals and
+      clinics). It also applies to their **business associates**.
+
+      It does **not** automatically cover everyone holding health data. A consumer fitness app or a
+      direct-to-consumer company may fall outside HIPAA, though other federal and state laws can still apply.
+
+  - type: text
+    title: What counts as PHI
+    text: |
+      **Protected health information** is individually identifiable health information, held or
+      transmitted by a covered entity or business associate, in any form (electronic, paper, or spoken).
+
+      "Health information" is broad: past, present, or future physical or mental health, the provision
+      of care, or **payment** for care. "Individually identifiable" means it identifies the person, or
+      there's a reasonable basis to believe it could.
+
+      So a list of MRNs of patients readmitted after stroke is PHI, even though it holds no
+      diagnosis text. The identifier plus the fact of the care is enough.
+
+      Not PHI: data properly **de-identified** under the rule, and employment records a covered entity
+      holds in its role as an employer.
+
+  - type: quiz
+    question: Which of these is PHI under HIPAA?
+    options:
+      - A hospital's published count of 312 stroke admissions in 2024
+      - A spreadsheet of MRNs and readmission dates held by the hospital's data science team
+      - Step counts stored by a consumer fitness app that has no relationship with a provider
+      - A dataset properly de-identified under Safe Harbor
+    answer: 1
+    explanation: |
+      MRNs are identifiers, readmission dates are health information, and the hospital is a covered
+      entity. That's PHI. An aggregate count doesn't identify individuals, properly de-identified data is
+      by definition not PHI, and the consumer app is generally outside HIPAA (other laws, such as FTC
+      rules or state laws, may still apply).
+
+  - type: text
+    title: Business associates and BAAs
+    text: |
+      A **business associate** is a person or company that performs a function **on behalf of** a covered
+      entity involving PHI: a cloud host, an analytics vendor, a transcription service, a consultant, or
+      an LLM API provider processing notes.
+
+      Before sharing PHI, the covered entity signs a **Business Associate Agreement (BAA)**. It requires
+      the vendor to safeguard PHI, use it only as permitted, report breaches, pass the same obligations
+      down to its subcontractors, and return or destroy data at the end. Business associates are
+      directly liable for certain HIPAA violations.
+
+      Two practical details:
+
+      - Cloud BAAs usually cover **specific eligible services**, not everything the vendor sells. Your
+        architecture has to use the covered ones, configured correctly.
+      - A vendor's promise not to train on your data is **not** a BAA.
+
+  - type: quiz
+    question: |
+      Your team wants to use a hosted LLM API to summarize discharge notes (the Module 05 assistant). From
+      a HIPAA standpoint, what must be in place before real notes are sent?
+    options:
+      - A BAA with the vendor that covers that specific service, plus your institution's approvals
+      - The vendor's public statement that API data isn't used for training
+      - Removing patient names from the notes
+      - Nothing, as long as traffic is encrypted with TLS
+    answer: 0
+    explanation: |
+      The vendor would be processing PHI on your behalf, which makes it a business associate. A training
+      opt-out is a product policy, not a contract with HIPAA obligations. Stripping names doesn't
+      de-identify notes, which still contain dates, locations, and other identifiers. Encryption in
+      transit is a Security Rule safeguard, not a permission to disclose.
+
+  - type: text
+    title: Permitted uses, and where research fits
+    text: |
+      Covered entities may use PHI for **treatment, payment, and health care operations** (TPO) without
+      patient authorization. Operations include quality improvement, so an internally deployed readmission
+      model may sit here.
+
+      **Research** is different. Under the Privacy Rule, a researcher usually needs one of:
+
+      - the patient's written **authorization**
+      - a **waiver of authorization** from an IRB or Privacy Board
+      - a **limited data set** with a data use agreement
+      - **de-identified** data
+      - narrower pathways, such as reviews preparatory to research, or research on decedents
+
+      The line between QI and research (roughly, whether the work is designed to produce **generalizable
+      knowledge**) is blurry, and the same project can move across it when you decide to publish. Ask
+      early.
+
+  - type: text
+    title: Minimum necessary
+    text: |
+      The **minimum necessary** standard: when using, disclosing, or requesting PHI, limit it to the minimum
+      needed for the purpose. (It doesn't apply to disclosures for treatment, to the patient, or under an
+      authorization, among a few other exceptions.)
+
+      For data scientists, this is concrete:
+
+      - Request the **columns** you need, not `SELECT *` from the whole chart.
+      - Drop direct identifiers as early as possible, and join on study IDs.
+      - Give access by role, so the dashboard viewer doesn't get row-level notes.
+      - Don't keep "just in case" extracts on laptops or shared drives.
+
+      It's also good engineering: data you never pulled can't leak.
+
+  - type: text
+    title: The Security Rule, applied to ML work
+    text: |
+      The Security Rule requires **administrative** safeguards (risk analysis, training, access
+      management), **physical** safeguards (facilities, devices), and **technical** safeguards (access
+      control, audit logs, integrity, authentication, transmission security) for ePHI.
+
+      Encryption is formally an "addressable" specification, but in practice it's expected. PHI encrypted
+      to HHS's standard is also not "unsecured" for breach notification purposes.
+
+      Where ML teams typically slip:
+
+      - PHI in **application logs**, error traces, and monitoring tools
+      - PHI in **notebooks committed to git**, or in sample data inside Docker images
+      - PHI in **model artifacts** (models can memorize rare records) and in LLM prompt logs
+      - Dev and test environments with production PHI but without production controls
+
+  - type: quiz
+    question: |
+      To debug the Module 03 scoring API, an engineer logs full request payloads (patient name, MRN,
+      features) to a third-party logging SaaS. What's the core problem?
+    options:
+      - Logs slow down the API
+      - None, because logs are internal technical data
+      - PHI is disclosed to a vendor that may have no BAA, and the logs exceed minimum necessary
+      - It's only a problem if the logs are kept longer than 30 days
+    answer: 2
+    explanation: |
+      Logs containing identifiers plus clinical data are PHI, wherever they live. Sending them to a
+      vendor needs a BAA, and names and MRNs aren't needed for debugging anyway. Log request IDs and
+      pseudonymous keys, redact payloads, and keep logs under the same access controls as the data.
+      Retention periods matter, but they don't make an impermissible disclosure acceptable.
+
+  - type: text
+    title: Two ways to de-identify
+    text: |
+      HIPAA recognizes exactly two methods (45 CFR 164.514(b)):
+
+      **Safe Harbor**: remove **18 types of identifiers** of the individual _and_ of their relatives,
+      employers, and household members, **and** have no actual knowledge that what remains could
+      identify someone. It's a checklist, easy to audit, but blunt.
+
+      **Expert Determination**: a person with appropriate statistical and scientific expertise analyses
+      the data and its intended release context, and concludes, with documented methods, that the risk
+      of re-identification by the anticipated recipient is **very small**. It's flexible. It can keep
+      shifted dates or finer geography, for example, if other safeguards compensate. But it applies to a
+      specific dataset and context, and it costs time and money.
+
+      Once data is de-identified, it's no longer PHI and HIPAA no longer restricts it. Ethics and other
+      laws still apply.
+
+  - type: text
+    title: The 18 Safe Harbor identifiers
+    text: |
+      1. Names
+      2. Geographic units smaller than a state (street, city, county, ZIP), except the first 3 ZIP digits under the population rule
+      3. All elements of **dates** (except year) directly related to the person, such as birth, admission, discharge, and death, and all **ages over 89** (aggregate as 90 or older)
+      4. Telephone numbers
+      5. Fax numbers
+      6. Email addresses
+      7. Social Security numbers
+      8. Medical record numbers
+      9. Health plan beneficiary numbers
+      10. Account numbers
+      11. Certificate and license numbers
+      12. Vehicle identifiers, including license plates
+      13. Device identifiers and serial numbers
+      14. URLs
+      15. IP addresses
+      16. Biometric identifiers, such as finger and voice prints
+      17. Full-face photographs and comparable images
+      18. Any other unique identifying number, characteristic, or code
+
+      On item 18, you may assign your own re-identification code, as long as it isn't derived from the
+      person's information and the key isn't disclosed.
+
+  - type: text
+    title: Dates, ages, and ZIP codes, precisely
+    text: |
+      These three trip people up most often.
+
+      - **Dates**: keep the **year** only. "2024-03-04" becomes "2024". Month and day are out, for every
+        date tied to the person.
+      - **Ages**: ages up to 89 may stay. Anyone **over 89** becomes "90 or older", and any date element
+        that reveals the age, **including birth year**, must also go.
+      - **ZIP codes**: you may keep the **first three digits** only if the area formed by all ZIP codes
+        sharing those digits has **more than 20,000 people** (per current Census data). Otherwise it must
+        be **000**. HHS guidance lists the small set of ZIP3 areas that fail.
+
+      Random per-patient **date shifting** is common in research datasets, but it isn't part of Safe
+      Harbor. It's typically justified through Expert Determination. Module 01's `zip3` column is
+      synthetic. With real data you'd still have to run the population check.
+
+  - type: quiz
+    question: Which record is consistent with Safe Harbor (assuming no other identifiers)?
+    options:
+      - Admission month and year (03/2024), age 67
+      - Age 93, birth year 1931
+      - Dates shifted by a random per-patient offset, with 5-digit ZIP removed
+      - Admission year 2024, age 67, a ZIP3 whose area has well over 20,000 residents
+    answer: 3
+    explanation: |
+      Year only, an age under 90, and a ZIP3 that passes the population rule are all allowed. The month
+      in the first option is a date element. Age 93 must be "90+", and a birth year that reveals it must go.
+      Shifted dates can be acceptable under **Expert Determination**, but they aren't a Safe Harbor method.
+
+  - type: image
+    image: m06-02-data-tiers.png
+    caption: |
+      Three tiers, simplified. Identified PHI needs authorization or an IRB/Privacy Board waiver for
+      research. A limited data set keeps dates and 5-digit ZIPs but drops direct identifiers, and needs a
+      data use agreement. De-identified data is no longer PHI, but re-identification risk doesn't vanish.
+      Not legal advice.
+
+  - type: text
+    title: Limited data sets and DUAs
+    text: |
+      A **limited data set (LDS)** is PHI with **16 direct identifiers removed**: names, street address
+      (town, city, state, and ZIP may stay), phone, fax, email, SSN, MRN, health plan numbers, account
+      numbers, certificate and license numbers, vehicle and device identifiers, URLs, IP addresses,
+      biometrics, and full-face photos.
+
+      It **may keep**: dates (birth, admission, discharge, service, death), ages, city, state, and 5-digit ZIP.
+
+      It can be used only for **research, public health, or health care operations**, and only under a
+      **Data Use Agreement (DUA)** that states the permitted uses and who may use the data, prohibits
+      re-identifying or contacting individuals, and requires safeguards and reporting of misuse.
+
+      An LDS is **still PHI**. It's the workhorse for survival and target-trial studies (Module 04),
+      because those need real dates.
+
+  - type: quiz
+    question: |
+      Your target trial emulation (m04-07) needs exact admission and statin-fill dates from two partner
+      hospitals, but no names or MRNs. Which route fits best?
+    options:
+      - A Safe Harbor de-identified extract
+      - A limited data set under a data use agreement, with IRB review per institutional policy
+      - No agreement is needed, because there are no names
+      - Ask each hospital to publish the data openly
+    answer: 1
+    explanation: |
+      Exact dates rule out Safe Harbor, which only allows the year, and that would destroy time zero and
+      follow-up. A limited data set keeps dates and is designed for research under a DUA. "No names" isn't
+      the test: dates alone keep this PHI. Your IRB may still need to review the study itself.
+
+  - type: text
+    title: The IRB and the Common Rule
+    text: |
+      The **Common Rule** (45 CFR 46, revised in 2018) governs federally funded human subjects research,
+      and many institutions apply it to all their research. FDA-regulated clinical investigations follow
+      FDA's parallel regulations (21 CFR 50 and 56).
+
+      **Human subjects research** is, roughly, research designed to produce generalizable knowledge that
+      involves living people, through interaction or intervention, or through **identifiable private
+      information**.
+
+      An **IRB** (Institutional Review Board) reviews such research: full board, expedited, or an exemption
+      determination. Retrospective EHR studies often qualify for exemption or expedited review, but the
+      **determination belongs to the IRB** (or your institution's designated office), never to the
+      researcher.
+
+      HIPAA authorization and Common Rule informed consent are separate requirements that often travel
+      together.
+
+  - type: text
+    title: Waivers of authorization
+    text: |
+      Retrospective studies of thousands of patients can't realistically collect authorization from each.
+      An **IRB or Privacy Board** can waive HIPAA authorization when it documents that:
+
+      1. The use involves **no more than minimal risk to privacy**, based on at least:
+         - an adequate plan to protect identifiers from improper use and disclosure,
+         - a plan to destroy identifiers at the earliest opportunity (unless there's a health or research
+           justification, or the law requires keeping them), and
+         - written assurance the PHI won't be reused or disclosed beyond the approved research;
+      2. the research **could not practicably** be conducted **without the waiver**; and
+      3. the research **could not practicably** be conducted **without access to the PHI**.
+
+      Minimum necessary still applies to what you request under a waiver.
+
+  - type: think
+    interview: true
+    prompt: |
+      "You want to train the stroke readmission model on five years of our hospital's EHR data and
+      publish the results. Walk me through the approvals and how you'd handle the data."
+    model_answer: |
+      Because I plan to publish, I'd treat it as research rather than internal QI and talk to the
+      IRB and privacy office early. The likely path is an IRB protocol with a HIPAA waiver of
+      authorization, since consenting thousands of past patients isn't practicable. The waiver needs a
+      plan to protect and later destroy identifiers. If I don't need identifiers at all, a limited data set
+      under a DUA is lighter. I need real dates for time zero and the 30-day window, so a Safe Harbor
+      extract wouldn't work. On data handling: minimum necessary, so only the tables and columns in the
+      feature spec. Direct identifiers replaced by study IDs at extraction, with the key held by the data
+      steward. Work only in the approved secure environment, with no PHI on laptops, in git, or in logs.
+      Any cloud service or LLM vendor must be covered by a BAA. And I'd document everything for the
+      publication. If we later deploy the model operationally, that's a separate governance review.
+    key_points:
+      - Recognizes that publishing makes it research, and engages the IRB and privacy office early
+      - Proposes a waiver of authorization or a limited data set with a DUA, and explains why Safe Harbor doesn't fit a time-to-event design
+      - Applies minimum necessary and pseudonymizes at extraction
+      - Uses an approved secure environment, keeps PHI out of logs, git, and laptops, and requires BAAs for vendors
+      - Separates research approval from operational deployment governance
+
+  - type: text
+    title: De-identified isn't anonymous
+    text: |
+      Re-identification is a linkage problem: combine quasi-identifiers in your data with outside data.
+
+      - Latanya Sweeney estimated that **5-digit ZIP, sex, and full birth date** uniquely identify most of
+        the US population, and in the 1990s she famously re-identified the Massachusetts governor's
+        hospital records by linking "anonymized" state data to voter rolls.
+      - Narayanan and Shmatikov (2008) re-identified Netflix Prize users from a few movie ratings with
+        approximate dates.
+
+      Health data adds its own risks:
+
+      - **Rare** diagnoses, procedures, or combinations
+      - **Long trajectories**: a sequence of visit years and codes can be unique
+      - **Free text**: notes contain names, dates, and places, and automated de-identification is good,
+        not perfect
+      - **Images**: faces can be reconstructed from head CT or MRI unless the images are "defaced"
+      - **Models**: large models trained on notes can memorize and regurgitate rare records
+
+  - type: text
+    title: Synthetic data needs care too
+    text: |
+      There are two very different things called "synthetic":
+
+      - **Simulated from scratch**, like Module 01's dataset. It's generated by code from assumed
+        distributions, and no real patient is behind it. Low privacy risk (and low realism).
+      - **Trained on real records**, with GANs, diffusion models, or LLMs. These can **memorize** and
+        reproduce near-copies of real patients, especially outliers. An attacker may be able to tell
+        whether a person was in the training data (**membership inference**).
+
+      For the second kind, treat generation as a use of PHI, and **measure** privacy before release:
+      distances from synthetic records to their nearest real records, membership-inference tests, and
+      formal guarantees such as differential privacy where feasible. Get privacy-office sign-off. How
+      the law treats synthetic data derived from PHI isn't fully settled, so "it's synthetic" is not a
+      compliance argument by itself.
+
+  - type: quiz
+    question: |
+      Your team trained a generative model on real stroke EHR data and wants to publicly release 10,000
+      synthetic patients. What's the most important check before release?
+    options:
+      - Row counts match the real cohort
+      - Marginal distributions of age and sex match
+      - Nearest-neighbor and membership-inference testing against the real records, plus privacy-office review
+      - None, because no real patient appears in synthetic data
+    answer: 2
+    explanation: |
+      Matching distributions is a **utility** check, and says nothing about privacy. A generator that
+      copies real rows would pass it perfectly. The real question is whether any synthetic record is
+      effectively a real patient, or reveals who was in the training set. "No real patient appears" is
+      exactly the assumption you have to test.
+
+  - type: text
+    title: Beyond HIPAA
+    text: |
+      HIPAA is a floor, and it's US-only. You'll meet others:
+
+      - **42 CFR Part 2**: stricter federal rules for substance use disorder treatment records.
+      - **State laws**, such as California's CCPA/CPRA and Washington's My Health My Data Act, which reach
+        health data outside HIPAA's scope.
+      - **GDPR** in the EU and UK GDPR: health data is "special category" data, and **pseudonymized data
+        is still personal data**.
+      - **FTC rules**, such as the Health Breach Notification Rule for some consumer health apps.
+      - **Contracts and consent**: DUAs, data-sharing agreements, and what patients were told can be
+        stricter than the law.
+
+      When in doubt, the right move in an interview and on the job is the same: name the likely rule,
+      and say you'd confirm with privacy or compliance.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A data partner says: 'Our data is de-identified, so you can do whatever you want with it.' What
+      questions do you ask?"
+    model_answer: |
+      First, de-identified how: Safe Harbor or Expert Determination? If Expert Determination, I'd ask
+      for the determination's scope, because it's usually conditional on a specific recipient,
+      environment, and set of controls, like no linkage to other data. "Whatever you want" may break
+      those conditions. I'd check what's actually in the data. Free-text notes, exact or shifted dates,
+      fine geography, rare conditions, and images all carry residual risk, and Safe Harbor only allows
+      years and qualifying ZIP3s. I'd ask what our contract says: most agreements prohibit
+      re-identification and linkage, and limit use and onward sharing. Then I'd ask what we plan to join
+      it with, since linking to our own data can re-identify people even if each dataset is safe alone.
+      I'd also ask about provenance and consent, and any non-HIPAA constraints such as state law, Part 2
+      data, or GDPR for non-US patients. Finally, even when something is legal, I'd consider whether
+      patients would find the use reasonable.
+    key_points:
+      - Asks which method (Safe Harbor or Expert Determination), and the scope and conditions of any determination
+      - Checks contents for residual risks such as free text, dates, geography, rare conditions, and images
+      - Reviews contractual limits on re-identification, linkage, and onward sharing
+      - Recognizes that linking with other data changes re-identification risk
+      - Considers other laws, consent, and ethics, not only HIPAA
+
+  - type: laptop
+    title: A Safe Harbor checker for the Module 01 patients table
+    repo_path: 06-technical-labs/privacy/
+    task: |
+      Create `06-technical-labs/privacy/safe_harbor.py` with a function that takes Module 01's
+      `patients` table and returns a Safe Harbor-style version: `birth_date` reduced to year, ages over 89
+      computed from a reference date shown as "90+" with the birth year removed, and `zip3` replaced by
+      "000" when it appears in a restricted list you pass in. Add pytest cases for a 93-year-old, an
+      89-year-old, and a restricted ZIP3. Then write a short note in the file's docstring listing which
+      Module 01 columns (such as dates in `encounters`, `labs`, and `claims`) would still block Safe
+      Harbor, and why a time-to-event study would use a limited data set instead.
+
+  - type: recap
+    points:
+      - "**PHI** is identifiable health information held by covered entities and business associates, in any form"
+      - Vendors handling PHI on your behalf, including cloud and LLM APIs, need a **BAA** covering that service
+      - "**Safe Harbor**: remove 18 identifiers; year only for dates; 90+ for high ages; ZIP3 only if the area has over 20,000 people"
+      - "**Expert Determination** is flexible but specific to a dataset and context, and documented"
+      - A **limited data set** keeps dates and 5-digit ZIPs, is still PHI, and requires a **DUA**
+      - Apply **minimum necessary**, and keep PHI out of logs, git, and model artifacts
+      - The **IRB** decides on review and waivers; research needs authorization, a waiver, an LDS, or de-identified data
+      - De-identified and synthetic data can still be re-identified. Test it, and ask privacy (not legal advice)

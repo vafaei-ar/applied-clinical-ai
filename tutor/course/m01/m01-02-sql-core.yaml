@@ -1,0 +1,515 @@
+id: m01-02-sql-core
+title: The SQL that clinical work actually needs
+summary: Grain, join fan-out, silent row loss, COUNT variants, conditional aggregation, EXISTS, and
+  anti-joins, practised on the stroke schema.
+minutes: 28
+status: authored
+why_it_matters: SQL screens are near-universal for clinical data roles. The traps they probe, and the
+  bugs that ship in real cohorts, are join fan-out and silent row loss, not syntax.
+objectives:
+  - Predict row counts for INNER and LEFT joins from each table's grain
+  - Detect and prevent join fan-out when joining several child tables
+  - Structure a query as a pipeline of CTEs, each with a known grain
+  - Put filters in ON vs WHERE correctly for LEFT JOINs
+  - Write conditional aggregation, EXISTS semi-joins, and NULL-safe anti-joins
+key_points:
+  - Joining two one-to-many children at once multiplies rows (n × m)
+  - LEFT JOIN + WHERE on the right table becomes an INNER JOIN
+  - COUNT(*) vs COUNT(col) vs COUNT(DISTINCT col) differ after a LEFT JOIN
+  - NOT IN returns nothing if the subquery contains a NULL; use NOT EXISTS
+  - MAX(CASE WHEN ...) builds per-patient flags in one pass
+tags: [sql, interview]
+steps:
+  - type: text
+    title: The claim that was paid twice
+    text: |
+      An analyst reports that paid claims for ED visits in the stroke cohort total more than
+      **double** what finance reports. The query ran without errors. It was reviewed. It joined
+      `encounters` to `diagnoses` "to keep only stroke-related visits" and to `claims` for the
+      money.
+
+      Nothing in SQL warns you when a join multiplies your rows. The number just comes out
+      bigger, and it looks plausible.
+
+      This lesson is the small set of SQL patterns that clinical work actually leans on, and the
+      traps that SQL screens test for: **fan-out**, **silent row loss**, **NULL logic**, and
+      **one-pass aggregation**. Everything runs on the repo's DuckDB schema.
+
+  - type: text
+    title: Grain in, grain out
+    text: |
+      Before any join, answer three questions:
+
+      - What is one row on the **left**? (an encounter)
+      - How many rows on the **right** match each left row? (0, 1, or many diagnoses)
+      - So what is one row of the **result**? (one encounter-diagnosis pair)
+
+      A one-to-many join returns **one row per match**. That's fine when you want the detail. It's
+      a bug when you then `SUM` a column that belonged to the left side, because that value is now
+      repeated once per match.
+
+      It gets worse when you join **two** one-to-many children to the same parent. Every
+      diagnosis pairs with every procedure, so an encounter with 3 diagnoses and 2 procedures
+      becomes **6 rows**. This is **join fan-out**, and it's the most common silent bug in
+      clinical SQL.
+
+  - type: image
+    image: m01-02-fanout.png
+    caption: |
+      One encounter, one $500 claim, three diagnoses, two procedures. Join them all at once and
+      the claim appears six times, so SUM(paid) reports $3,000.
+
+  - type: code
+    title: The analyst's query
+    code: |
+      SELECT c.place_of_service,
+             SUM(c.paid_amount) AS total_paid
+      FROM encounters e
+      JOIN diagnoses d ON d.encounter_id = e.encounter_id
+      JOIN claims c    ON c.encounter_id = e.encounter_id
+      WHERE c.claim_status = 'paid'
+      GROUP BY c.place_of_service;
+
+  - type: quiz
+    question: Compared with the true paid totals by place of service, what does this query return?
+    options:
+      - The correct totals, because claims are one-per-encounter in the repo
+      - Totals inflated only for stroke encounters
+      - Encounters with several diagnoses counted several times, and encounters with no diagnosis dropped entirely
+      - An error, because `diagnoses` isn't used in the SELECT
+    answer: 2
+    explanation: |
+      It's wrong in **both** directions. Each claim repeats once per diagnosis row, so multi-code
+      encounters inflate the sum. And because the join is INNER, encounters with no diagnoses
+      vanish. In this synthetic data that's a large share of outpatient visits. The one-claim-per-
+      encounter property doesn't help, because the fan-out comes from `diagnoses`. SQL never
+      requires a joined table to appear in SELECT.
+
+  - type: code
+    title: "Fix: collapse each child to the parent's grain first"
+    code: |
+      WITH dx_per_encounter AS (          -- grain: one row per encounter
+          SELECT encounter_id,
+                 MAX(CASE WHEN icd10_code LIKE 'I63%' THEN 1 ELSE 0 END) AS has_stroke_dx
+          FROM diagnoses
+          GROUP BY encounter_id
+      )
+      SELECT c.place_of_service,
+             COALESCE(x.has_stroke_dx, 0) AS stroke_encounter,
+             COUNT(*)                     AS n_claims,
+             SUM(c.paid_amount)           AS total_paid
+      FROM claims c                        -- grain: one row per claim
+      LEFT JOIN dx_per_encounter x USING (encounter_id)
+      WHERE c.claim_status = 'paid'
+      GROUP BY 1, 2;
+    after: |
+      Aggregate each child down to one row per encounter, then join. Now the join is one-to-one,
+      and the result keeps the grain of `claims`. The LEFT JOIN keeps claims whose encounter had
+      no diagnoses. A cheap guard after any join: `SELECT COUNT(*), COUNT(DISTINCT claim_id)`.
+      If the two differ, you fanned out.
+
+  - type: text
+    title: CTEs are a pipeline with named grains
+    text: |
+      Look at `sql/01_index_stroke_cohort.sql`. It's a chain of CTEs: `qualifying_strokes` →
+      `stroke_candidates` → `first_stroke` → `eligible`. Each one has a clear grain, and you can
+      run each on its own and check its count.
+
+      That's the real value of CTEs. Performance usually isn't the reason, since DuckDB typically
+      inlines or optimizes them either way. The value is that a reviewer can check one step at a
+      time. A good habit is a comment on each CTE stating its grain, as in the fix above.
+
+      Notice the fan-out guard hiding in the first CTE. `qualifying_strokes` joins encounters to
+      diagnoses and uses `SELECT DISTINCT`. Why? The generator injects **duplicate diagnosis
+      rows**, so an encounter with its I63.9 code duplicated would appear twice. `DISTINCT`
+      collapses those rows back to one per encounter. The alternative is a semi-join
+      (`WHERE EXISTS`), which never fans out. You'll see it shortly.
+
+  - type: quiz
+    question: |
+      Exercise task 6 asks for patients with more than one qualifying stroke **encounter**. What's
+      wrong with this attempt?
+    code: |
+      SELECT e.patient_id, COUNT(*) AS n_strokes
+      FROM encounters e
+      JOIN diagnoses d
+        ON d.encounter_id = e.encounter_id
+      WHERE d.icd10_code LIKE 'I63%'
+        AND e.encounter_type IN ('ED', 'inpatient')
+      GROUP BY e.patient_id
+      HAVING COUNT(*) > 1;
+    options:
+      - HAVING must be replaced with WHERE
+      - It counts diagnosis rows, so a single stroke encounter with a duplicated I63 row is reported as two strokes
+      - It misses patients whose stroke was coded I63.9
+      - Nothing, because the encounter filter makes it one row per encounter
+    answer: 1
+    explanation: |
+      After the join, the grain is encounter × matching diagnosis row. A duplicate I63.9 row makes
+      one encounter look like two. Use `COUNT(DISTINCT e.encounter_id)` in both SELECT and HAVING.
+      HAVING is correct here, because WHERE can't filter on an aggregate. The encounter-type filter
+      doesn't change the grain.
+
+  - type: text
+    title: Predicting row counts for INNER and LEFT joins
+    text: |
+      You should be able to predict a join's row count before running it:
+
+      - **INNER JOIN**: the sum of matches over left rows. Left rows with zero matches disappear.
+      - **LEFT JOIN**: each left row contributes **max(1, matches)**. Unmatched rows appear once,
+        with NULLs on the right side.
+
+      So a LEFT JOIN never _loses_ left rows, but it can easily _add_ them. "I used a LEFT JOIN, so
+      my cohort size is safe" is only true if the right side has at most one match per key.
+
+      The practical rule for features: when you attach patient-level features to a cohort, every
+      right-hand table should already be **one row per patient**. That's exactly what
+      `02_features.sql` does. Each feature CTE ends in `GROUP BY patient_id, index_date` before the
+      final LEFT JOINs.
+
+  - type: quiz
+    question: |
+      The cohort has 400 patients. You LEFT JOIN `labs` for LDL results in the prior year. 250
+      patients have at least one LDL, averaging 2 results each. How many rows come back?
+    options:
+      - "400"
+      - "500"
+      - "650"
+      - "250"
+    answer: 2
+    explanation: |
+      150 patients with no LDL contribute 1 row each (NULL lab), and 250 patients contribute about
+      2 each, which gives 150 + 500 = **650**. 400 is what you'd get if you assumed a LEFT JOIN
+      preserves the left row count, which is the classic mistake. 500 forgets the unmatched
+      patients, and 250 is the count after an INNER JOIN _collapsed_ to patients.
+
+  - type: text
+    title: "ON vs WHERE in a LEFT JOIN"
+    text: |
+      The two clauses run at different moments:
+
+      - **ON** decides which right rows _match_. A left row that matches nothing is still kept,
+        with NULLs.
+      - **WHERE** runs _after_ the join and filters the result rows.
+
+      Two consequences trip people up:
+
+      1. A **WHERE condition on a right-table column** (`WHERE l.test_name = 'LDL'`) is false for
+         the NULL-padded rows, so it deletes them. Your LEFT JOIN has silently become an INNER
+         JOIN.
+      2. An **ON condition on a left-table column** (`ON ... AND c.age_at_index >= 65`) does
+         _not_ remove any left rows. It just means those rows match nothing.
+
+      Rule of thumb: conditions describing _which related rows count_ (type, window, status) go in
+      **ON**. Conditions describing _who is in the population_ go in **WHERE**, on the left table.
+      m01-05 comes back to this for leakage-safe feature windows.
+
+  - type: quiz
+    question: What does this return?
+    code: |
+      SELECT c.patient_id,
+             COUNT(l.lab_id) AS n_ldl
+      FROM index_stroke_cohort c
+      LEFT JOIN labs l
+        ON l.patient_id = c.patient_id
+      WHERE l.test_name = 'LDL'
+      GROUP BY c.patient_id;
+    options:
+      - Every cohort patient, with 0 for those without an LDL
+      - Only cohort patients with at least one LDL at any time, even after the index date
+      - Only LDLs from the year before the index date
+      - An error, because COUNT can't reference the right table
+    answer: 1
+    explanation: |
+      The WHERE clause discards the NULL-padded rows, so patients without an LDL vanish instead of
+      showing 0. There's a second bug: no date window at all, so post-index LDLs are counted. Move
+      `l.test_name = 'LDL'` and the window conditions into **ON**, and every cohort patient comes
+      back with a correct count.
+
+  - type: quiz
+    question: What does this query return for a 52-year-old cohort patient?
+    code: |
+      SELECT c.patient_id,
+             c.age_at_index,
+             COUNT(e.encounter_id) AS n_encounters
+      FROM index_stroke_cohort c
+      LEFT JOIN encounters e
+        ON e.patient_id = c.patient_id
+       AND c.age_at_index >= 65
+      GROUP BY 1, 2;
+    options:
+      - The patient is excluded from the result
+      - The patient appears with their true encounter count
+      - An error, because ON may only reference the right table
+      - The patient appears with `n_encounters = 0`
+    answer: 3
+    explanation: |
+      In a LEFT JOIN, an ON condition can only stop rows from _matching_. It never removes left
+      rows. The 52-year-old matches nothing, so they get one NULL-padded row, and COUNT of a NULL
+      column gives 0. If you meant "only patients 65+", that belongs in `WHERE c.age_at_index >=
+      65`. Getting this wrong keeps under-65s in your data with fake zeros.
+
+  - type: code
+    title: Three counts, three meanings
+    text: "One cohort patient with no encounters in the window, after a LEFT JOIN:"
+    code: |
+      SELECT c.patient_id,
+             COUNT(*)                       AS n_rows,          -- 1: the NULL-padded row
+             COUNT(e.encounter_id)          AS n_encounters,    -- 0: NULLs are skipped
+             COUNT(DISTINCT e.encounter_id) AS n_unique_enc,    -- 0
+             COUNT(DISTINCT e.encounter_type) AS n_types        -- 0
+      FROM index_stroke_cohort c
+      LEFT JOIN encounters e
+        ON e.patient_id = c.patient_id
+       AND CAST(e.encounter_start AS DATE) <  c.index_date
+       AND CAST(e.encounter_start AS DATE) >= c.index_date - INTERVAL '365 days'
+      GROUP BY c.patient_id;
+    after: |
+      `COUNT(*)` counts rows, `COUNT(col)` counts non-NULL values, and `COUNT(DISTINCT col)` counts
+      distinct non-NULL values. After a LEFT JOIN, only the last two give an honest zero. Use
+      `COUNT(DISTINCT key)` whenever an earlier join might have fanned out.
+
+  - type: quiz
+    question: |
+      The repo's `readmission` CTE uses `CASE WHEN COUNT(e.encounter_id) > 0 THEN 1 ELSE 0 END`.
+      A colleague "simplifies" it to `COUNT(*) > 0`. What happens?
+    options:
+      - Nothing, because both count the matched encounters
+      - The readmission rate becomes 100%, because every cohort patient has at least one row after the LEFT JOIN
+      - Patients with two readmissions get a label of 2
+      - Patients without readmissions are dropped
+    answer: 1
+    explanation: |
+      After a LEFT JOIN, a patient with no qualifying readmission still has one NULL-padded row,
+      so `COUNT(*)` is 1 and the flag is 1 for everyone. `COUNT(e.encounter_id)` skips the NULL
+      and correctly returns 0. It's a one-token change, and a model trained on that label would
+      be meaningless.
+
+  - type: text
+    title: Conditional aggregation builds wide features in one pass
+    text: |
+      Clinical features are usually "per patient, did X happen / how many times / what share".
+      Instead of one subquery per feature, put a **condition inside the aggregate**:
+
+      - **Flag**: `MAX(CASE WHEN cond THEN 1 ELSE 0 END)`, as in `prior_af` in `02_features.sql`.
+      - **Count**: `SUM(CASE WHEN cond THEN 1 ELSE 0 END)`, or in DuckDB and Postgres
+        `COUNT(*) FILTER (WHERE cond)`.
+      - **Proportion**: `AVG(CASE WHEN cond THEN 1.0 ELSE 0.0 END)`.
+
+      This scans the child table once and pivots long data (one row per event) into wide data
+      (one row per patient). Those wide features are what Module 02's readmission model trains on.
+
+      Watch the **ELSE**. `CASE` without `ELSE` yields NULL, so `SUM(CASE WHEN cond THEN 1 END)`
+      over zero matches is NULL, not 0. `COUNT(CASE WHEN cond THEN 1 END)` is safe, because COUNT
+      ignores NULLs.
+
+  - type: code
+    title: A one-pass utilization profile
+    code: |
+      SELECT e.patient_id,
+             COUNT(*)                                          AS encounters,
+             COUNT(*) FILTER (WHERE e.encounter_type = 'ED')   AS ed_visits,
+             SUM(CASE WHEN e.encounter_type = 'inpatient'
+                      THEN 1 ELSE 0 END)                       AS inpatient_stays,
+             MAX(CASE WHEN e.facility_id LIKE 'HOSP%'
+                      THEN 1 ELSE 0 END)                       AS any_hospital_visit,
+             AVG(CASE WHEN e.encounter_end IS NULL
+                      THEN 1.0 ELSE 0.0 END)                   AS share_missing_end
+      FROM encounters e
+      GROUP BY e.patient_id;
+    after: |
+      Five features from one scan. The last one is a data-quality metric computed with the same
+      pattern, which is how m01-06 profiles missingness.
+
+  - type: quiz
+    question: |
+      For a patient with outpatient visits only, what does
+      `SUM(CASE WHEN e.encounter_type = 'ED' THEN 1 END)` return?
+    options:
+      - "0"
+      - The number of outpatient visits
+      - "NULL"
+      - An error, because CASE needs an ELSE
+    answer: 2
+    explanation: |
+      Every CASE evaluates to NULL, and SUM over only NULLs is NULL, not 0. Downstream, that NULL
+      might be imputed or dropped, which is very different from "zero ED visits". Add `ELSE 0`,
+      wrap in `COALESCE(..., 0)`, or use `COUNT(*) FILTER (WHERE ...)`, which returns 0.
+
+  - type: text
+    title: EXISTS asks "is there at least one?"
+    text: |
+      Many clinical conditions are existence questions: _does the patient have any coverage row
+      spanning the lookback?_ _Any stroke code on this encounter?_
+
+      A **semi-join** answers that without changing the grain:
+
+      `WHERE EXISTS (SELECT 1 FROM coverage c WHERE c.patient_id = s.patient_id AND ...)`
+
+      However many rows match, the outer row appears **once**. That's why the repo's `eligible`
+      CTE checks coverage with `EXISTS`. A plain join to `coverage` would duplicate any patient
+      with two qualifying coverage rows.
+
+      `IN (subquery)` is equivalent for the positive case, and DuckDB also accepts explicit
+      `SEMI JOIN` and `ANTI JOIN` syntax. EXISTS is the portable, readable default, and it carries
+      over to the negative case, where IN does not.
+
+  - type: text
+    title: "Anti-joins, and why NOT IN is dangerous"
+    text: |
+      An **anti-join** keeps rows with _no_ match: stroke patients never prescribed a statin,
+      diagnoses without a matching encounter (the stretch task), encounters with no claim.
+
+      Two safe forms:
+
+      - `WHERE NOT EXISTS (SELECT 1 FROM ... WHERE key matches AND conditions)`
+      - `LEFT JOIN ... ON key matches AND conditions`, then `WHERE right.key IS NULL`
+
+      The unsafe one is `WHERE x NOT IN (SELECT y FROM ...)`. SQL uses three-valued logic.
+      `x NOT IN (a, b, NULL)` means `x <> a AND x <> b AND x <> NULL`, and `x <> NULL` is
+      **UNKNOWN**, never TRUE. So if the subquery returns even one NULL, the whole predicate can
+      never be TRUE and the query returns **zero rows**, with no error.
+
+      Real extracts are full of nullable foreign keys: claims with no linked encounter,
+      diagnoses with no encounter. Default to NOT EXISTS.
+
+  - type: quiz
+    question: |
+      In a real claims extract, a few claims have `encounter_id = NULL` (they couldn't be linked).
+      What does this return?
+    code: |
+      SELECT COUNT(*) AS encounters_without_claim
+      FROM encounters
+      WHERE encounter_id NOT IN (
+          SELECT encounter_id FROM claims
+      );
+    options:
+      - The number of encounters with no claim
+      - The number of claims with a NULL encounter_id
+      - 0, whatever the data
+      - An error, because of the NULL comparison
+    answer: 2
+    explanation: |
+      Once the subquery contains a NULL, `encounter_id NOT IN (...)` is either FALSE (a match
+      exists) or UNKNOWN (no match, but it can't rule out the NULL). It's never TRUE, so the count
+      is 0. That looks like "perfect linkage" when it's really a NULL artifact. Rewrite it as
+      `NOT EXISTS (SELECT 1 FROM claims c WHERE c.encounter_id = e.encounter_id)`.
+
+  - type: code
+    title: A clinical anti-join
+    text: "Cohort patients with **no usable LDL** in the year before the stroke:"
+    code: |
+      SELECT c.patient_id, c.index_date
+      FROM index_stroke_cohort c
+      WHERE NOT EXISTS (
+          SELECT 1
+          FROM labs l
+          WHERE l.patient_id = c.patient_id
+            AND l.test_name = 'LDL'
+            AND l.result_value IS NOT NULL
+            AND CAST(l.lab_date AS DATE) <  c.index_date
+            AND CAST(l.lab_date AS DATE) >= c.index_date - INTERVAL '365 days'
+      );
+    after: |
+      Every condition defining "a usable LDL" lives **inside** the subquery. This is the
+      population whose `latest_ldl_prior_365d` will be NULL in `stroke_features`. That's worth
+      counting, because the missingness might carry information (sicker or less-engaged patients).
+
+  - type: quiz
+    question: |
+      A colleague writes a similar anti-join ("no LDL row in the prior year") as a LEFT JOIN.
+      Which WHERE clause is the bug?
+    code: |
+      FROM index_stroke_cohort c
+      LEFT JOIN labs l
+        ON l.patient_id = c.patient_id
+       AND l.test_name = 'LDL'
+       AND CAST(l.lab_date AS DATE) <  c.index_date
+       AND CAST(l.lab_date AS DATE) >= c.index_date - INTERVAL '365 days'
+      -- option A: WHERE l.lab_id IS NULL
+      -- option B: WHERE l.result_value IS NULL
+    options:
+      - A, because lab_id can be NULL in a real lab
+      - Both are equivalent
+      - B, because it also keeps patients who have an LDL row with a missing value
+      - Neither works, because anti-joins need NOT EXISTS
+    answer: 2
+    explanation: |
+      In the LEFT JOIN anti-join pattern, test a column that is NULL **only** when there's no
+      match, meaning the right table's key. `result_value` is itself sometimes missing (about 3%
+      in the repo), so B mixes "no LDL" with "LDL with a missing value", and it can return one
+      patient several times. Whether missing-value LDLs should count is a separate decision, and
+      it belongs in ON.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your cohort query returns more rows than there are patients, and you expected one row per
+      patient. Walk me through how you'd debug it."
+    model_answer: |
+      First I'd confirm it's duplication and not a wrong population:
+      `COUNT(*)` vs `COUNT(DISTINCT patient_id)`, then pull a few patients with more than one row
+      and look at which columns differ between their rows. The differing columns point to the
+      join that fanned out. Then I'd walk the CTE chain step by step, checking row count and
+      distinct keys at each stage, and find the first step where grain breaks. The usual causes
+      are joining a one-to-many table without aggregating first, or joining two child tables at
+      once, which multiplies them. Others are duplicate source rows, like the injected duplicate
+      diagnoses, a ranking with ties (RANK instead of ROW_NUMBER), or a join key that isn't
+      unique on the side I assumed. The fix is to restore the grain deliberately: aggregate
+      children to one row per key before joining, use EXISTS for existence checks, and add a
+      deterministic tie-breaker. I would not slap DISTINCT on the final SELECT, because that hides
+      the bug and still leaves any SUMs wrong. Finally I'd add a test asserting uniqueness of the
+      key, so it can't regress.
+    key_points:
+      - Compare COUNT(*) with COUNT(DISTINCT key) and inspect which columns differ in duplicated rows
+      - Check row counts and key uniqueness CTE by CTE to find where the grain breaks
+      - "Name the usual causes: unaggregated one-to-many joins, multiple child joins, duplicate source rows, ranking ties"
+      - Fix the grain (pre-aggregate, EXISTS, tie-breakers) rather than masking with a final DISTINCT
+      - Add a uniqueness test so it cannot regress
+
+  - type: think
+    interview: true
+    prompt: |
+      "Using this schema, find stroke patients who had never been on a statin before their
+      stroke. How would you write it, and what could go wrong?"
+    model_answer: |
+      I'd start from the index stroke cohort and use an anti-join: `NOT EXISTS` a row in
+      `medications` for the same patient with `drug_class = 'statin'` and `start_date` before the
+      index date. I'd avoid `NOT IN`, because a NULL in the subquery would silently return nothing.
+      The harder issues are about meaning, not syntax. "Never" can only mean "never observed", so
+      I'd restrict to patients with continuous coverage over a defined lookback, say 365 days, and
+      call it "no statin in the prior year". I'd decide whether a statin started before the window
+      but still active inside it counts. I'd usually say yes, via an overlap condition
+      `end_date >= index_date - 365 days`. I'd use drug class rather than one drug name, since
+      atorvastatin isn't the only statin. In real data that means an RxNorm-based value set. And
+      I'd use strict `< index_date`, so a statin started at the stroke admission doesn't make a
+      patient look pre-treated. Finally I'd check the count against a LEFT JOIN IS NULL version.
+    key_points:
+      - Use NOT EXISTS (or LEFT JOIN … IS NULL on the key), not NOT IN
+      - "\"Never\" means never observed, so require coverage over a defined lookback"
+      - Handle exposure periods by overlap, not just start date
+      - Define the drug by class or value set, not a single name
+      - Use a strict pre-index boundary to avoid counting treatment started at the stroke
+
+  - type: laptop
+    title: Exercise tasks 3–9 with fan-out checks
+    repo_path: 01-clinical-data-engineering/exercises/01_getting_started.md
+    task: |
+      Write your own SQL for tasks 3, 6, 7, and 8 in the exercise file. For each, write down the
+      grain of every intermediate result before you run it.
+
+      Then reproduce the fan-out yourself. Compute total paid by `place_of_service` from `claims`
+      alone, then again after joining `diagnoses`. Report the ratio. It may be _below_ 1: which of
+      the two errors (repetition vs dropped encounters) wins in this data, and why? Finally, write the stretch
+      anti-join (diagnoses with no matching encounter) with `NOT EXISTS`, and compare it with check
+      5 in `sql/00_quality_checks.sql`.
+
+  - type: recap
+    points:
+      - State the **grain** of every input and every result; one-to-many joins repeat parent values
+      - Two child tables joined at once multiply rows, so **aggregate first, then join**
+      - A LEFT JOIN keeps every left row but can still add rows
+      - "Right-table filters go in **ON**; a WHERE on them turns a LEFT JOIN into an INNER JOIN"
+      - "`COUNT(*)` counts rows; `COUNT(col)` and `COUNT(DISTINCT col)` give honest zeros"
+      - "`MAX/SUM(CASE WHEN ...)` and `FILTER` build per-patient features in one pass, so mind the ELSE"
+      - Use **EXISTS / NOT EXISTS** for existence checks; `NOT IN` breaks on a single NULL
