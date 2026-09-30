@@ -142,10 +142,10 @@ steps:
       Missingness is the cheapest and often the **earliest** drift signal. When an interface
       breaks, values don't turn strange, they disappear.
 
-      Suppose `latest_ldl_prior_365d` is missing for 20% of patients in training (the Module
-      01 generator injects missing lab values on purpose, and many patients simply had no
-      LDL test). If a site's missing rate jumps to 70%, the model silently falls back on its
-      imputation for most patients. Scores shift, and no validation rule fires, because
+      Suppose a routinely measured feature is missing for 20% of patients in training. (The
+      Module 01 LDL feature is a different story: about 83% of the cohort has no usable LDL in
+      the prior year, which the missing-data module examines.) If a site's missing rate jumps
+      to 70%, the model silently falls back on its imputation for most patients. Scores shift, and no validation rule fires, because
       `null` is an allowed value (Lesson 2).
 
       Track per feature, per site, per day:

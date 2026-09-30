@@ -1,23 +1,485 @@
 id: m09-03-deployment-sensitivity
 title: Missing data at prediction time, sensitivity analysis, and reporting
-summary: What to do when inputs are missing in production, models that handle missingness natively, tipping-point
-  sensitivity analyses, and how to report it.
-minutes: 25
-status: seed
-why_it_matters: A model trained on imputed data can fail when production missingness looks different.
-  Regulators and reviewers expect a sensitivity analysis and clear reporting.
+summary: What to do when inputs are missing in production, how tree models handle missingness natively,
+  tipping-point sensitivity analyses for MNAR, and how to report all of it.
+minutes: 28
+status: authored
+why_it_matters: A model trained on imputed data can fail when production missingness looks different,
+  and the failure is silent because NULL is an allowed input. Regulators and reviewers also expect a
+  sensitivity analysis and clear reporting of what was missing and how it was handled.
 objectives:
-- Decide how a deployed model treats missing inputs and document it
-- Explain native handling of missing values in gradient-boosted trees
-- Design a tipping-point or delta-adjustment sensitivity analysis for MNAR
-- Monitor missingness rates as a drift signal
-- Report missing data handling per TRIPOD+AI
+  - Decide how a deployed model treats missing inputs and document it
+  - Explain native handling of missing values in gradient-boosted trees, and its traps
+  - Design a tipping-point or delta-adjustment sensitivity analysis for MNAR
+  - Monitor missingness rates and patterns as a drift signal
+  - Report missing data handling per TRIPOD+AI
 key_points:
-- Training-time and deployment-time missingness patterns must match or be handled explicitly
-- A sudden change in a feature's missingness is often an upstream data problem
-- Sensitivity analyses show how strong MNAR must be to change the conclusion
-- Report amount, pattern, and handling of missing data
-tags:
-- missing-data
-- deployment
-- interview
+  - Training-time and deployment-time missingness patterns must match or be handled explicitly
+  - A missing indicator is a bet that the process behind the missingness is stable
+  - A sudden change in a feature's missingness is often an upstream data problem, and it shows up before any label does
+  - Sensitivity analyses show how strong MNAR must be to change the conclusion
+  - Report amount, pattern, and handling of missing data, including at deployment
+tags: [missing-data, deployment, interview]
+steps:
+  - type: text
+    title: The same model, a different reason for NULL
+    text: |
+      The readmission model from Module 02 goes live at a second hospital.
+
+      In the training cohort, `latest_ldl_prior_365d` was missing for **83%** of patients. In the
+      synthetic data that is pure chance (lesson 1), but picture the real version: nobody ordered
+      an LDL, so probably a lower-risk patient, and the model learns exactly that. At the new site
+      an order set draws a lipid panel on every stroke admission, so it is missing for 5%. Or the
+      LDL feed breaks and it is missing for nearly everyone.
+
+      The service does not error. NULL is an allowed input (m03-02), so every patient gets a
+      score. Whether the scores are right depends on something that is not in the code:
+      **the process that made values missing in training**.
+
+      This lesson has two halves. First, making a model behave sensibly on missing inputs. Then,
+      showing that your conclusions do not hinge on the assumption that the missing data are MAR.
+
+  - type: text
+    title: A missing-data contract
+    text: |
+      Before deployment, write down four things. They belong in the model card and the schema
+      tests (m03-01, m03-06).
+
+      - **Which inputs may be missing** and which must be present. Inputs the model has never
+        seen absent should be rejected.
+      - **What the model does** for each allowed-missing input: a stored imputed value, an
+        indicator, a native tree split. And who owns that code.
+      - **What missingness the model was trained and validated under**, per site: rate and
+        pattern, and why values were missing.
+      - **What triggers an alert**, and what happens then: a fallback model, a hold, or human
+        review.
+
+      Most production failures with missing data are not exotic. They come from nobody writing
+      these four lines.
+
+  - type: text
+    title: Options at prediction time
+    text: |
+      - **Reject**: for inputs the model has never seen missing.
+      - **Stored fixed imputation**: training medians or a regression per feature, frozen and
+        versioned with the model. Simple and auditable.
+      - **Imputation plus indicator**: as in m02-01. It uses informative missingness, and it is
+        a bet that the process is stable.
+      - **Native handling**: gradient-boosted trees learn a default direction at each split. No
+        imputer to ship.
+      - **Pattern submodels**: one model per observed-data pattern, fitted on patients with that
+        pattern (Mercaldo and Blume, Biostatistics 2018). They are reported to hold up even
+        when missingness is not at random, but they need enough data per pattern.
+      - **Per-patient multiple imputation**: possible, but the method has to work for a **single
+        new individual** (Hoogland et al., Stat Med 2020), so it needs a stored imputation
+        model, and it cannot use the outcome.
+
+      No method wins everywhere. The choice depends on how stable the process is, how much you
+      need to audit, and how much data each pattern has.
+
+  - type: text
+    title: How trees handle NaN, and three traps
+    text: |
+      At each split a tree learns which child samples with a missing value should follow,
+      picking the direction with the higher gain. The XGBoost FAQ puts it as "branch directions
+      for missing values are learned during training", and scikit-learn's histogram gradient
+      boosting does the same. When missingness is predictive, splits can effectively be on
+      "missing or not".
+
+      Three traps:
+
+      - **Only NaN is missing.** XGBoost's `missing` parameter defaults to NaN. A sentinel such
+        as -1 is a real number to the trees.
+      - **Linear boosters differ.** XGBoost's `gblinear` treats missing values as zeros.
+      - **No NaN in training, silent rule in production.** scikit-learn: "If no missing values
+        were encountered for a given feature during training, then samples with missing values
+        are mapped to whichever child has the most samples."
+
+      Native handling also encodes the training missingness pattern. It is the same bet as an
+      indicator, hidden inside the splits.
+
+  - type: quiz
+    question: |
+      A `HistGradientBoostingClassifier` was trained on data where `latest_hba1c` never had a
+      NaN. In production `latest_hba1c` is NaN for 30% of patients. What does scikit-learn do
+      with them?
+    options:
+      - It raises an error at predict time
+      - It sends them to the child with the most training samples at every split on that feature
+      - It treats NaN as zero before splitting
+      - It fills in the feature's training mean
+    answer: 1
+    explanation: |
+      When a feature had no missing values at training time, the tree has no learned direction
+      for them, so scikit-learn maps missing values to the child that had the most samples. There
+      is no error and no warning, and the scores look plausible, which is exactly why you need a
+      missing-rate monitor. It does not impute a mean, and it does not use zero.
+
+  - type: code
+    title: Native handling, and the sentinel trap
+    language: python
+    text: "scikit-learn and XGBoost accept NaN directly. The danger is what arrives instead of NaN:"
+    code: |
+      from sklearn.ensemble import HistGradientBoostingClassifier
+      import xgboost as xgb
+
+      gbm = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=200)
+      gbm.fit(X_train, y_train)                 # NaN is allowed in X_train
+      p = gbm.predict_proba(X_new)[:, 1]        # and in X_new
+
+      clf = xgb.XGBClassifier(max_depth=3, learning_rate=0.05, n_estimators=200)
+      clf.fit(X_train, y_train)                 # `missing` defaults to NaN
+
+      # An upstream change starts writing -1 for "no result"
+      X_new["latest_ldl_prior_365d"] = X_new["latest_ldl_prior_365d"].fillna(-1)
+      p_bad = clf.predict_proba(X_new)[:, 1]    # -1 is now a real, impossible LDL
+    after: |
+      The trees route -1 by their learned thresholds, for example "LDL below 70" goes left, so
+      these patients are scored as if they had a very low LDL. A range check at the API (10 to 400
+      mg/dL in m03-02) would catch -1, but it would not catch a sentinel of 0 or 999 that sits
+      inside the allowed range. Monitor the share of values at common sentinels, as in m03-05.
+
+  - type: quiz
+    question: |
+      The feed starts sending -1 instead of NULL when there is no LDL. The XGBoost model was
+      trained with NaN for missing values. What happens to those patients?
+    options:
+      - They are still treated as missing, because XGBoost recognises placeholder values
+      - The call raises an error, because -1 is outside the training range
+      - They are treated as having a real, impossibly low LDL and are routed by the learned thresholds
+      - Predictions are unchanged, because trees treat -1 and NaN alike
+    answer: 2
+    explanation: |
+      XGBoost treats only the value given by `missing` (NaN by default) as missing. A -1 is an
+      ordinary number below every real LDL, so the splits send it down the "low LDL" branches.
+      The tempting answer is that trees treat it the same, but the learned default direction for
+      NaN was chosen on training data and need not match the direction for low values.
+
+  - type: text
+    title: The indicator is a bet, predict before you look
+    text: |
+      A simulation, not repo data. Z is an observed covariate, U an unmeasured severity, X an
+      LDL-like lab, and Y a binary outcome with about 25% prevalence.
+
+      In **training**, the lab is recorded when the clinician is worried, so the chance it is
+      recorded rises with U. A missing lab therefore means a healthier patient.
+
+      We fit two logistic models, both with mean imputation: one **with a missing indicator**
+      and one **without**. Then we score new patients under three processes:
+
+      - **Same process** as training.
+      - **Routine ordering**: a new order set records the lab for 90% of patients, regardless of
+        severity.
+      - **Feed outage**: only 20% of patients arrive with the lab, unrelated to severity.
+
+      In the training-like process, the indicator model is better by 0.026 AUROC.
+
+  - type: quiz
+    question: |
+      What happens to the indicator model when ordering becomes routine (labs for 90% of
+      patients regardless of severity)?
+    options:
+      - Its advantage grows, because more labs are observed
+      - It stays ahead on AUROC and stays calibrated
+      - It collapses to an AUROC below 0.6
+      - It falls slightly behind the no-indicator model on AUROC, and its predictions run about 4 points too high
+    answer: 3
+    explanation: |
+      In training, having a lab meant the clinician was worried, so the indicator model assigns a
+      high baseline risk to patients with a lab. When everyone gets one, that baseline is wrong
+      and it over-predicts. The AUROC loss is modest (0.740 against 0.750), and the model does not
+      collapse. The calibration error is the bigger problem, and it is invisible to a ranking
+      metric.
+
+  - type: image
+    image: m09-03-process-shift.png
+    caption: |
+      Indicator versus no-indicator models trained under "lab recorded when worried" and scored
+      under three processes. The indicator wins only while the process is unchanged.
+
+  - type: text
+    title: What the figure says, and what to do
+    text: |
+      - **Same process**: the indicator gains +0.026 AUROC.
+      - **Routine ordering**: it loses 0.010 AUROC and over-predicts by 4.1 points (the
+        no-indicator model is off by -1.9).
+      - **Feed outage**: it loses 0.013 AUROC and under-predicts by 4.8 points (-1.9 without).
+
+      Prevalence is 25%, so a 4 to 5 point error is large. The sizes depend on how informative
+      missingness is in this simulation, so read the pattern and not the constants. It matches
+      the literature's mixed message: indicators help in many settings (Perez-Lebel et al., 2022
+      recommend them when imputing), and a simulation study (Sisk et al., arXiv 2022) found them
+      harmful when missingness depends on the outcome.
+
+      What to do with this:
+
+      - Measure how informative the missingness is before relying on it.
+      - Validate per site and per period, including simulated process shifts.
+      - Monitor missing rates and pattern mix, and recalibrate per site.
+      - Keep a no-indicator variant as a fallback.
+
+  - type: quiz
+    question: |
+      Outcome labels arrive 30 days after scoring. Which signal will show a change in the
+      lab-ordering process soonest?
+    options:
+      - Per-site missing rate and pattern mix of each input
+      - AUROC on the live cohort
+      - The calibration plot on the live cohort
+      - Readmission prevalence in the live cohort
+    answer: 0
+    explanation: |
+      Missing rates and patterns are computed from the inputs alone, at scoring time, so they
+      move the day the process changes. AUROC, calibration, and prevalence all need outcomes,
+      which lag by a month. This is why m03-05 says missingness often moves first. Track the
+      share of patients in each missingness pattern and the score distribution within each.
+
+  - type: text
+    title: Why a sensitivity analysis
+    text: |
+      Lesson 1 showed that MAR cannot be tested from the data. So the main analysis rests on an
+      assumption, and reviewers will ask how much the conclusion depends on it.
+
+      ICH E9(R1) (the addendum on estimands and sensitivity analysis for clinical trials) says
+      that "the main estimator will be underpinned by certain assumptions", and that "to explore
+      the robustness of inferences from the main estimator to deviations from its underlying
+      assumptions, a sensitivity analysis should be conducted ... targeting the same estimand".
+      It notes that validity "may rest upon untestable assumptions". It is written for trials,
+      but the logic applies to observational and ML work. Check the current version.
+
+      One common tool is **delta adjustment**: impute under MAR, then shift the imputed values by
+      delta in the group or scenario you worry about, repeat over a range of deltas, pool with
+      Rubin's rules, and find the **tipping point** where the conclusion changes. (Delta here has
+      nothing to do with the delta method.) Cro et al. (Stat Med 2020) give a practical guide to
+      this and to reference-based variants.
+
+  - type: text
+    title: An invented trial
+    text: |
+      Borrow the Module 04 secondary-prevention idea and make the outcome continuous. This trial
+      is **invented and synthetic**.
+
+      - 300 patients per arm: intensive lipid lowering versus usual care.
+      - Outcome: LDL at month 12, in mg/dL. About 30% (29.8%) have no month-12 LDL.
+      - Main analysis under MAR: impute within arm given baseline LDL, 100 imputations, Rubin's
+        rules. Effect: **-24.8 mg/dL** (95% CI -30.5 to -19.0).
+
+      The worry: patients who vanished from the intensive arm may have stopped the drug, so their
+      LDL is higher than MAR predicts. So we add delta to the imputed values in the **intensive
+      arm only**, and watch what happens to the effect.
+
+  - type: image
+    image: m09-03-tipping-point.png
+    caption: |
+      The treatment effect and its 95% interval as delta grows. The conclusion flips where the
+      upper limit crosses zero, the tipping point.
+
+  - type: text
+    title: Reading a tipping-point plot
+    text: |
+      Each extra mg/dL of delta erodes the effect by about 0.27, roughly the share of the
+      intensive arm that is imputed.
+
+      - At **delta = 25**, the dropouts lose the whole benefit: effect **-18.2** (95% CI -24.1 to
+        -12.4). Still clearly beneficial.
+      - The interval's upper limit crosses zero at **delta of about 67 mg/dL**, roughly 2.7 times
+        the treatment effect itself.
+
+      A tipping point only means something next to a **plausibility judgement made before you
+      see the curve**: is it credible that dropouts' LDL is 67 mg/dL above what similar
+      completers had? Clinicians set that range. Report the whole curve, not one number.
+
+      Two caveats. If dropouts stopped treatment, that is an **intercurrent event** to be handled
+      by the estimand strategy (m04-02), and delta adjustment is for outcomes that are truly
+      unobserved. And the same move works in EHR work: shift the imputed LDL for never-tested
+      patients by delta and see when a cohort estimate or a model's calibration changes.
+
+  - type: code
+    title: The tipping-point loop
+    language: python
+    text: "Pure numpy. `rubin` is the function from lesson 2."
+    code: |
+      import numpy as np
+
+      def tipping_curve(imputations, arm, miss, design, deltas):
+          """Pooled effect and 95% CI as active-arm dropouts drift by delta."""
+          rows = []
+          for delta in deltas:
+              est, var = [], []
+              for y in imputations:                  # m outcome vectors imputed under MAR
+                  y = y.copy()
+                  y[(arm == 1) & miss] += delta      # MNAR shift, active-arm dropouts only
+                  beta = np.linalg.lstsq(design, y, rcond=None)[0]
+                  resid = y - design @ beta
+                  cov = resid @ resid / (len(y) - design.shape[1]) * np.linalg.inv(design.T @ design)
+                  est.append(beta[1])                # coefficient on `arm`
+                  var.append(cov[1, 1])
+              q, se, _ = rubin(est, var)
+              rows.append((delta, q, q - 1.96 * se, q + 1.96 * se))
+          return rows
+    after: |
+      Impute **once** under MAR and reuse the same imputations across deltas, so the curve is
+      smooth and the only thing that changes is delta. The design matrix is an intercept, the arm,
+      and baseline LDL. With m = 100 imputations the normal quantile 1.96 is a fine approximation.
+      With fewer, use the t quantile with Rubin's degrees of freedom.
+
+  - type: quiz
+    question: |
+      You add the **same** delta to the imputed values in **both** arms instead of only the
+      intensive arm. What happens to the estimated treatment effect?
+    options:
+      - It erodes just as much as with an active-arm shift
+      - It barely changes, because a shift shared by both arms cancels in the between-arm difference
+      - It reverses sign
+      - Only the width of the interval changes
+    answer: 1
+    explanation: |
+      The effect is a difference between arms. A common shift moves both arm means by nearly the
+      same amount, so the difference changes only by delta times the difference in dropout
+      fractions, which is small. A sensitivity analysis for a between-arm contrast has to be
+      **differential** to matter. That is why the choice of which group gets the shift is part
+      of the assumption.
+
+  - type: quiz
+    question: |
+      Clinicians agree that no plausible dropout shift exceeds 25 mg/dL. Your tipping point is
+      67 mg/dL. What do you report?
+    options:
+      - The sensitivity analysis proved the data are MAR
+      - Drop the sensitivity analysis, since the main result is already significant
+      - The conclusion is robust to this kind of departure from MAR, and other departures still deserve thought
+      - Re-run the primary analysis with delta = 67 as the main result
+    answer: 2
+    explanation: |
+      A sensitivity analysis never proves MAR. It shows how strong a departure would have to be
+      to change the conclusion, and here the required departure is well outside what clinicians
+      consider plausible. That supports robustness to this specific kind of MNAR. You would
+      still consider others (a shift in the usual-care arm, or different shifts by reason for
+      dropout). Delta = 67 is a stress test, not a new primary analysis.
+
+  - type: text
+    title: Reporting, TRIPOD+AI
+    text: |
+      TRIPOD+AI (BMJ, 2024) is the reporting guideline for prediction-model studies using
+      regression or machine learning. The relevant items in the published checklist are:
+
+      - **Item 11, missing data**: "Describe how missing data were handled. Provide reasons for
+        omitting any data." It applies to both development and evaluation.
+      - **Item 7, data preparation**: pre-processing and quality checking, including whether it
+        was similar across relevant sociodemographic groups.
+      - **Item 10, sample size**.
+
+      In practice, a good missing-data paragraph gives: the **amount** per variable and overall,
+      and by site and subgroup; the **pattern** and its relation to the outcome; the **assumed
+      mechanism** and why; the **method** with settings (variables in the imputation model,
+      whether the outcome was included, m, software, fitted on training data only); the
+      **handling at deployment** if it differs; the **sensitivity analyses**; and **exclusions**
+      with attrition (m01-04). Numbering can change between versions, so check the current one.
+
+  - type: quiz
+    question: |
+      A methods section says only: "Missing values were imputed using multiple imputation." What
+      would a reviewer following TRIPOD+AI item 11 most want added?
+    options:
+      - The amount and pattern of missingness, the imputation model (variables, outcome included or not, number of imputations, software), and how it was applied in validation and deployment
+      - Only the number of imputations
+      - Nothing, multiple imputation is self-explanatory
+      - A statement that the data are MAR, without justification
+    answer: 0
+    explanation: |
+      "Describe how missing data were handled" means enough detail to reproduce and to judge the
+      assumptions. The same phrase can describe a sound analysis or a leaky one (outcome in the
+      imputation model of a prediction study, or imputation fitted before the split). Asserting
+      MAR without justification is what reviewers push back on.
+
+  - type: text
+    title: Where people go wrong, a go-live
+    text: |
+      A constructed example that mirrors the simulation. Retrospective validation at a second
+      site looked fine (AUROC 0.73). Live, average predicted risk ran four points above the
+      observed rate within two months.
+
+      - The second site's order set draws LDL on every stroke admission, so "LDL present" no
+        longer meant "a clinician was worried".
+      - The model used a missing indicator, and nobody had written down what missing meant at
+        training time.
+      - Monitoring tracked AUROC (30-day label delay) and PSI of the **non-missing** LDL values.
+        Nobody tracked the missing rate or the pattern mix.
+
+      The fixes were not exotic: per-site missing-rate and pattern monitors, a site-level
+      recalibration, and a no-indicator variant as a fallback. All of them start from the
+      contract in the second step.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your readmission model was trained with imputed labs. At a new hospital, a key lab is
+      missing for 60% of patients, against 20% in training. What do you do?"
+    model_answer: |
+      Short version: I'd treat it as a data-process change before a modelling problem. First find
+      out why, a broken feed, a different ordering practice, or a real difference in care,
+      because the answer decides the fix.
+
+      Then I'd check what the model does with those patients. Is it a stored imputer, an
+      indicator, or native tree handling, and what did missing mean in training? I'd replay the
+      new site's retrospective data, or simulate the new pattern on old data, and look at
+      calibration and discrimination separately for each missingness pattern, since an indicator
+      model can keep a reasonable AUROC while being four or five points off in risk. If it's an
+      interface bug, fix it upstream and hold the model until rates return to normal. If it's
+      real practice, I'd recalibrate per site or use a variant without the indicator, and set up
+      per-site missing-rate and pattern monitors with thresholds. And I'd document it and plan a
+      retrain with the new site's data.
+    key_points:
+      - Treat it as a data-process change and find the cause first, upstream bug versus real practice
+      - Identify how the model handles missing inputs and what missing meant in training
+      - Evaluate calibration and discrimination by missingness pattern, not only overall AUROC
+      - Fix upstream, hold, recalibrate per site, or use a variant without the indicator
+      - Set per-site missing-rate and pattern monitors and document the decision
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you show reviewers that your conclusions do not depend on assuming the missing
+      data are missing at random?"
+    model_answer: |
+      Short version: I can't prove MAR, so I'd run a sensitivity analysis that asks how wrong
+      MAR would have to be to change the conclusion.
+
+      Concretely, the main analysis imputes under MAR with the outcome and plausible predictors in
+      the imputation model. Then I'd do a delta-adjusted or tipping-point analysis: shift the
+      imputed values by delta in the group I worry about, say dropouts in the active arm, repeat
+      over a range of deltas, pool with Rubin's rules, and plot the estimate with its interval
+      against delta. The tipping point is the delta where the conclusion flips. I'd agree a
+      plausible range with clinicians before looking at the curve, and report the full curve. I'd
+      also vary which group gets the shift, because a shared shift cancels in a between-arm
+      comparison, and I'd keep the imputation inside the estimand's strategy, since treatment
+      discontinuation is an intercurrent event, not just missing data. This follows ICH E9(R1)'s
+      expectation of sensitivity analyses targeting the same estimand.
+    key_points:
+      - MAR cannot be proved, so quantify how strong a departure would change the conclusion
+      - Delta-adjusted or tipping-point analysis pooled with Rubin's rules, plotted against delta
+      - Plausible range set with clinicians before seeing the curve, and the full curve reported
+      - The shift must be differential to matter, and vary the groups that get it
+      - Align with the estimand, treating intercurrent events separately (ICH E9(R1))
+
+  - type: laptop
+    title: Monitor patterns, and catch a sentinel
+    repo_path: 03-production-ml/src/readmission_service/monitoring.py
+    task: |
+      Extend the Module 03 monitor with `missing_pattern_shares(df, cols)`, the share of patients
+      in each missingness pattern (a tuple of booleans per row), and
+      `sentinel_share(series, sentinels=(-1, 0, 999))`. Use `stroke_features.csv` as the reference.
+      Blank LDL for another 10% of rows and show the pattern shares move. Then make a second
+      "current" copy where missing LDL is written as -1, and show that the missing rate falls to
+      zero while `sentinel_share` catches it. Add a test with a tiny frame where you know the
+      answer.
+
+  - type: recap
+    points:
+      - "**Write a missing-data contract**: which inputs may be missing, what the model does, what it was trained under, and what triggers an alert"
+      - Options at prediction time are reject, stored imputation, imputation plus indicator, native tree handling, pattern submodels, and per-patient MI without the outcome
+      - Trees learn a default direction for NaN. Only NaN counts as missing, and a feature with no NaN in training gets a silent majority-child rule
+      - "A **missing indicator is a bet** that the process is stable. In the simulation it gained 0.026 AUROC, then lost 0.010 to 0.013 and miscalibrated by 4 to 5 points when the process shifted"
+      - Missing rates and pattern mix move before any label does, so monitor them per site
+      - A tipping-point analysis shows how strong an MNAR departure must be to change the conclusion, and the plausible range comes from clinicians
+      - Report amount, pattern, mechanism, method with settings, deployment handling, and sensitivity analyses (TRIPOD+AI item 11)

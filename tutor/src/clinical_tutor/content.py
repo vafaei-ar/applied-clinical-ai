@@ -34,9 +34,22 @@ class _Step(BaseModel):
     @classmethod
     def _stringify_items(cls, value):
         # YAML reads a bare `- 4` or `- 0.5` as a number; authors mean the text "4".
-        if isinstance(value, list):
-            return [v if isinstance(v, str) else str(v) for v in value]
-        return value
+        # Anything else that isn't text is almost always a YAML slip, so reject it with a hint:
+        # an unquoted `key: value` becomes a mapping, and `yes`/`no`/`on`/`off` become booleans.
+        if not isinstance(value, list):
+            return value
+        out = []
+        for item in value:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, (int, float)) and not isinstance(item, bool):
+                out.append(str(item))
+            else:
+                raise ValueError(
+                    f"list item {item!r} is not text; quote it (for example an item containing "
+                    "': ' or a bare yes/no must be in quotes)"
+                )
+        return out
 
 
 class TextStep(_Step):

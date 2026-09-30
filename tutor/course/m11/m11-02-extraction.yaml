@@ -1,24 +1,575 @@
 id: m11-02-extraction
 title: 'Information extraction: entities, negation, ontologies, and LLM extraction'
-summary: NER and entity linking to UMLS/SNOMED/RxNorm, negation and uncertainty (ConText), section detection,
-  and schema-constrained LLM extraction with annotation practice.
-minutes: 25
-status: seed
-why_it_matters: Turning text into structured data is the core clinical NLP task. The details (negation,
-  experiencer, temporality) decide whether extracted features are usable.
+summary: Turning note text into features that survive scrutiny. Mentions, concept linking to UMLS, SNOMED CT,
+  RxNorm, and ICD-10-CM, assertion attributes (ConText), sections, schema-constrained LLM extraction with
+  span checks, and annotation with agreement.
+minutes: 30
+status: authored
+why_it_matters: Turning text into structured data is the core clinical NLP task, and the details decide
+  whether the output is usable. "No evidence of stroke", "mother had a stroke", and "return if stroke
+  symptoms develop" are not stroke, and a feature that cannot tell them apart is worse than no feature.
 objectives:
-- Explain NER, normalization to ontologies, and why linking is hard
-- Handle negation, uncertainty, experiencer (family history), and temporality
-- Use section detection to disambiguate mentions
-- Design schema-constrained LLM extraction with validation and abstention
-- Run an annotation study with guidelines and inter-annotator agreement
+  - Explain NER, normalization to ontologies, and why linking is hard, with real identifiers
+  - Handle negation, uncertainty, experiencer (family history), and temporality with ConText-style logic
+  - Use section structure, including radiology report sections, to disambiguate mentions
+  - Design schema-constrained LLM extraction with span verification and abstention, provider-neutrally
+  - Run an annotation study with guidelines and inter-annotator agreement that works for span tasks
 key_points:
-- '''No evidence of stroke'' and ''family history of stroke'' are not stroke'
-- Normalize to ontologies to make extracted data joinable with codes
-- Validate LLM output against the source span
-- Agreement between annotators bounds achievable accuracy
-tags:
-- nlp
-- extraction
-- ontologies
-- interview
+  - '"No evidence of stroke" and "family history of stroke" are not stroke, so assertion attributes are part of the feature'
+  - Normalize to ontologies to make extracted data joinable with codes, and always store the vocabulary with the code
+  - Validate LLM output against the source span in code, and never let the model write identifiers
+  - Agreement between annotators bounds achievable accuracy, and for spans it is measured with pairwise F1
+tags: [nlp, extraction, ontologies, negation, llm, interview]
+steps:
+  - type: text
+    title: Five sentences, one keyword
+    text: |
+      Five sentences from five invented stroke notes:
+
+      ```
+      1. No evidence of acute stroke on MRI.
+      2. Mother had a stroke at age 60.
+      3. Return to the ED if stroke symptoms develop.
+      4. TIA in 2019; no prior stroke.
+      5. MRI shows acute left MCA infarct.
+      ```
+
+      The feature you want for the readmission model is **acute stroke during this admission**.
+
+      The obvious first attempt is a keyword match on `stroke`. Before you scroll, decide how it
+      scores on these five.
+
+  - type: quiz
+    question: |
+      A sentence is flagged if it contains the word `stroke`. Only sentence 5 is a true case. What are the
+      true positives (TP), false positives (FP), and false negatives (FN)?
+    options:
+      - TP 4, FP 0, FN 1
+      - TP 1, FP 3, FN 0
+      - TP 0, FP 4, FN 1
+      - TP 0, FP 1, FN 4
+    answer: 2
+    explanation: |
+      Sentences 1 to 4 contain the word but are negated, family history, hypothetical, and negated past
+      history. All four are false positives. Sentence 5 describes the stroke with "infarct" and never
+      says "stroke", so the keyword misses it.
+
+      Keyword search fails twice: **vocabulary** (synonyms) and **context** (assertion). The rest of the
+      lesson is the machinery for fixing both.
+
+  - type: text
+    title: Four jobs, not one
+    text: |
+      "Extraction" is a pipeline, and each stage fails in its own way:
+
+      1. **Find mentions** (named entity recognition): spans like `acute left MCA infarct`.
+      2. **Normalize**: map each span to a concept ID in an ontology.
+      3. **Attach attributes**: negated, possible, hypothetical, family, past, plus the section it came from.
+      4. **Aggregate**: turn mentions into a patient-time feature, using the signing-time window from
+         Lesson 1.
+
+      Errors multiply. If each of the first three stages were right 95%, 90%, and 90% of the time (invented
+      numbers) and independent, a mention would be fully right only about 77% of the time.
+
+      So evaluate each stage on its own, then the final feature end to end. Lesson 3 shows how.
+
+  - type: text
+    title: The tool landscape, checked against current docs
+    text: |
+      You rarely start from zero. What I confirmed from each project's own documentation, as of writing:
+
+      - **scispaCy** (Neumann et al., 2019): spaCy models for biomedical text plus an entity linker to UMLS.
+        Apache-2.0. Its README describes a linker but no negation or assertion component, so pair it with
+        ConText-style logic.
+      - **medspaCy**: a clinical toolkit on spaCy with a rule-based target matcher, **ConText**, and section
+        detection. Its README lists version 1.3.1 (November 2024).
+      - **Apache cTAKES** (Savova et al., _JAMIA_ 2010): the long-running Mayo Clinic pipeline of annotators,
+        now an Apache project.
+      - **MedCAT** (Kraljevic et al., 2021): entity recognition and linking to UMLS or SNOMED CT, with a
+        companion component for attributes such as negation. It moved to the Elastic License 2.0 in
+        August 2022, and its v1 repository was archived in July 2025, with v2 announced for a separate
+        repository. Read the license and current status before adopting it.
+      - **Fine-tuned transformers**: train a span tagger on your own annotations.
+
+      None of them is validated on your notes. Choose by what you can evaluate and deploy, and check versions
+      and licenses yourself, since these change.
+
+  - type: code
+    language: python
+    title: A linker returns candidates, not verdicts
+    text: |
+      A sketch of the scispaCy linker, following its README (check the README for your installed version):
+    code: |
+      import spacy
+      import scispacy                              # registers the components
+      from scispacy.linking import EntityLinker    # noqa: F401
+
+      nlp = spacy.load("en_core_sci_sm")
+      nlp.add_pipe("scispacy_linker",
+                   config={"resolve_abbreviations": True, "linker_name": "umls"})
+      linker = nlp.get_pipe("scispacy_linker")
+
+      doc = nlp("No evidence of acute stroke. Mother had a stroke at 60.")
+      for ent in doc.ents:
+          for cui, score in ent._.kb_ents[:1]:     # top candidate: (CUI, similarity)
+              print(ent.text, cui, round(score, 2), linker.kb.cui_to_entity[cui].canonical_name)
+    after: |
+      The README gives a default candidate threshold of 0.7. Candidates are ranked by string similarity
+      to concept names, and nothing in this code looks at the words around the mention.
+
+  - type: quiz
+    question: |
+      In the snippet, both `stroke` mentions come back with the same top CUI and similar scores. What does
+      that tell you about whether the patient had a stroke?
+    options:
+      - The first is absent and the second is family history, and the linker encoded this in the score
+      - Both are present, since scores above the 0.7 threshold mean the finding is asserted
+      - The shorter mention is more reliable
+      - Nothing. Linking maps strings to concepts, so negation and experiencer need a separate step
+    answer: 3
+    explanation: |
+      The linker answers "which concept does this string name?", not "is it true of this patient?". The
+      score measures how well the string matches a concept name. Assertion, experiencer, and temporality
+      come from a different component (ConText-style rules or a trained classifier). Treating link
+      confidence as assertion confidence is a classic mistake.
+
+  - type: text
+    title: Why linking is hard
+    text: |
+      Even with the right span, normalization goes wrong in predictable ways:
+
+      - **Abbreviations and homographs**: `CVA` is cerebrovascular accident, but "CVA tenderness" is
+        costovertebral angle. `MS` and `RA` have several meanings each.
+      - **Coordination**: "left MCA and PCA infarcts" is two concepts.
+      - **Granularity**: `stroke`, `left MCA infarct`, and `cardioembolic stroke` sit at different levels.
+        Choose the level the feature needs.
+      - **Local shorthand**: `afib`, `a-fib w/ RVR`, `s/p tPA`, and misspellings.
+      - **No good concept**: leave the mention unlinked (often called NIL). Forcing a match is worse.
+
+      The candidate threshold is a dial. Raise it and precision rises while recall falls, because more
+      mentions stay unlinked. Evaluate linking separately, on gold spans, so you know whether a miss came from
+      finding the span or naming it.
+
+  - type: text
+    title: One idea, four identifier systems
+    text: |
+      The same clinical idea has different identifiers in different systems, and you need to be able to read
+      all of them:
+
+      - **UMLS Metathesaurus**: groups synonyms from many vocabularies under one concept ID, a **CUI** ("C"
+        plus seven digits). Using it requires a license agreement with the National Library of Medicine, so
+        check the terms, including for SNOMED CT content.
+      - **SNOMED CT**: clinical concepts with numeric IDs and an is-a hierarchy. Fully specified names end in a
+        semantic tag such as "(disorder)". Good for roll-ups.
+      - **ICD-10-CM**: billing and statistics codes (Module 01). Note the history codes, such as `Z82.3`
+        (family history of stroke) and `Z86.73` (personal history of TIA and cerebral infarction without
+        residual deficits). Claims data can already tell these apart from `I63.9`.
+      - **RxNorm**: drugs, with an **RxCUI** at each level: ingredient (atorvastatin) versus a specific
+        clinical drug (atorvastatin 40 MG Oral Tablet).
+
+      Store the **vocabulary, the code, and the version** together. Digits alone are ambiguous.
+
+      Module 06 maps the same idea into OMOP, whose `NOTE_NLP` table (CDM 5.4) already has fields for our
+      output: `snippet`, `offset`, `lexical_variant`, `note_nlp_concept_id`, `section_concept_id`,
+      `term_exists`, `term_temporal`, `term_modifiers`, and `nlp_system`.
+
+  - type: image
+    image: m11-02-concept-crosswalk.png
+    caption: |
+      Checked against NCBI MedGen (UMLS CUIs), the NLM Clinical Tables ICD-10-CM service, NLM RxNav (RxCUIs),
+      and public SNOMED CT code lists. Mappings between systems are not always one to one, and versions
+      change, so look identifiers up in a terminology service rather than memorizing them.
+
+  - type: quiz
+    question: |
+      An extraction output contains `83367` with no other columns. What is the real problem?
+    options:
+      - Nothing, since numeric codes are unique across vocabularies
+      - It could be a code from any numeric vocabulary. Here it is the RxNorm ingredient atorvastatin, so the vocabulary must be stored with the code
+      - It is invalid, because every concept ID must start with "C"
+      - RxNorm identifiers have been deprecated in favor of SNOMED CT
+    answer: 1
+    explanation: |
+      Only UMLS CUIs carry a recognizable prefix. SNOMED CT concept IDs and RxCUIs are both plain integers,
+      and they live in different ID spaces. Without a `vocabulary` (and ideally a `version`) column, a join
+      can silently match unrelated concepts. A (vocabulary, code) pair is the minimum.
+
+  - type: quiz
+    question: |
+      A note says "acute stroke" and your pipeline maps it to ICD-10-CM `I63.9`
+      (cerebral infarction, unspecified). What did the mapping assume that the note did not say?
+    options:
+      - That the stroke is ischemic (an infarction) rather than hemorrhagic
+      - That this is the patient's first ever stroke
+      - That the patient is an adult
+      - That the stroke happened in the last 24 hours
+    answer: 0
+    explanation: |
+      `I63.9` is a cerebral infarction code. A hemorrhagic stroke belongs to a different code family (for
+      example `I61.9`, nontraumatic intracerebral hemorrhage, unspecified). The word "stroke" in a note often
+      covers both. If you need the type, extract it from the text ("infarct", "hemorrhage") or map to a
+      broader concept on purpose. "Acute" versus history is a separate assumption (`Z86.73` is the history
+      code), which is why attributes matter.
+
+  - type: text
+    title: From NegEx to ConText
+    text: |
+      **NegEx** (Chapman et al., _J Biomed Inform_ 2001) showed that a simple algorithm finds negated findings
+      in discharge summaries. **ConText** (Harkema et al., _J Biomed Inform_ 2009) reused the idea to
+      decide whether a condition is negated, hypothetical, historical, or experienced by someone other than
+      the patient.
+
+      The i2b2/VA 2010 challenge (Uzuner et al., _JAMIA_ 2011) made this a benchmark task with six assertion
+      classes: **present, absent, possible, conditional, hypothetical, and associated with someone else**.
+
+      The mechanics are four ingredients:
+
+      - **Triggers**: "no evidence of", "denies", "mother had", "return if".
+      - **Scope**: the words a trigger applies to, usually a short window or to the end of the sentence.
+      - **Terminators**: "but", "however", "although" close the scope.
+      - **Pseudo-triggers**: "no change", "no increase" look like triggers but do not negate the finding.
+
+      Rules remain a strong, transparent baseline (medspaCy implements ConText). Trained assertion
+      classifiers handle paraphrase better but need labeled data. Either way, evaluate per attribute and per
+      note type.
+
+  - type: image
+    image: m11-02-context-scope.png
+    caption: |
+      Two synthetic sentences. The trigger opens a scope, "but" closes it, so the weakness is not negated.
+      "No change" contains a trigger word but is a pseudo-trigger, so the infarct stays present.
+
+  - type: code
+    language: python
+    title: A toy scope rule
+    text: |
+      A deliberately small NegEx-style function. Read it, then predict one case:
+    code: |
+      import re
+
+      TRIGGERS = ["no evidence of", "negative for", "denies", "without", "no"]
+      STOPS = ["but", "however", "although", "except"]
+      PSEUDO = ["no change", "no increase", "no longer"]
+
+      def is_negated(sentence: str, mention: str) -> bool:
+          s = sentence.lower()
+          i = s.find(mention.lower())
+          if i < 0:
+              return False
+          before = s[:i]
+          for p in PSEUDO:                      # "no change in X" does not negate X
+              before = before.replace(p, " ")
+          pat = "|".join(rf"\b{re.escape(t)}\b" for t in TRIGGERS)
+          hits = list(re.finditer(pat, before))
+          if not hits:
+              return False
+          scope = before[hits[-1].end():]       # text between last trigger and mention
+          return not re.search(r"\b(?:" + "|".join(STOPS) + r")\b", scope)
+
+  - type: quiz
+    question: |
+      What does `is_negated("No acute hemorrhage or mass effect; infarct is evolving.", "infarct")` return?
+    options:
+      - False, because the scope stops at the semicolon
+      - Raises an error, because "infarct" follows punctuation
+      - True. No terminator sits between "No" and "infarct", so negation leaks across the semicolon
+      - False, because "No acute hemorrhage" is in PSEUDO
+    answer: 2
+    explanation: |
+      The function only ends a scope at the words in `STOPS`. A semicolon (or a period inside an
+      unsplit block) does not stop it, so the infarct is wrongly marked negated. "mass effect" is correctly
+      `True`. The fix is to split sentences and clauses first, for example on `;`, or add punctuation
+      terminators. This is the kind of bug rules-based assertion has, which is why you test it with
+      gold sentences rather than trust it.
+
+  - type: text
+    title: Uncertainty, experiencer, temporality
+    text: |
+      The judgement calls that real projects argue about:
+
+      - **Uncertainty**: "cannot be excluded", "concerning for", "likely", "may represent", "consistent with".
+        Label it **possible**, and let the feature policy decide. Radiologists use these phrases on different
+        scales, so split into finer levels only if annotators can agree on them.
+      - **Experiencer**: "Mother had a stroke" is someone else's. But "history obtained from wife" is an
+        **informant**, not the experiencer: the patient is still the one with the symptoms.
+      - **Temporality**: "last known well 22:00" is a time anchor for stroke care. "TIA in 2019" is past;
+        "new weakness this morning" is current. Note that "historical" does **not** mean resolved. Atrial
+        fibrillation in the past medical history is usually an active risk factor.
+      - **Hypothetical**: "return if new weakness", "risk of stroke discussed", "stroke alert activated" (a
+        process, not a finding).
+
+      Practical rule: store the **raw attributes** with each mention, and apply the policy (which combinations
+      count) in the feature code. Then you can change your mind without re-running extraction.
+
+  - type: quiz
+    question: |
+      You are building `prior_af_from_notes`, a risk factor for the readmission model. Which rule is most
+      defensible?
+    options:
+      - Count any mention of atrial fibrillation
+      - Count only mentions labeled current, because history is not active
+      - Count only mentions in the Assessment section
+      - Count present or past-history mentions about the patient. Exclude negated, hypothetical, and family mentions, and send possible to review
+    answer: 3
+    explanation: |
+      AF is chronic or recurrent, and the past medical history is exactly where it is usually documented, so
+      dropping history (B) would lose most true cases. Counting every mention (A) includes "no AF on
+      telemetry" and "father has AF". Limiting to one section (C) throws away the HPI and problem list. The
+      attributes let you keep true risk-factor mentions and exclude the rest.
+
+  - type: code
+    language: text
+    title: Report sections have different jobs
+    text: |
+      An invented non-contrast head CT report:
+    code: |
+      EXAM: CT HEAD WITHOUT CONTRAST
+      INDICATION: Right arm weakness. Evaluate for hemorrhage.
+      COMPARISON: None.
+      FINDINGS: No acute intracranial hemorrhage. Hyperdense left
+        MCA. Loss of the left insular ribbon. ASPECTS 9.
+      IMPRESSION:
+        1. No hemorrhage.
+        2. Findings concerning for early left MCA infarct.
+           Recommend CT angiography.
+    after: |
+      Read it by section:
+
+      - **INDICATION** is why the scan was ordered: a question, not a finding.
+      - **COMPARISON** may name earlier studies ("CT head 3/2 showing hemorrhage"). Mentions there describe the
+        _old_ exam.
+      - **FINDINGS** and **IMPRESSION** repeat each other, so aggregate by concept, not by mention count.
+      - Hedges cluster in the impression: "concerning for" means possible.
+      - ASPECTS is a 10-point CT score, so `ASPECTS 9` needs its own pattern and a range check.
+
+      Preliminary and final reads can differ, so the signing time from Lesson 1 applies here too.
+
+  - type: quiz
+    question: |
+      A naive pipeline counts every mention of "hemorrhage" as present. On the report above, how many of the
+      three "hemorrhage" mentions (INDICATION, FINDINGS, IMPRESSION item 1) does it get wrong?
+    options:
+      - None
+      - One
+      - Two
+      - All three
+    answer: 3
+    explanation: |
+      The indication is a hypothetical (a question being asked), and the findings and impression both say
+      there is no hemorrhage. So document-level hemorrhage is absent. Note the infarct is **possible**,
+      not present: "concerning for" is a hedge. A feature that ignores sections and assertions would call
+      this report a hemorrhage.
+
+  - type: text
+    title: LLM extraction, designed as an untrusted component
+    text: |
+      An LLM is another engine for the same four jobs. Design it like an untrusted component:
+
+      - **Schema with enums** and an explicit `unclear` value. Structured outputs guarantee syntax, not truth
+        (Module 05, Lesson 01).
+      - **Evidence for every item**: a verbatim quote plus a short verbatim context. Models miscount
+        character offsets, so have code compute them.
+      - **Verify in code**: the quote must appear exactly once, or the item goes to review. Copy-forward makes
+        repeats common.
+      - **Never let the model write identifiers.** Soroush et al. (_NEJM AI_ 2024) asked frontier models of
+        the time to return billing codes from descriptions, and exact matches were well under 50% for
+        ICD-10-CM. Map concepts to codes with a terminology service or a curated value set.
+      - **Abstain**: `unclear` and failures go to a human queue, and the rate is a monitored metric.
+      - **Notes are untrusted input.** Text inside a note can look like instructions, so give the extractor no
+        tools or side effects, and keep PHI in an approved environment (Module 06).
+      - **Evaluate it like any extractor**, against gold spans. Module 05 covers LLM-specific evaluation
+        (claim support, judge validation, abstention curves), so this lesson does not repeat it.
+
+      Span checks catch invented quotes, not wrong labels.
+
+  - type: code
+    language: python
+    title: Schema and span verification
+    text: |
+      `llm` is any callable from prompt text to JSON text, so this is provider-neutral. Schema style follows
+      Module 05 (Pydantic v2).
+    code: |
+      from typing import Literal
+      from pydantic import BaseModel
+
+      class Finding(BaseModel):
+          concept: Literal["ischemic_stroke", "intracranial_hemorrhage", "atrial_fibrillation"]
+          quote: str        # verbatim words from the note
+          context: str      # a short verbatim stretch that contains the quote
+          assertion: Literal["present", "absent", "possible",
+                             "hypothetical", "family", "unclear"]
+
+      class Extraction(BaseModel):
+          findings: list[Finding]
+
+      def locate(note: str, f: Finding) -> tuple[int, int] | None:
+          """Offsets if the quote maps to exactly one place, else None."""
+          if f.quote not in f.context or note.count(f.context) != 1:
+              return None              # invented (0 matches) or ambiguous (>1)
+          start = note.index(f.context) + f.context.index(f.quote)
+          return start, start + len(f.quote)
+
+  - type: code
+    language: python
+    title: Route what fails instead of hiding it
+    code: |
+      from pydantic import ValidationError
+
+      def extract(note: str, llm) -> dict:
+          raw = llm(f"Extract findings as JSON.\n\nNOTE:\n{note}")
+          try:
+              parsed = Extraction.model_validate_json(raw)
+          except ValidationError:
+              return {"status": "human_review", "reason": "schema"}
+          kept, review = [], []
+          for f in parsed.findings:
+              span = locate(note, f)
+              ok = span is not None and f.assertion != "unclear"
+              (kept if ok else review).append((f, span))
+          return {"status": "ok" if not review else "partial",
+                  "kept": kept, "review": review}
+    after: |
+      Every failure has a destination, and you can count them by reason. A sudden rise in `review` after a
+      prompt, model, or note-template change is an early warning. The model never sees a terminology service
+      here: code maps `concept` to codes afterwards.
+
+  - type: quiz
+    question: |
+      The note is `MRI: acute left MCA infarct. No hemorrhage. Prior note: no hemorrhage.` A stub model
+      returns four findings: (1) infarct with context `MRI: acute left MCA infarct.`, (2) `hemorrhage` with
+      context `No hemorrhage. Prior`, (3) `atrial fibrillation` with context `atrial fibrillation`, and (4)
+      `hemorrhage` with context `hemorrhage`. How many does `extract` keep?
+    options:
+      - Two, findings 1 and 2
+      - Three, everything except the invented atrial fibrillation
+      - Four, since the JSON is valid
+      - One, only the infarct
+    answer: 0
+    explanation: |
+      Finding 3 quotes text that is not in the note (0 matches), so `locate` returns `None`. Finding 4's
+      context `hemorrhage` occurs twice, so it is ambiguous. Finding 2 works because its context
+      (`No hemorrhage. Prior`) is unique. Valid JSON (C) only passes the schema check. This is the reason to
+      require a context and to verify it rather than trust the model.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We want atrial fibrillation as a feature in our stroke readmission model, from discharge summaries and ED
+      notes as well as codes. How would you build it and show it works?"
+    model_answer: |
+      I'd start with the feature definition and the prediction time: AF documented as a current or past
+      condition of the patient, in a note signed before time zero. AF is chronic, so the patient-level feature is
+      an OR over mentions. Pipeline: detect sections, find mentions with a synonym list (afib, a-fib, paroxysmal
+      AF) plus a trained tagger for the long tail, link to a value set that maps to the I48 codes and the SNOMED
+      and UMLS concepts, then apply assertion: drop negated, hypothetical, and family mentions, and route
+      possible to review. Aggregate to the patient with the signing-time filter and deduplicate copy-forward.
+      For validation I'd chart-review a stratified sample: patients flagged by notes only, by codes only, by
+      both, and by neither, to estimate PPV and sensitivity of the note feature against chart review, and compare
+      with the code-only version. Then I'd check that it improves a temporal holdout and is stable across sites,
+      and monitor prevalence by note type monthly because templates change.
+    key_points:
+      - Defines the feature by an assertion policy and a prediction time, and treats AF as an OR over mentions
+      - Uses sections, synonyms, and linking to a code-compatible value set
+      - Handles negation, hypothetical, family, and uncertain mentions explicitly
+      - Aggregates with a signing-time filter and deduplicates copy-forward
+      - Validates against chart review (PPV and sensitivity) versus codes, then monitors prevalence over time
+
+  - type: text
+    title: Annotation and agreement
+    text: |
+      Whatever extracts, you need gold labels. Doing this well is most of the work:
+
+      - **Guidelines first**: what is a mention, where spans start and end ("acute left MCA infarct" as one
+        span or not), what each attribute means, and worked edge cases. Version them.
+      - **Pilot**: two or three annotators label the same ~50 notes, compare, discuss, revise, and repeat until
+        agreement stabilizes. Then annotate at scale with an overlapping subset for ongoing agreement, and
+        adjudicate to produce the gold.
+      - **Agreement for spans**: kappa needs a defined negative class, and "not a mention" is not a countable
+        set. Hripcsak and Rothschild (_JAMIA_ 2005) showed the average pairwise F-measure between raters
+        equals positive specific agreement, and kappa approaches it as negatives grow. So report **pairwise
+        F1** under the same matching rule you use for systems. For attributes on matched spans, Cohen's kappa
+        is fine (Module 05, Lesson 04 uses it for judges).
+      - **Ceiling**: if trained annotators agree at F1 0.85, a system at 0.85 is roughly at human level.
+        Pushing toward 0.95 means fitting annotator noise.
+
+      Keep the disagreements. They are your hardest, most informative test cases.
+
+  - type: quiz
+    question: |
+      Two annotators label entity spans on 100 notes, and their pairwise F1 is 0.82. Your system scores 0.80 F1
+      against the adjudicated gold. What is the best reading?
+    options:
+      - The system is 2 points below human level, so collect more training data
+      - The comparison is meaningless because F1 cannot be compared between people and systems
+      - Roughly at the practical ceiling. Check confidence intervals and error categories before chasing more F1
+      - The system beats humans, since the adjudicated gold is correct by definition
+    answer: 2
+    explanation: |
+      Inter-annotator F1 is a rough ceiling for the task as defined. The comparison is imperfect, because an
+      adjudicated gold is cleaner than one annotator's labels, but it is informative. With 100 notes, a 2-point
+      difference is probably inside the noise, so look at error categories (Lesson 3) and whether the
+      remaining errors are really disagreements in the guidelines.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A team builds an AF-from-notes feature on 2022 discharge summaries and validates it well. In 2024 the
+      hospital updates its note template: "Past Medical History" becomes "Medical History", and a new smart phrase
+      inserts a negative review of systems into every ED note.
+
+      The section rules no longer recognize the renamed header, so AF mentions lose their section context. The
+      feature's prevalence drifts. Nothing crashes, because the inputs still look well-formed.
+
+      Two related traps show the same pattern. Negation rules tuned on discharge summaries degrade on
+      radiology phrasing ("no definite", "cannot be excluded"). And a vendor model that was good last year meets
+      a new note type.
+
+      What helps:
+
+      - Validate **per note type and per site**, not once on a pooled set.
+      - Track feature prevalence monthly by note type (Module 03's monitoring ideas).
+      - Keep a small, fresh gold sample and re-score it after every EHR upgrade.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How do you handle negation, uncertainty, and family history when extracting features from clinical notes?
+      What would you do if your rules and a transformer disagree?"
+    model_answer: |
+      I treat each of them as an attribute of a mention, not a filter on the text. A rule baseline in the
+      ConText style is where I'd start: triggers, scopes, terminators, and pseudo-triggers, through something
+      like medspaCy, and I'd test it on gold sentences because details like semicolons and "no change" break it.
+      Uncertainty is its own class, not folded into present or absent. Family is the experiencer attribute, and I
+      separate informant from experiencer. I store the raw attributes and apply the feature policy in code. I'd
+      evaluate per attribute on matched spans, per note type, and then at the feature level against chart review,
+      because attribute accuracy alone overstates usefulness. A trained assertion model is more robust to
+      paraphrase but needs labels. Where rules and the model disagree, those are the most informative examples:
+      I'd review a sample, fix the gold or the guideline, and route persistent disagreements to a human queue.
+    key_points:
+      - Treats assertion, uncertainty, and experiencer as mention attributes, stored raw, with the policy in feature code
+      - Knows ConText ingredients (triggers, scope, terminators, pseudo-triggers) and tests them on gold sentences
+      - Keeps uncertainty as its own class and separates informant from experiencer
+      - Evaluates per attribute and note type, then at feature level against chart review
+      - Uses rule versus model disagreements as review and gold-improvement material
+
+  - type: laptop
+    title: A negation baseline and a span checker
+    repo_path: 11-clinical-nlp/src/assertion.py
+    task: |
+      Create `11-clinical-nlp/src/assertion.py` with the `is_negated` function from this lesson and a file of 30
+      invented sentences with gold negated / not-negated labels. Include a semicolon case, a pseudo-trigger, a
+      "but" case, and a hedge like "cannot be excluded". Report precision and recall, fix the semicolon bug, and
+      note which cases remain wrong. Then add `11-clinical-nlp/src/spans.py` with `locate` and a pytest that uses
+      a stub `llm` returning an invented quote, an ambiguous repeat, and invalid JSON, and asserts each is routed
+      to review.
+
+  - type: recap
+    points:
+      - Extraction is four jobs (mentions, normalization, attributes, aggregation), and each needs its own evaluation
+      - A linker maps strings to concepts. It says nothing about negation, experiencer, or time
+      - "Store the vocabulary with every code. CUI, SNOMED CT ID, RxCUI, and ICD-10-CM code are different ID spaces"
+      - ConText-style logic is triggers, scope, terminators, and pseudo-triggers, and semicolons and hedges break naive rules
+      - Uncertainty is its own class, and "historical" does not mean resolved
+      - Sections change meaning, and radiology INDICATION, COMPARISON, FINDINGS, and IMPRESSION do different jobs
+      - Verify LLM output in code against the source span, never let the model write identifiers, and route failures
+      - Annotation needs guidelines, a pilot, and pairwise F1 for spans, and agreement is the practical ceiling

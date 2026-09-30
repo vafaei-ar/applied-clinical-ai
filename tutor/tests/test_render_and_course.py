@@ -35,3 +35,17 @@ def test_real_course_is_valid_and_renders():
         for step in lesson.steps:
             for out in render_step(step):
                 assert len(out.text) < 4096 or step.type in {"text", "code"}
+
+
+def test_list_items_must_be_text_or_plain_numbers():
+    import pytest
+    from pydantic import ValidationError
+
+    from clinical_tutor.content import STEP_ADAPTER
+
+    base = {"type": "quiz", "question": "q", "answer": 0, "explanation": "e"}
+    ok = STEP_ADAPTER.validate_python({**base, "options": [4, 0.5, "x"]})
+    assert ok.options == ["4", "0.5", "x"]
+    for bad in ([{"oops": "an unquoted colon"}, "b"], [True, "b"]):  # YAML slips
+        with pytest.raises(ValidationError, match="quote it"):
+            STEP_ADAPTER.validate_python({**base, "options": bad})

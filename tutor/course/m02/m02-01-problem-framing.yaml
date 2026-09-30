@@ -327,7 +327,9 @@ steps:
     answer: 2
     explanation: |
       Missingness in EHR data is usually **informative**. No LDL in a year can reflect less
-      engaged care, which is itself a risk signal, so the indicator lets the model use it.
+      engaged care, which is itself a risk signal, so the indicator lets the model use it. (In
+      this synthetic dataset the missingness is random by construction, so the indicator won't
+      help here; in real data it often does. The missing-data module returns to this.)
       Dropping patients changes the population the model applies to. Imputing 0 invents an
       impossible lab value. Full-dataset statistics leak test information (m01-05).
 
