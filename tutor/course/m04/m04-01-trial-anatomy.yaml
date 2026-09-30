@@ -42,8 +42,9 @@ steps:
   - type: text
     title: Our running trial (synthetic)
     text: |
-      Module 04 follows one **invented** trial. Call it SYN-STROKE. The drug _zetagrel_ doesn't
-      exist, and all the data will be simulated.
+      Module 04 follows one **invented** trial. Call it SYN-STROKE (the statistics module
+      sketched it for sample-size planning). The drug _zetagrel_ doesn't exist, and all the data
+      will be simulated.
 
       - **Population**: adults within 7 days of an ischemic stroke or high-risk TIA, with no
         indication for anticoagulation

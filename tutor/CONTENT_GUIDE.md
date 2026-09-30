@@ -80,7 +80,11 @@ Limits (enforced by the validator): `text` ≤ 3200 characters, `code` ≤ 2800,
 - Use block scalars (`text: |`) for anything longer than a few words. Inside a block scalar,
   any characters are safe.
 - A plain one-line value containing `: ` or ending in `:` must be quoted:
-  `text: "From sql/02_features.sql:"`.
+  `text: "From sql/02_features.sql:"`. This includes `title:` values, quiz options, and recap
+  points (for example an option that starts "Correct: ..."). The validator reports these as
+  "mapping values are not allowed here" or "list item ... is not text; quote it".
+- A wrapped line that starts with a number and a period or bracket (such as `40. With ...` or
+  `02)`) is read as a list item and keeps its line break; rewrap to avoid starting a line that way.
 - A list item that starts with `*`, `` ` ``, `&`, `!`, `%`, `@`, `[`, `{`, or `"` must be quoted:
   `- "**Bold** start of a recap point"`.
 

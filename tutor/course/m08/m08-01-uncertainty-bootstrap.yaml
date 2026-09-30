@@ -1,23 +1,532 @@
 id: m08-01-uncertainty-bootstrap
 title: 'Error bars on model performance: bootstrap and paired comparisons'
-summary: Confidence intervals for AUROC, calibration, and net benefit; the bootstrap done right for patient-level
-  data; comparing two models fairly.
+summary: Honest intervals for AUROC, calibration, and net benefit when patients contribute several rows, and how to tell whether model B is really better than model A.
 minutes: 25
-status: seed
-why_it_matters: A point estimate of AUROC is not evidence. Reviewers, regulators, and interviewers all
-  ask how uncertain it is and whether model B is really better than A.
+status: authored
+why_it_matters: A point estimate of AUROC is not evidence. Reviewers, clinical partners, and interviewers
+  all ask "plus or minus what?" and "is B really better than A?", and the usual shortcuts (row-level
+  resampling, overlapping intervals) give confidently wrong answers on clinical data.
 objectives:
-- Build percentile and BCa bootstrap CIs for a performance metric
-- Resample at the patient (cluster) level, not the row level
-- Explain optimism and use bootstrap optimism correction for internal validation (Harrell)
-- Compare two models on the same data with a paired bootstrap or DeLong test
-- Interpret a frequentist CI correctly and contrast it with a Bayesian credible interval
+  - Build percentile and BCa bootstrap CIs for a performance metric, and know when they differ
+  - Resample at the patient (cluster) level, not the row level, and show why it matters
+  - Explain optimism and use bootstrap optimism correction for internal validation (Harrell)
+  - Compare two models on the same data with a paired bootstrap or DeLong test
+  - Interpret a frequentist CI correctly and contrast it with a Bayesian credible interval
 key_points:
-- Repeated encounters per patient break row-level resampling
-- Bootstrap CIs for small subgroups are wide; say so
-- Non-overlapping vs overlapping CIs is not a significance test for paired models
-- Report CIs for calibration slope and Brier score, not only AUROC
-tags:
-- statistics
-- bootstrap
-- interview
+  - Repeated encounters per patient break row-level resampling; the resampling unit is the patient
+  - Bootstrap CIs for small subgroups are wide; say so and show event counts
+  - Three different bootstrap questions exist (fixed-model CI, procedure stability, optimism); name which one you answer
+  - Overlapping CIs are not a significance test for two models scored on the same patients; resample the difference
+  - Report CIs for calibration slope, calibration-in-the-large, and Brier score, not only AUROC
+  - A CI covers sampling error in this validation set, not drift or site-to-site differences
+tags: [statistics, bootstrap, uncertainty, interview]
+steps:
+  - type: text
+    title: '"Plus or minus what?"'
+    text: |
+      Your slide says: _30-day readmission model, AUROC 0.71._
+
+      The clinical lead skips the usual "is that good?" and asks the question that matters:
+      **"Plus or minus what?"** Then the second one: "Your new model says 0.73. Is that really
+      better, or is it noise?"
+
+      You already know what a confidence interval is. This lesson is about the parts experienced
+      people still get wrong in clinical data: which **unit** to resample, which **question** a
+      given bootstrap answers, and how to compare two models without fooling yourself.
+
+      TRIPOD+AI (Collins et al., BMJ 2024) asks for performance estimates with confidence
+      intervals, including for key subgroups, and for heterogeneity across clusters such as
+      hospitals if you examined it. So this is also a reporting requirement, not a nicety.
+
+  - type: text
+    title: What the interval is about
+    text: |
+      A validation-set CI quantifies one thing: **sampling variability in this validation sample**.
+      If you drew another set of patients from the same population and scored the same frozen
+      model, how much would the metric move?
+
+      It does **not** cover:
+
+      - **Drift** (next year's patients differ from this year's)
+      - **Site differences** (a hospital with another case mix or coding practice)
+      - **Label noise** (readmissions to hospitals you cannot see)
+      - **Model instability** (a different training sample would give a different model)
+
+      Module 02's external-validation lesson was about exactly those gaps. A tight CI on a
+      temporal test set is compatible with a model that fails at the next hospital.
+
+      Keep that boundary in your head. Interviewers like candidates who say what an interval
+      does _not_ show.
+
+  - type: text
+    title: Three different bootstrap questions
+    text: |
+      "Bootstrap it" is ambiguous. There are three common procedures, and they answer different
+      questions:
+
+      - **A. Fixed-model CI.** The model is trained and frozen. Resample the **validation
+        patients**, recompute the metric, no refitting. _How uncertain is this model's performance
+        in a new sample like this one?_ This is the one your CI on a model card should be.
+      - **B. Procedure stability.** Resample the **training** data, refit the whole pipeline each
+        time, score a fixed test set. _How much does performance depend on which training patients
+        we happened to have?_
+      - **C. Optimism correction** (Harrell). Refit on each resample, then compare performance on
+        the resample with performance on the original data. _How optimistic is the apparent
+        performance of the whole modelling procedure?_ Later in this lesson.
+
+      When someone says "we bootstrapped the AUROC", ask which one. Most of the time it should be A.
+
+  - type: quiz
+    question: |
+      The readmission model is trained and frozen. You have a temporal test set of 6,000 patients
+      and need the uncertainty of the test AUROC for the model card. Which procedure fits?
+    options:
+      - Refit the model on bootstrap samples of the training data and score the test set each time
+      - Resample the test patients with replacement and recompute the AUROC, without refitting
+      - Run Harrell's optimism bootstrap on the training set and report the corrected AUROC
+      - Report the standard deviation of the AUROC across 5 cross-validation folds
+    answer: 1
+    explanation: |
+      The frozen model's performance on a new sample like the test set is procedure A: resample
+      the test patients and recompute. Refitting (first option) measures how much the _model_
+      varies with training data, a different question. Optimism correction (third) adjusts the
+      development estimate and never touches the test set. Fold-to-fold SD across folds is not a
+      CI for the pooled estimate either, because the folds are not independent samples.
+
+  - type: text
+    title: Percentile or BCa?
+    text: |
+      The basic recipe: resample, recompute the metric, repeat B times (use at least 2,000 for
+      intervals). The **percentile** interval takes the 2.5th and 97.5th percentiles of the
+      replicates.
+
+      **BCa** (bias-corrected and accelerated) adjusts those percentile cut-points for two
+      things: **bias** (estimated from the share of replicates below the original estimate) and
+      **skewness** (an "acceleration" constant estimated from leave-one-out jackknife values).
+
+      Practical rule:
+
+      - With thousands of events and an AUROC in the middle of its range, percentile and BCa are
+        nearly identical. Percentile is fine.
+      - With skewed or boundary-hugging statistics (AUROC near 1, a small proportion, calibration
+        slope with few events), BCa is worth the extra cost.
+      - Always look at the bootstrap **histogram**. A lumpy or one-sided distribution is a warning
+        about the data, not just the method.
+
+      SciPy's `scipy.stats.bootstrap` uses `method='BCa'` by default. Code comes shortly.
+
+  - type: text
+    title: Small subgroups are honest and wide
+    text: |
+      Module 02 showed subgroup AUROCs with intervals. Here is how fast the width grows as
+      events shrink. In a simulation I ran (binormal scores, true AUROC about 0.74, a 5% event
+      rate, 500 resamples per study, 600 simulated studies per row):
+
+      - **200 events**: average 95% CI width about **0.07**
+      - **50 events**: about **0.14**
+      - **20 events**: about **0.22**
+
+      At 20 events the interval still contained the truth about 94% of the time, so the bootstrap
+      is **not lying** there. The data are simply nearly uninformative: "AUROC somewhere between
+      0.63 and 0.85" is an honest statement.
+
+      Two habits follow. Put the **event count** next to every subgroup estimate, and read a wide
+      interval as "unknown", never as "fine". Also count resamples that contain only one class and
+      say how many you dropped.
+
+  - type: text
+    title: The trap in repeated-encounter data
+    text: |
+      The Module 01 cohort keeps **one index stroke per patient**, so its rows are independent
+      and row-level resampling is fine.
+
+      Real readmission work is usually messier. Score **every discharge** and a patient with six
+      admissions contributes six rows. Those rows are correlated: the same patient has the same
+      frailty, the same coding habits, and often the same model error each time.
+
+      A **row-level bootstrap** treats 4,000 encounters as 4,000 independent patients. It
+      understates the uncertainty, because what you actually sampled was closer to 1,000
+      patients. The fix is to resample the **unit you would generalize over**: patients.
+
+      So what should happen to the interval when you switch to patient-level resampling? Commit to
+      an answer before the next step.
+
+  - type: quiz
+    question: |
+      You recompute the AUROC CI resampling whole patients instead of rows. The point estimate is
+      unchanged. What happens to the interval?
+    options:
+      - It stays the same, because the point estimate is unchanged
+      - It gets narrower, because whole patients are a cleaner unit than rows
+      - It usually gets wider, by an amount that depends on how correlated a patient's encounters are
+      - It gets wider by exactly the average number of encounters per patient
+    answer: 2
+    explanation: |
+      The interval describes variability of the estimate, and that depends on how many
+      _independent_ units you have, not on the point estimate. Correlated rows carry less
+      information than independent ones, so patient-level intervals are usually wider. The size
+      of the effect depends on the within-patient correlation and on how unevenly encounters are
+      spread across patients. "Exactly the average number of encounters" is wrong because there is
+      no such fixed rule, and with one row per patient nothing changes.
+
+  - type: image
+    image: m08-01-cluster-bootstrap.png
+    caption: |
+      Simulated repeated-encounter data (800 patients, about 3.7 encounters each, sicker patients
+      have more encounters, and model error persists within a patient). Top: the two bootstrap
+      distributions for a typical dataset; patient-level resampling gives a CI about 40% wider.
+      Bottom: over 250 simulated studies, the row-level 95% CI contained the true AUROC only 78%
+      of the time. The patient-level interval reached 92%, closer to nominal but not perfect.
+
+  - type: text
+    title: Read the figure honestly
+    text: |
+      Three things to take from it.
+
+      - The row-level interval was **too narrow**: a "95%" interval that covers the truth about
+        four times in five. A reviewer who checks your resampling unit will notice.
+      - Patient-level resampling fixed most of the gap. It is still a bit short of 95% here,
+        because 800 patients with very uneven encounter counts is not a huge sample. Bootstrap
+        intervals are approximate.
+      - **The size of the gap is a property of this simulation.** With weaker clustering the two
+        bootstraps are closer, and with one row per patient they are identical. You cannot know
+        which regime you are in without resampling the right way.
+
+      **What is the cluster?** The highest level of dependence you want to generalize across.
+      Patients within one hospital: resample patients. If the claim is "works at new hospitals",
+      hospitals are the clusters too, and with only a handful of hospitals the interval will be
+      honestly huge. Your train/test split unit and your bootstrap unit should match.
+
+  - type: code
+    title: A patient-level bootstrap in numpy
+    language: python
+    text: Resample patient ids, then gather **all** of each sampled patient's rows, duplicates included.
+    code: |
+      import numpy as np
+      from sklearn.metrics import roc_auc_score
+
+      def cluster_ci(pid, y, p, metric, n_boot=2000, seed=0):
+          rng = np.random.default_rng(seed)
+          _, inv = np.unique(pid, return_inverse=True)
+          order = np.argsort(inv, kind="stable")
+          rows_of = np.split(order, np.cumsum(np.bincount(inv))[:-1])
+          stats = []
+          for _ in range(n_boot):
+              pick = rng.integers(0, len(rows_of), len(rows_of))
+              idx = np.concatenate([rows_of[k] for k in pick])
+              stats.append(metric(y[idx], p[idx]))
+          return np.percentile(stats, [2.5, 97.5])
+
+      lo, hi = cluster_ci(pid, y, p_hat, roc_auc_score)
+    after: |
+      `rows_of[k]` holds the row positions of patient `k`. Drawing `pick` **with replacement** and
+      concatenating means a patient drawn twice appears twice, which is what the bootstrap needs.
+      Passing the metric as an argument lets you reuse this for the Brier score, a calibration
+      slope, or net benefit. `pid`, `y`, and `p_hat` must be NumPy arrays of the same length.
+
+      For a subgroup, pass only that subgroup's rows, and handle resamples that contain one
+      class only (as in Module 02).
+
+  - type: quiz
+    question: |
+      A colleague wants a patient-level bootstrap and writes this. What does it actually compute?
+    language: python
+    code: |
+      ids = np.unique(pid)
+      stats = []
+      for _ in range(2000):
+          picked = rng.choice(ids, size=len(ids), replace=True)
+          m = np.isin(pid, picked)
+          stats.append(roc_auc_score(y[m], p[m]))
+    options:
+      - A subsample in which each drawn patient appears once, about 63% of patients, so the interval is too narrow
+      - A correct patient-level bootstrap
+      - A row-level bootstrap, because isin works on rows
+      - Nothing, because rng.choice cannot sample with replacement from ids
+    answer: 0
+    explanation: |
+      `np.isin(pid, picked)` flags rows whose patient appears **anywhere** in `picked`. A patient
+      drawn three times counts once, and a patient never drawn is absent. About 1 − 1/e ≈ 63% of
+      patients survive, with no duplicates, so each replicate is a random 63% subsample without
+      replacement. That varies less than a full-size resample with replacement. On the
+      repeated-encounter simulation from the figure, this version gave an interval about 24%
+      narrower than the correct one. The same bug hides in pandas as `df[df.id.isin(picked)]`.
+
+  - type: text
+    title: Report more than AUROC
+    text: |
+      AUROC is the easy metric to bootstrap and the least decision-relevant. For the readmission
+      model a complete report has, each with a CI:
+
+      - **AUROC** (ranking)
+      - **Calibration slope** and **calibration-in-the-large** (Module 02's calibration lesson)
+      - **Brier score**, or scaled Brier
+      - **PPV and sensitivity at the alert budget**, or **net benefit** at the clinical threshold
+
+      Do them all in the **same resamples**: draw the patient indices once per replicate and
+      compute every metric on it. That keeps the metrics comparable and lets you form differences
+      later.
+
+      The calibration slope is where small validation sets hurt. It is a regression coefficient
+      fitted on the events, so it is noisy. In the simulation in lesson 3, a perfectly
+      calibrated model evaluated on validation sets with 100 events returned slopes anywhere from
+      about 0.74 to 1.30 (the middle 95% of sets). Lesson 3 returns to this with sample-size
+      arithmetic.
+
+  - type: code
+    title: BCa at the patient level with SciPy
+    language: python
+    text: |
+      `scipy.stats.bootstrap` does BCa for you. To make it patient-level, bootstrap the
+      **patient positions** and let the statistic expand them into rows.
+    code: |
+      from scipy.stats import bootstrap
+
+      def auc_of(patients):            # 1-D array of patient positions, repeats allowed
+          idx = np.concatenate([rows_of[k] for k in patients])
+          return roc_auc_score(y[idx], p_hat[idx])
+
+      res = bootstrap(
+          (np.arange(len(rows_of)),), auc_of,
+          vectorized=False, method="BCa", n_resamples=2000, rng=0,
+      )
+      print(res.confidence_interval)   # low, high
+    after: |
+      `vectorized=False` tells SciPy the statistic handles one 1-D resample at a time.
+      The BCa jackknife then leaves out one **patient** at a time, which is the right unit. In
+      SciPy 1.15 and later the seed argument is `rng`; older versions call it `random_state`.
+      The result also carries `standard_error` and the full `bootstrap_distribution`, so you can
+      plot the histogram.
+
+  - type: text
+    title: Optimism, and what internal validation adds
+    text: |
+      A model's performance on the data it was **fit to** (apparent performance) is optimistic,
+      more so with flexible models, many candidate predictors, and few events. Harrell's
+      **bootstrap optimism correction** (the approach described in Harrell, Lee, and Mark,
+      Stat Med 1996) estimates that optimism:
+
+      1. Fit the full pipeline on the development data and record its apparent performance.
+      2. For each of ~200 to 500 bootstrap samples, **refit the whole pipeline** on the sample.
+         Score the refit model on that sample (apparent) and on the **original** data (test).
+      3. Optimism = mean of (apparent − test) across samples.
+      4. Corrected performance = original apparent performance − optimism.
+
+      Two points interviewers probe. It corrects a **point estimate**; it is not itself a CI for
+      new-sample performance. And "the whole pipeline" means **every** data-driven step: feature
+      selection, imputation models, hyperparameter tuning. Skip those inside the loop and you
+      undercount the optimism.
+
+      For deep networks, refitting hundreds of times is usually infeasible, so teams use a
+      held-out temporal or external test set instead.
+
+  - type: quiz
+    question: |
+      A team runs the optimism bootstrap on a gradient-boosted readmission model, but tunes the
+      hyperparameters once on the full dataset and reuses them in every resample. What is the
+      consequence?
+    options:
+      - The optimism is overestimated, so the corrected AUROC is too pessimistic
+      - Nothing, because hyperparameters are not learned from patient data
+      - The confidence interval becomes narrower but the estimate stays unbiased
+      - The optimism is underestimated, because tuning on all the data leaks the original data into every resample
+    answer: 3
+    explanation: |
+      Hyperparameters chosen on the full dataset have "seen" every patient, including those that
+      later fall in the original-data test part of each resample. So the resample models look
+      better on the original data than a truly repeated pipeline would, optimism shrinks, and the
+      corrected estimate stays too high. Tuning is data-driven learning. It has to be repeated (or
+      nested) inside every bootstrap replicate.
+
+  - type: text
+    title: 'Comparing two models: pair the resamples'
+    text: |
+      Model A and model B score the **same patients**. Their AUROC estimates are strongly
+      positively correlated (both rank the same hard cases badly). The uncertainty of the
+      **difference** is therefore much smaller than two separate intervals suggest.
+
+      **Paired bootstrap.** In each replicate, draw one set of patient indices, compute both
+      metrics on it, and store `metric_B − metric_A`. The percentile interval of the differences
+      is your CI. It works for any metric: AUROC, slope, Brier, net benefit.
+
+      **DeLong test.** A closed-form, nonparametric method (DeLong, DeLong, and Clarke-Pearson,
+      Biometrics 1988) that estimates the covariance of correlated AUROCs from the same patients.
+      Fast on big data, but **AUROC only**, and it assumes independent patients, so clustered data
+      needs the cluster bootstrap instead.
+
+      **Nested-model warning.** If B is A plus one predictor, both fitted in the same data, DeLong
+      on the AUROCs is the wrong tool (Demler, Pencina, and D'Agostino, Stat Med 2012). Test
+      whether the new predictor is associated with the outcome, and only then report the change
+      in AUROC with a CI.
+
+  - type: image
+    image: m08-01-paired-difference.png
+    caption: |
+      Simulated, one dataset (4,000 patients, about 550 events). The two models' separate CIs
+      overlap by a lot. The paired bootstrap CI for the difference (B minus A) excludes 0,
+      because the two estimates move together from resample to resample.
+
+  - type: quiz
+    question: |
+      On the same test patients, model A has AUROC 0.720 (95% CI 0.700–0.740) and model B has
+      0.735 (0.715–0.755). A reviewer says "the intervals overlap, so there is no evidence B is
+      better." What is the best response?
+    options:
+      - "Correct: overlapping intervals mean the difference is not significant"
+      - "Incorrect: overlap means B is significantly better, because both intervals exclude 0.5"
+      - Overlap alone cannot settle it; compute the paired difference and its CI on the same resamples
+      - Widen both intervals to 99% so that the comparison becomes conservative
+    answer: 2
+    explanation: |
+      Because A and B are scored on the same patients, the paired difference usually has a much
+      smaller standard error than the separate intervals imply, so a significant difference can
+      hide behind overlapping intervals (the figure). The reverse is safe: if two intervals from
+      the same patients do not overlap, the difference is significant. Both excluding 0.5 says
+      each model beats chance, not that B beats A. Widening to 99% does not fix the
+      unpaired-versus-paired mismatch.
+
+  - type: text
+    title: Significant is not useful
+    text: |
+      Even a correct paired CI answers only "is the difference nonzero?". A 0.01 AUROC gain can
+      be statistically clear in 50,000 patients and operationally meaningless.
+
+      Better practice:
+
+      - **Pre-specify** the smallest difference you would act on (a margin) before you see
+        results, the same way a trial pre-specifies a non-inferiority margin.
+      - Compare at the **operating point**: PPV at the alert budget, extra true positives per
+        month, net benefit at the clinical threshold. A model with a slightly lower AUROC can win
+        here.
+      - Compare **calibration** too. A better-ranking model with slope 0.6 can cause more harm
+        than a simpler, well-calibrated one.
+      - Prefer the simpler model when the CI for the difference includes your margin. Module 02's
+        GBM-versus-network question is exactly this.
+
+  - type: text
+    title: What a CI means, and what a credible interval adds
+    text: |
+      "95%" is a property of the **procedure**: across many repeated validation studies, 95% of
+      intervals built this way would contain the true AUROC. The one interval in your paper either
+      contains it or not. Percentile bootstrap intervals have that property only approximately,
+      as the figure showed.
+
+      What a clinical partner hears is the **credible-interval** reading: "there is a 95% chance
+      the true value lies in this range." That statement needs a prior and a model, and the
+      bootstrap does not give it. A Bayesian interval does, in the last lesson of this module.
+
+      For most model-card work, the honest move is to keep the frequentist wording ("95% CI") and
+      not translate it into a probability statement about the parameter. The numbers are often
+      close, but the claims differ.
+
+  - type: quiz
+    question: |
+      Which statement is the correct reading of "AUROC 0.71, 95% bootstrap CI 0.69–0.73"?
+    options:
+      - There is a 95% probability that the model's true AUROC lies between 0.69 and 0.73
+      - 95% of individual patients have a risk ranking consistent with an AUROC in that range
+      - The model will score between 0.69 and 0.73 at the next hospital with 95% probability
+      - Intervals constructed this way contain the true AUROC of the sampled population in about 95% of repeated studies
+    answer: 3
+    explanation: |
+      The CI is a statement about the long-run behaviour of the procedure for this population.
+      The first option is the credible-interval reading and needs a prior. The second confuses a
+      population metric with individual patients. The third extends the claim to another hospital,
+      which is exactly what a CI from one validation set cannot do.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A realistic failure (invented numbers, typical pattern).
+
+      A team externally validates the readmission model at a partner health system. They score
+      every discharge: 41,000 encounters from about 9,300 patients across 5 hospitals. The report
+      says "AUROC 0.70 (95% CI 0.69–0.71)", computed with a row-level bootstrap. Model B, the
+      team's new version, is "0.72 (0.71–0.73), which does not overlap A's upper limit, so B is
+      better".
+
+      Three separate mistakes:
+
+      - **Wrong unit.** The row-level bootstrap ignores that patients contribute repeatedly, so
+        the intervals are too narrow.
+      - **Wrong target.** One pooled interval says nothing about the **5 hospitals**. If their
+        individual AUROCs range from 0.64 to 0.75, the heterogeneity across sites is the real
+        finding, and the pooled CI hides it.
+      - **Wrong comparison.** Even with correct intervals, "B's interval doesn't include A's
+        point estimate" is not the right test. The paired difference is.
+
+      Each mistake makes the result look more certain than it is.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A colleague reports a test AUROC of 0.78 with a 95% CI of 0.77 to 0.79, from 40,000
+      encounters belonging to about 9,000 patients. How would you check that interval?"
+    model_answer: |
+      The 20-second version: I'd ask how the interval was computed and what the resampling unit
+      was. With 40,000 encounters from 9,000 patients the rows aren't independent, so a row-level
+      bootstrap would be too narrow. I'd want a patient-level, or cluster, bootstrap.
+
+      The deeper version: I'd rerun it resampling patients, compute many metrics on the same
+      resamples, and compare the width with the row-level one. If patients contribute unevenly,
+      or sicker patients have more encounters, the gap can be large. I'd also ask what the
+      interval claims. If the goal is generalization to other hospitals, patient-level resampling
+      still covers only sampling noise in this hospital, so I'd report site-level results and the
+      spread between sites, and cluster by site if I want a single claim. Finally I'd check
+      that the train and test sets were split by patient, because if the same patient is on both
+      sides, the AUROC itself is inflated and no interval repairs that.
+    key_points:
+      - Identifies the resampling unit as the main question, and that repeated encounters make row-level intervals too narrow
+      - Proposes a patient (cluster) bootstrap, and compares it with the row-level width
+      - Separates sampling error from between-site heterogeneity and drift
+      - Checks the split is by patient, since leakage across the split inflates the point estimate
+
+  - type: think
+    interview: true
+    prompt: |
+      "Model B has a test AUROC of 0.74 and our current model A has 0.72, on the same patients.
+      How do you decide whether B is actually better?"
+    model_answer: |
+      The 20-second version: I'd compute a paired, patient-level bootstrap CI for the difference in
+      AUROC, and I wouldn't decide on AUROC alone. Overlapping separate intervals can't answer
+      it.
+
+      The deeper version: before looking, I'd agree the smallest difference we'd act on, and the
+      metric that reflects how the model is used, such as PPV at the alert budget or net benefit at
+      the clinical threshold. Then I'd resample patients once per replicate and compute the
+      difference in every metric on those same resamples. I'd check calibration for both models,
+      because a model can rank slightly better and be worse calibrated. If the CI for the
+      difference includes the margin, I'd keep the simpler or cheaper model, and I'd want a
+      silent prospective run to confirm. If B is A plus one new predictor fitted on the same data,
+      I'd test the predictor directly and not use DeLong on the AUROCs.
+    key_points:
+      - Uses a paired bootstrap (or DeLong for AUROC only) on the same patients, not overlap of separate CIs
+      - Pre-specifies a meaningful margin and looks at the operating-point metric
+      - Compares calibration as well as discrimination
+      - Prefers the simpler model when the difference CI includes the margin
+      - Notes the nested-model caveat for DeLong
+
+  - type: laptop
+    title: A patient-level evaluation report with intervals
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/bootstrap.py
+    task: |
+      Create `bootstrap.py` next to `calibration.py`. Implement `cluster_ci` (as in this lesson)
+      so that one set of resampled patient indices is used for AUROC, calibration slope,
+      calibration-in-the-large, and Brier score. Run it on the readmission model's test
+      predictions and print one table with event counts.
+
+      Then (1) add a paired difference between the logistic-regression baseline and your best
+      model, and (2) write a small simulation that gives each patient several rows and compares
+      row-level against patient-level coverage. Check that with exactly one row per patient the
+      two agree.
+
+  - type: recap
+    points:
+      - "An interval describes **sampling error in this validation set**, not drift, site differences, or label noise"
+      - "Name the bootstrap question: fixed-model CI, procedure stability, or optimism correction"
+      - Resample the **patient**, not the row, whenever patients contribute several rows; row-level intervals are too narrow
+      - Small subgroups give honest, very wide intervals; show event counts and treat wide as "unknown"
+      - Percentile and BCa agree in easy cases; use BCa for skewed or boundary-hugging statistics
+      - Optimism correction repeats the **entire** pipeline, including tuning, inside every resample
+      - "Compare models with a **paired** bootstrap on the same patients; overlapping intervals prove nothing"
+      - Report calibration slope, Brier, and an operating-point metric with CIs, and pre-specify the margin that matters

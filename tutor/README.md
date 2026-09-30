@@ -9,9 +9,9 @@ or add to it. Clone the repo, add your own Telegram bot token, and you have your
 
 ## What it does
 
-- **A continuous path.** 8 modules, 41 lessons, from clinical data engineering and SQL to
-  PyTorch, production ML, trials and survival analysis, LLM evaluation, standards and privacy,
-  and system-design interviews. Tap **Continue** to move on and stop whenever you like.
+- **A continuous path.** 12 modules, 55 lessons, from clinical data engineering and SQL to
+  missing data, PyTorch, statistics, medical imaging, production ML, trials and survival
+  analysis, clinical NLP, LLM evaluation, standards and privacy, and system-design interviews. Tap **Continue** to move on and stop whenever you like.
   `/continue` picks up where you left off, with a short recap if you've been away.
 - **Active learning.** Quick-check quizzes (with explanations), code-reading questions, and open
   "think it through" and interview questions that you answer in your own words.
