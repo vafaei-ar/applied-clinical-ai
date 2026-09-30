@@ -152,19 +152,45 @@ LESSON_SCHEMA = {
 }
 
 
+PROFILE_INSTRUCTIONS = """
+<learner_profile_usage>
+The learner has shared a private profile of their background (below). Use it to calibrate:
+- Skip explanations of things listed under strengths; go straight to trade-offs, pitfalls, and
+  what is different in clinical or industry settings.
+- Bridge new ideas to their experience where the analogy is genuinely accurate; drop it if it
+  isn't. Don't flatter, and don't recite their background back to them.
+- Spend the time on the "less practiced" areas and on interview-style framing.
+- Treat the "less practiced" list as a hypothesis: if they show fluency, update accordingly.
+</learner_profile_usage>
+"""
+
+MAX_PROFILE_CHARS = 6000
+
+
 class Tutor:
-    def __init__(self, api_key: str, model: str, effort: str = "medium", language: str = "English"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        effort: str = "medium",
+        language: str = "English",
+        profile: str | None = None,
+    ):
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.model = model
         self.effort = effort
         self.language = language
+        self.profile = (profile or "").strip()[:MAX_PROFILE_CHARS] or None
 
     def _system(self) -> str:
-        if self.language.lower() == "english":
-            return TUTOR_SYSTEM
-        return TUTOR_SYSTEM + (
-            f"\nReply in {self.language}. Keep technical terms, code, and SQL in English."
-        )
+        system = TUTOR_SYSTEM
+        if self.language.lower() != "english":
+            system += f"\nReply in {self.language}. Keep technical terms, code, and SQL in English."
+        if self.profile:
+            system += (
+                f"{PROFILE_INSTRUCTIONS}\n<learner_profile>\n{self.profile}\n</learner_profile>\n"
+            )
+        return system
 
     async def _call(
         self,

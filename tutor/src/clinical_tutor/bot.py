@@ -15,7 +15,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -45,6 +45,7 @@ COMMANDS = [
     BotCommand(command="quiz", description="Fresh questions on this lesson"),
     BotCommand(command="later", description="Laptop to-do list"),
     BotCommand(command="progress", description="Your stats"),
+    BotCommand(command="report", description="Flag a problem with the current step"),
     BotCommand(command="help", description="How this works"),
 ]
 
@@ -175,6 +176,12 @@ def build_router(engine: Engine, bot: Bot) -> Router:
     async def on_progress(message: Message) -> None:
         await send(bot, message.chat.id, await engine.progress(message.from_user.id))
 
+    @router.message(Command("report"))
+    async def on_report(message: Message, command: CommandObject) -> None:
+        await send(
+            bot, message.chat.id, await engine.report(message.from_user.id, command.args or "")
+        )
+
     @router.message(F.text)
     async def on_text(message: Message) -> None:
         await typing(message.chat.id)
@@ -201,7 +208,7 @@ def build_router(engine: Engine, bot: Bot) -> Router:
         kind, _, rest = data.partition(":")
         args = [int(x) for x in rest.split(":") if x.lstrip("-").isdigit()] if rest else []
 
-        if kind in {"d", "mq", "iv", "ivg", "n", "L", "go"}:
+        if kind in {"d", "mq", "iv", "ivg", "n", "L", "go", "tq"}:
             await typing(chat_id)
         if kind == "n" and len(args) == 2:
             outs = await engine.advance(uid, args[0], args[1], notifier(chat_id))
@@ -233,13 +240,26 @@ def build_router(engine: Engine, bot: Bot) -> Router:
             outs = await engine.jump(uid, args[0], notifier(chat_id))
         elif kind == "ld" and len(args) == 1:
             outs = await engine.finish_later(uid, args[0])
+        elif kind == "tt" and len(args) == 1:
+            outs = await engine.test_out(uid, args[0])
+        elif kind == "tq" and len(args) == 1:
+            outs = await engine.test_next(uid, args[0])
+        elif kind == "f" and len(args) == 2:
+            outs = await engine.flag_menu(uid, args[0], args[1])
+        elif kind == "fr" and len(args) == 3:
+            outs = await engine.flag(uid, args[0], args[1], args[2])
+        elif kind == "fx":
+            outs = []
+            if message is not None:
+                with contextlib.suppress(TelegramBadRequest):
+                    await message.delete()
         else:
             outs = []
 
         # Buttons on a lesson message are spent once used; remove them to keep the chat tidy.
         if (
             message is not None
-            and kind in {"n", "rv", "sk", "sr", "go"}
+            and kind in {"n", "rv", "sk", "sr", "go", "tt", "tq"}
             and not any(o.edit for o in outs)
         ):
             with contextlib.suppress(TelegramBadRequest):
@@ -267,12 +287,15 @@ async def main(course_dir: Path) -> None:
     allowed = settings.allowed_ids
     course = load_course(course_dir)
     store = await Store(settings.data_dir / "tutor.sqlite3").open()
+    profile_path = settings.data_dir / "profile.md"
+    profile = profile_path.read_text(encoding="utf-8") if profile_path.is_file() else None
     tutor = (
         Tutor(
             settings.anthropic_api_key,
             settings.tutor_model,
             settings.tutor_effort,
             settings.tutor_language,
+            profile,
         )
         if settings.anthropic_api_key
         else None
@@ -287,9 +310,10 @@ async def main(course_dir: Path) -> None:
     await bot.set_my_commands(COMMANDS)
 
     log.info(
-        "Course loaded: %d lessons. AI tutor: %s. Allowed users: %s",
+        "Course loaded: %d lessons. AI tutor: %s%s. Allowed users: %s",
         len(course.order),
         f"on ({settings.tutor_model})" if tutor else "off",
+        ", personalized from data/profile.md" if tutor and tutor.profile else "",
         sorted(allowed),
     )
     tasks = []

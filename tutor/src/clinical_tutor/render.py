@@ -44,6 +44,7 @@ def check_html(rendered: str) -> list[str]:
         problems.append(f"{visible} visible characters (Telegram limit {TELEGRAM_LIMIT})")
     return problems
 
+
 _FENCE = re.compile(r"```([\w+-]*)\n(.*?)```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)

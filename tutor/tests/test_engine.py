@@ -150,3 +150,141 @@ async def test_nudge_once_per_quiet_period(make_engine, store):
     first = await engine.nudges()
     assert len(first) == 1 and first[0][0] == UID
     assert await engine.nudges() == []
+
+
+async def test_flag_and_report_flow(make_engine, store):
+    engine = make_engine()
+    outs = await engine.start(UID, None)
+    outs = await engine.advance(UID, *_continue(outs))  # header
+    outs = await engine.advance(UID, *_continue(outs))  # step 1 (text)
+    flag = next(d for d in _button_data(outs) if d.startswith("f:"))
+    _, li, item = flag.split(":")
+    menu = await engine.flag_menu(UID, int(li), int(item))
+    reasons = [b.data for row in menu[0].buttons for b in row if b.data.startswith("fr:")]
+    assert len(reasons) == 5
+    _, _, _, code = reasons[1].split(":")
+    done = await engine.flag(UID, int(li), int(item), int(code))
+    assert done[0].edit and "Saved" in done[0].text
+
+    empty = await engine.report(UID, "  ")
+    assert "/report" in empty[0].text
+    await engine.report(UID, "the wording here is confusing")
+    rows = await (
+        await store.db.execute("SELECT lesson_id, item, reason, note FROM feedback")
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("m01-01-alpha", 1, "wrong", None),
+        ("m01-01-alpha", 1, "note", "the wording here is confusing"),
+    ]
+    assert await engine.flag(UID, 99, 1, 0) == []  # bad lesson index is ignored
+
+
+async def test_quiz_result_offers_flag_on_the_quiz_step(make_engine):
+    engine = make_engine()
+    outs = await engine.start(UID, None)
+    for _ in range(3):
+        outs = await engine.advance(UID, *_continue(outs))  # header, text, quiz
+    quiz_id = int(next(d for d in _button_data(outs) if d.startswith("a:")).split(":")[1])
+    result = await engine.answer_quiz(UID, quiz_id, 1)
+    flag = next(d for d in _button_data(result) if d.startswith("f:"))
+    assert flag == "f:0:2"  # lesson 0, step 2 (the quiz)
+
+
+async def test_stats_report(make_engine, store, tmp_path):
+    from clinical_tutor.stats import build_report
+
+    tutor = FakeTutor()
+    engine = make_engine(tutor)
+    outs = await engine.start(UID, None)
+    for _ in range(3):
+        outs = await engine.advance(UID, *_continue(outs))
+    quiz_id = int(next(d for d in _button_data(outs) if d.startswith("a:")).split(":")[1])
+    await engine.answer_quiz(UID, quiz_id, 2)  # wrong: picks C
+    await engine.text(UID, "why is B right?")
+    await engine.report(UID, "explanation is thin")
+
+    report = build_report(engine.course, tmp_path / "db.sqlite3")
+    assert "Learners: 1" in report
+    assert "m01-01-alpha#2 [quiz] Pick B" in report
+    assert "most-picked wrong option C (1x; correct is B)" in report
+    assert "1x m01-01-alpha#2" in report  # the question is logged against the step being read
+    assert 'note: "explanation is thin"' in report
+    assert "no learner data" in build_report(engine.course, tmp_path / "missing.sqlite3").lower()
+
+
+async def test_stats_tolerates_database_from_before_feedback_tables(make_engine, tmp_path):
+    import sqlite3
+
+    from clinical_tutor.stats import build_report
+
+    engine = make_engine()
+    await engine.start(UID, None)
+    db = sqlite3.connect(tmp_path / "db.sqlite3")
+    db.executescript("DROP TABLE feedback; DROP TABLE questions;")
+    db.close()
+    report = build_report(engine.course, tmp_path / "db.sqlite3")
+    assert "FLAGGED STEPS" in report and "none" in report
+
+
+async def _at_gamma_header(engine):
+    outs = await engine.jump(UID, 2)  # lesson index 2 = gamma; shows its header
+    return outs
+
+
+async def test_header_offers_test_out_only_with_enough_quizzes(make_engine):
+    engine = make_engine()
+    await engine.start(UID, None)
+    gamma = await _at_gamma_header(engine)
+    assert "tt:2" in _button_data(gamma)
+    alpha = await engine.jump(UID, 0)  # only one quiz
+    assert not any(d.startswith("tt:") for d in _button_data(alpha))
+
+
+async def _answer_testout(engine, outs, chooser):
+    """Answer each test-out question; returns the outputs after the final 'See result'."""
+    while True:
+        datas = _button_data(outs)
+        answers = [d for d in datas if d.startswith("a:")]
+        assert answers, datas
+        qid = int(answers[0].split(":")[1])
+        record = await engine.store.get_quiz(qid)
+        result = await engine.answer_quiz(UID, qid, chooser(record.payload["answer"]))
+        outs = await engine.test_next(UID, qid)
+        assert result[0].edit
+        if not any(d.startswith("a:") for d in _button_data(outs)):
+            return outs
+
+
+async def test_test_out_pass_completes_the_lesson(make_engine, store):
+    engine = make_engine()
+    await engine.start(UID, None)
+    await _at_gamma_header(engine)
+    outs = await engine.test_out(UID, 2)
+    assert "Test-out</b> 1/3" in outs[0].text
+    final = await _answer_testout(engine, outs, lambda correct: correct)
+    assert "Tested out" in final[0].text and "3/3" in final[0].text
+    assert "m01-03-gamma" in await store.completed_lessons(UID)
+    assert await store.review_counts(UID) == (0, 0, None)  # nothing missed
+
+
+async def test_test_out_fail_sends_learner_to_the_lesson(make_engine, store):
+    engine = make_engine()
+    await engine.start(UID, None)
+    await _at_gamma_header(engine)
+    outs = await engine.test_out(UID, 2)
+    final = await _answer_testout(engine, outs, lambda correct: (correct + 1) % 3)
+    assert "0/3" in final[0].text and "worth doing" in final[0].text
+    assert "m01-03-gamma" not in await store.completed_lessons(UID)
+    _, total, _ = await store.review_counts(UID)
+    assert total == 3  # every miss is queued for spaced review
+    start = next(d for d in _button_data(final) if d.startswith("n:"))
+    outs = await engine.advance(UID, *map(int, start.split(":")[1:]))
+    assert "Intro." in outs[0].text  # the full lesson starts from step 1
+
+
+async def test_test_out_is_ignored_when_stale(make_engine):
+    engine = make_engine()
+    await engine.start(UID, None)
+    await _at_gamma_header(engine)
+    outs = await engine.test_out(UID, 0)  # a card for a different lesson
+    assert "out of date" in outs[0].text

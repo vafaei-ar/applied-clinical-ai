@@ -49,6 +49,33 @@ LESSON_B = {
 }
 
 
+def _quiz(question: str, answer: int) -> dict:
+    return {
+        "type": "quiz",
+        "question": question,
+        "options": ["A-opt", "B-opt", "C-opt"],
+        "answer": answer,
+        "explanation": "Because.",
+    }
+
+
+LESSON_C = {
+    "id": "m01-03-gamma",
+    "title": "Gamma",
+    "summary": "Has three quizzes so it can be tested out of.",
+    "why_it_matters": "Because.",
+    "objectives": ["Learn gamma"],
+    "steps": [
+        {"type": "text", "text": "Intro."},
+        _quiz("Q1", 0),
+        _quiz("Q2", 1),
+        {"type": "text", "text": "More."},
+        _quiz("Q3", 2),
+        {"type": "recap", "points": ["done"]},
+    ],
+}
+
+
 @pytest.fixture
 def course_dir(tmp_path: Path) -> Path:
     root = tmp_path / "course"
@@ -64,7 +91,7 @@ def course_dir(tmp_path: Path) -> Path:
                         "id": "m01",
                         "title": "Module one",
                         "summary": "Summary.",
-                        "lessons": ["m01-01-alpha", "m01-02-beta"],
+                        "lessons": ["m01-01-alpha", "m01-02-beta", "m01-03-gamma"],
                     }
                 ],
             }
@@ -72,6 +99,7 @@ def course_dir(tmp_path: Path) -> Path:
     )
     (root / "m01" / "m01-01-alpha.yaml").write_text(yaml.safe_dump(LESSON_A))
     (root / "m01" / "m01-02-beta.yaml").write_text(yaml.safe_dump(LESSON_B))
+    (root / "m01" / "m01-03-gamma.yaml").write_text(yaml.safe_dump(LESSON_C))
     return root
 
 

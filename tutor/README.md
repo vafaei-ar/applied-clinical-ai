@@ -17,6 +17,9 @@ or add to it. Clone the repo, add your own Telegram bot token, and you have your
   "think it through" and interview questions that you answer in your own words.
 - **Spaced review.** Anything you miss comes back after 1, 3, 7, and 21 days (`/review`).
   Interview questions come back even when you get them right.
+- **Test out of what you know.** Every lesson header has **⚡ Test me first**: 4 to 5 of the
+  lesson's hardest quiz questions. Pass (at most one miss) and the lesson is marked complete;
+  miss and the questions are queued for review and you start the lesson.
 - **Laptop queue.** Coding tasks that need a computer land in `/later` with the repo path.
 - **Mock interviews.** `/interview` asks questions from the lessons you've covered.
 - **A daily nudge** (optional) if you've been away for a day.
@@ -31,6 +34,11 @@ With an Anthropic API key, the **AI tutor** also turns on:
 - `/interview` can invent new questions on the topics you've covered.
 - Lessons that haven't been written yet (`status: seed`) are **drafted automatically** the first
   time you reach them and cached in `data/generated/`.
+
+**Personalize it.** Put a short description of your background in `data/profile.md` (strengths to
+treat as known, areas you want to build, how you like to learn). The AI tutor reads it to skip
+what you already know and bridge from your experience. That folder is gitignored, so it stays on
+your computer.
 
 Without a key, everything authored still works. Open questions show a model answer and you rate
 yourself.
@@ -87,6 +95,7 @@ it comes back. For 24/7 availability, run the same commands on any small Linux s
 | `/quiz` | Fresh questions on the current lesson (AI tutor) |
 | `/later` | Your laptop to-do list |
 | `/progress` | Lessons completed, quiz accuracy, reviews due |
+| `/report <note>` | Flag a problem with the step you're on (or tap 🚩 under any step) |
 
 ## Costs and privacy
 
@@ -97,6 +106,21 @@ it comes back. For 24/7 availability, run the same commands on any small Linux s
   for cost. The requests opt into Anthropic's server-side fallback, so a declined request is
   retried on another model automatically.
 - The course uses synthetic data only. Don't send real patient information to the bot.
+
+## Improving the course from real usage
+
+Tap **🚩** under any step (or send `/report your note`) to flag a step as confusing, wrong, a typo,
+too easy, or too hard. Then see where the course needs work:
+
+```bash
+.venv/bin/clinical-tutor stats
+```
+
+The report lists where learners currently are, the quiz steps with the lowest first-attempt
+accuracy and the wrong option picked most often (a step everyone misses may have a bad key or a
+misleading distractor), open questions with low scores, the steps that drew tutor questions or
+"Go deeper" taps, every flagged step with its notes, and the review backlog. It reads only the
+local database; nothing is uploaded.
 
 ## Contributing lessons
 
@@ -127,6 +151,7 @@ tutor/
 │   ├── llm.py              # AI tutor (Anthropic API)
 │   ├── bot.py              # Telegram transport (aiogram, long polling)
 │   ├── store.py            # SQLite persistence
+│   ├── stats.py            # usage report (clinical-tutor stats)
 │   ├── render.py, steps.py # Markdown → Telegram HTML, step rendering
 │   └── cli.py              # run / validate / outline / preview
 ├── deploy/                 # macOS background service

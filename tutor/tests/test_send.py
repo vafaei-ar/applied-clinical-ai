@@ -18,7 +18,8 @@ class StubBot:
     async def send_message(self, chat_id, text, parse_mode="default", reply_markup=None):
         if self.reject_html and parse_mode == "default":
             raise TelegramBadRequest(
-                method=SendMessage(chat_id=chat_id, text=text), message="Bad Request: can't parse entities"
+                method=SendMessage(chat_id=chat_id, text=text),
+                message="Bad Request: can't parse entities",
             )
         self.sent.append({"kind": "text", "text": text, "markup": reply_markup})
 

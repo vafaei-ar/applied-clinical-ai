@@ -86,6 +86,10 @@ Limits (enforced by the validator): `text` ≤ 3200 characters, `code` ≤ 2800,
 
 ### Quizzes that teach
 
+A lesson's quiz steps double as its **test-out**: learners can tap "Test me first" and skip the
+lesson by answering 4 to 5 of them well. So the quizzes as a set should cover the lesson's key
+ideas, and include some genuinely hard ones. A lesson needs at least two quizzes to offer test-out.
+
 - Distractors should be the mistakes people actually make, not obviously silly options.
 - The `explanation` explains why the right answer is right **and** why the tempting wrong one is wrong.
 - Vary the position of the correct answer.

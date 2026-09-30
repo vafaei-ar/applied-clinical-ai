@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("run", help="start the Telegram bot")
     sub.add_parser("validate", help="validate every lesson in the course")
     sub.add_parser("outline", help="print the course outline")
+    stats = sub.add_parser(
+        "stats", help="usage report: hardest quizzes, flags, where learners stop"
+    )
+    stats.add_argument("--data-dir", type=Path, default=Path("./data"))
+    stats.add_argument("--min-attempts", type=int, default=1)
     preview = sub.add_parser("preview", help="print a lesson as Telegram HTML")
     preview.add_argument("lesson_id")
     args = parser.parse_args(argv)
@@ -72,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         return _outline(args.course)
     if args.command == "preview":
         return _preview(args.course, args.lesson_id)
+    if args.command == "stats":
+        from .stats import DB_NAME, build_report
+
+        print(build_report(load_course(args.course), args.data_dir / DB_NAME, args.min_attempts))
+        return 0
 
     from .bot import run
 

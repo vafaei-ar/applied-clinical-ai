@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -56,6 +57,16 @@ Notify = Callable[[str], Awaitable[None]]
 WELCOME_BACK_AFTER = 3 * 3600
 NUDGE_QUIET_PERIOD = 20 * 3600
 SCORE_DOTS = ["○○○", "●○○", "●●○", "●●●"]
+TESTOUT_MAX_QUESTIONS = 5
+TESTOUT_PASS_FRACTION = 0.8
+# (stored reason, button label). Order matters: the index is carried in the callback data.
+FLAG_REASONS = [
+    ("confusing", "😕 Confusing or unclear"),
+    ("wrong", "❌ Looks factually wrong"),
+    ("typo", "✏️ Typo or formatting"),
+    ("too_easy", "🥱 Too easy"),
+    ("too_hard", "🤯 Too hard, needs more setup"),
+]
 CONTINUE_WORDS = {"next", "n", "continue", "c", "go", "ok", "▶", "resume"}
 
 
@@ -362,7 +373,8 @@ class Engine:
         nav = Button("Continue ▶", f"n:{index}:{next_cursor}")
         extras: list[Button] = []
         if self.tutor is not None and not isinstance(step, (RecapStep, LaptopStep)):
-            extras = [Button("🔍 Go deeper", f"d:{index}:{item}")]
+            extras.append(Button("🔍 Go deeper", f"d:{index}:{item}"))
+        extras.append(Button("🚩", f"f:{index}:{item}"))
 
         if isinstance(step, QuizStep):
             quiz_id = await self.store.log_quiz(
@@ -397,7 +409,7 @@ class Engine:
         progress = f"\n\n<i>{item}/{len(lesson.steps)}</i>" if item % 5 == 0 else ""
         last = outs[-1]
         last.text += progress
-        last.buttons = [[nav, *extras]] if extras else [[nav]]
+        last.buttons = [[nav, *extras]]
         return outs
 
     def _header(self, lesson: Lesson, index: int, n_steps: int) -> Out:
@@ -412,7 +424,10 @@ class Engine:
             f"⏱ ~{lesson.minutes} min · {n_steps} steps · course "
             f"{progress_bar(index, len(self.course.order))} {index}/{len(self.course.order)}"
         )
-        return Out(text, [[Button("Start ▶", f"n:{index}:1")]])
+        row = [Button("Start ▶", f"n:{index}:1")]
+        if len(self._testout_items(lesson)) >= 2:
+            row.append(Button("⚡ Test me first", f"tt:{index}"))
+        return Out(text, [row])
 
     async def _complete(self, user: User, lesson: Lesson) -> list[Out]:
         await self.store.complete_lesson(user.user_id, lesson.id)
@@ -466,7 +481,12 @@ class Engine:
     async def _continuation(self, user_id: int, ctx: dict[str, Any]) -> list[list[Button]]:
         kind = ctx.get("kind")
         if kind == "lesson":
-            return [[Button("Continue ▶", f"n:{ctx['li']}:{ctx['cursor']}")]]
+            return [
+                [
+                    Button("Continue ▶", f"n:{ctx['li']}:{ctx['cursor']}"),
+                    Button("🚩", f"f:{ctx['li']}:{ctx['cursor'] - 1}"),
+                ]
+            ]
         if kind == "review":
             return [[Button("Next review ▶", "rev"), Button("Back to lesson", "go")]]
         if kind == "interview":
@@ -501,11 +521,99 @@ class Engine:
             await self.store.set_awaiting(user_id, None)
 
         header = "🔁 <b>Review</b>" if kind == "review" else "🧩 <b>Quick check</b>"
+        if kind == "testout":
+            header = self._testout_header(ctx)
         text = quiz_result_text(step, choice, header)
         if not correct and kind != "review":
             text += "\n\n<i>🔁 Added to your spaced review.</i>"
-        buttons = [] if kind == "extra" else await self._continuation(user_id, ctx)
+        if kind == "extra":
+            buttons: list[list[Button]] = []
+        elif kind == "testout":
+            last = ctx["pos"] + 1 >= len(ctx["items"])
+            label = "See result ▶" if last else "Next question ▶"
+            buttons = [[Button(label, f"tq:{quiz_id}")]]
+        else:
+            buttons = await self._continuation(user_id, ctx)
         return [Out(text, buttons, edit=True)]
+
+    # --- test-out -----------------------------------------------------------------------------
+
+    def _testout_items(self, lesson: Lesson) -> list[int]:
+        """Step numbers (1-based) of the quiz questions used to test out, spread across the lesson."""
+        quizzes = [i for i, step in enumerate(lesson.steps, 1) if isinstance(step, QuizStep)]
+        if len(quizzes) <= TESTOUT_MAX_QUESTIONS:
+            return quizzes
+        last = TESTOUT_MAX_QUESTIONS - 1
+        picks = {
+            quizzes[round(k * (len(quizzes) - 1) / last)] for k in range(TESTOUT_MAX_QUESTIONS)
+        }
+        return sorted(picks)
+
+    @staticmethod
+    def _testout_header(ctx: dict[str, Any]) -> str:
+        return f"⚡ <b>Test-out</b> {ctx['pos'] + 1}/{len(ctx['items'])}"
+
+    async def _testout_question(
+        self, user_id: int, lesson: Lesson, li: int, items: list[int], pos: int, right: int
+    ) -> Out:
+        step = lesson.steps[items[pos] - 1]
+        assert isinstance(step, QuizStep)
+        ctx = {"kind": "testout", "li": li, "items": items, "pos": pos, "right": right}
+        quiz_id = await self.store.log_quiz(
+            user_id, f"{lesson.id}#{items[pos]}", ctx, step.model_dump()
+        )
+        await self.store.set_awaiting(user_id, {"kind": "quiz", "quiz_id": quiz_id})
+        return self._quiz_out(step, quiz_id, header=self._testout_header(ctx))
+
+    async def test_out(self, user_id: int, lesson_index: int) -> list[Out]:
+        """Offer a short, hard quiz drawn from the lesson; passing it marks the lesson complete."""
+        user = await self._user(user_id)
+        await self.store.touch(user_id)
+        if not 0 <= lesson_index < len(self.course.order):
+            return []
+        lesson_id = self.course.order[lesson_index]
+        if user.lesson_id != lesson_id or user.cursor != 1:
+            return [Out("That lesson card is out of date. Here's where you are 👇")] + (
+                await self._show_next(user)
+            )
+        lesson = await self.lesson(lesson_id)
+        items = self._testout_items(lesson)
+        if not items:
+            return [
+                Out(
+                    "This lesson has no quiz questions to test out with.",
+                    [[Button("Start ▶", f"n:{lesson_index}:1")]],
+                )
+            ]
+        return [await self._testout_question(user_id, lesson, lesson_index, items, 0, 0)]
+
+    async def test_next(self, user_id: int, quiz_id: int) -> list[Out]:
+        record = await self.store.get_quiz(quiz_id)
+        if record is None or record.user_id != user_id or record.chosen is None:
+            return []
+        ctx = record.context
+        if ctx.get("kind") != "testout":
+            return []
+        correct = record.chosen == record.payload["answer"]
+        right = ctx["right"] + int(correct)
+        pos, items, li = ctx["pos"] + 1, ctx["items"], ctx["li"]
+        lesson = await self.lesson(self.course.order[li])
+        if pos < len(items):
+            return [await self._testout_question(user_id, lesson, li, items, pos, right)]
+
+        need = math.ceil(TESTOUT_PASS_FRACTION * len(items))
+        if right >= need:
+            user = await self._user(user_id)
+            outs = await self._complete(user, lesson)
+            outs[0].text = (
+                f"⚡ <b>Tested out</b> ({right}/{len(items)} correct).\n\n" + outs[0].text
+            )
+            return outs
+        text = (
+            f"⚡ <b>{right}/{len(items)}</b> correct. You need {need} to skip this lesson, so it's "
+            "worth doing. The ones you missed are queued for spaced review."
+        )
+        return [Out(text, [[Button("Start the lesson ▶", f"n:{li}:1")]])]
 
     async def more_questions(self, user_id: int) -> list[Out]:
         user = await self._user(user_id)
@@ -558,6 +666,7 @@ class Engine:
             return [Out(f"⚠️ {escape(str(exc))}", [[self._nav(user)]])]
         await self.store.add_chat(user_id, "user", text)
         await self.store.add_chat(user_id, "assistant", reply)
+        await self.store.log_question(user_id, user.lesson_id, max(0, user.cursor - 1), "ask", text)
         return [Out(md(reply), [[self._nav(user), Button("🧪 Quiz me", "mq")]])]
 
     async def _grade_think(self, user: User, awaiting: dict[str, Any], answer: str) -> list[Out]:
@@ -670,7 +779,50 @@ class Engine:
             return [Out(f"⚠️ {escape(str(exc))}", [[self._nav(user)]])]
         await self.store.add_chat(user_id, "user", "(Asked to go deeper on the current step.)")
         await self.store.add_chat(user_id, "assistant", reply)
+        await self.store.log_question(user_id, self.course.order[lesson_index], item, "deeper")
         return [Out(f"🔍 {md(reply)}", [[self._nav(user), Button("🧪 Quiz me", "mq")]])]
+
+    # --- feedback -----------------------------------------------------------------------------
+
+    async def flag_menu(self, user_id: int, lesson_index: int, item: int) -> list[Out]:
+        if not 0 <= lesson_index < len(self.course.order):
+            return []
+        lesson = self.course.lessons[self.course.order[lesson_index]]
+        rows = [
+            [Button(label, f"fr:{lesson_index}:{item}:{code}")]
+            for code, (_, label) in enumerate(FLAG_REASONS)
+        ]
+        rows.append([Button("✖ Cancel", "fx")])
+        text = (
+            f"🚩 <b>What's wrong with this step?</b>\n<i>{escape(lesson.title)}, step {item}</i>\n\n"
+            "Your report is saved on this computer and helps improve the lesson."
+        )
+        return [Out(text, rows)]
+
+    async def flag(self, user_id: int, lesson_index: int, item: int, code: int) -> list[Out]:
+        if not (0 <= lesson_index < len(self.course.order) and 0 <= code < len(FLAG_REASONS)):
+            return []
+        lesson_id = self.course.order[lesson_index]
+        await self.store.add_feedback(user_id, lesson_id, item, FLAG_REASONS[code][0])
+        text = "🚩 Saved. To add detail, send <code>/report your note</code> while you're on this step."
+        return [Out(text, edit=True)]
+
+    async def report(self, user_id: int, note: str) -> list[Out]:
+        """``/report <note>``: attach a free-text note to the step the learner is on."""
+        user = await self._user(user_id)
+        if not note.strip():
+            return [
+                Out(
+                    "Send <code>/report</code> followed by what's wrong or unclear, for example "
+                    "<code>/report the answer to the quiz seems wrong</code>. It attaches to the "
+                    "step you're on. You can also tap 🚩 under any step.",
+                    [[self._nav(user)]],
+                )
+            ]
+        await self.store.add_feedback(
+            user_id, user.lesson_id, max(0, user.cursor - 1), "note", note.strip()[:1000]
+        )
+        return [Out("🚩 Thanks, saved with your current step.", [[self._nav(user)]])]
 
     # --- spaced review ------------------------------------------------------------------------
 

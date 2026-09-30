@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS chat (
     content    TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS feedback (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    lesson_id  TEXT NOT NULL,
+    item       INTEGER NOT NULL,
+    reason     TEXT NOT NULL,
+    note       TEXT,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS questions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    lesson_id  TEXT NOT NULL,
+    item       INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    text       TEXT,
+    created_at REAL NOT NULL
+);
 """
 
 DAY = 86_400.0
@@ -376,6 +394,29 @@ class Store:
     async def finish_later(self, user_id: int, task_id: int) -> None:
         await self.db.execute(
             "UPDATE later SET done = 1 WHERE user_id = ? AND id = ?", (user_id, task_id)
+        )
+        await self.db.commit()
+
+    # feedback signals ------------------------------------------------------------------------
+
+    async def add_feedback(
+        self, user_id: int, lesson_id: str, item: int, reason: str, note: str | None = None
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO feedback (user_id, lesson_id, item, reason, note, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, lesson_id, item, reason, note, time.time()),
+        )
+        await self.db.commit()
+
+    async def log_question(
+        self, user_id: int, lesson_id: str, item: int, kind: str, text: str | None = None
+    ) -> None:
+        """Record that the learner asked the tutor about (or asked to go deeper on) a step."""
+        await self.db.execute(
+            "INSERT INTO questions (user_id, lesson_id, item, kind, text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, lesson_id, item, kind, text, time.time()),
         )
         await self.db.commit()
 
