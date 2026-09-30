@@ -31,12 +31,13 @@ steps:
 
       This pattern has a famous history. In the 1990s, observational studies suggested postmenopausal
       hormone therapy cut coronary heart disease risk. The Women's Health Initiative trial found no
-      such benefit. Much of the discrepancy was later traced to **design** rather than to data quality:
+      such benefit (for estrogen plus progestin, an early excess of events instead). Much of the
+      discrepancy was later traced to **design** rather than to data quality:
       the observational studies compared mostly long-term (prevalent) users, and when the data were
       re-analysed like a trial of new users, the results moved much closer to the WHI (Hernán et al.,
       Epidemiology 2008).
 
-      The lesson: most big observational errors are self-inflicted at the design stage. Target
+      The lesson: many big observational errors are self-inflicted at the design stage. Target
       trial emulation is the discipline that prevents them.
 
   - type: text
@@ -415,7 +416,9 @@ steps:
       landmark), defines recurrent stroke as a later `I63%` ED/inpatient encounter, fits IPTW with the
       balance check, and prints an SMD table and the effective sample size. Then rerun with follow-up from
       day 0 and compare the two hazard ratios, to see immortal time bias with your own eyes. (The data is
-      synthetic, so don't read clinical meaning into the size of the effect.)
+      synthetic, so don't read clinical meaning into the size of the effect. Expect very few initiators:
+      in the Module 01 database only a handful of new-user candidates start a statin within 30 days, so
+      widen the window or simulate initiation if the groups are too small to fit.)
 
   - type: recap
     points:

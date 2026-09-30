@@ -1,0 +1,24 @@
+id: m10-02-evaluation
+title: 'Evaluating imaging AI: metrics, test sets, and reader studies'
+summary: Classification, detection, and segmentation metrics and their pitfalls; test-set construction;
+  spectrum bias; shortcut learning; MRMC reader studies.
+minutes: 25
+status: seed
+why_it_matters: Imaging models get reported with flattering metrics. Being able to say what a fair evaluation
+  looks like is central to reviewing, regulating, and hiring.
+objectives:
+- 'Choose metrics per task: AUROC/AUPRC, FROC for detection, Dice/HD95/surface distance for segmentation'
+- Explain why Dice can hide clinically important errors
+- 'Build a test set: patient-level split, external sites, adjudicated reference standard, representative
+  case mix'
+- Recognize spectrum bias and shortcut learning (laterality markers, hospital tokens)
+- Describe a multi-reader multi-case study and what it shows about clinical utility
+key_points:
+- Report per-lesion and per-patient performance separately
+- An external test set from a new scanner vendor is more informative than a bigger internal one
+- Saliency maps are not validation
+- Standalone AUROC is not the same as improved reader performance
+tags:
+- imaging
+- evaluation
+- interview

@@ -182,8 +182,8 @@ steps:
       - Some chapters use a **7th character** for encounter type (for injuries, `A` initial,
         `D` subsequent, `S` sequela).
 
-      Only the most specific codes are **billable**, so the bare category `I63` never appears on
-      a real claim. That makes the hierarchy a **prefix tree**, and `LIKE 'I63%'` selects a whole
+      Only the most specific codes are **billable**, so a valid claim never carries the bare
+      category `I63`. That makes the hierarchy a **prefix tree**, and `LIKE 'I63%'` selects a whole
       subtree.
 
       Two neighbours to know: **ICD-10-PCS** is a separate system for _inpatient procedures_, and
@@ -216,7 +216,7 @@ steps:
     answer: 2
     explanation: |
       C selects the whole I63 subtree. A returns **zero rows**: the category itself isn't
-      billable, so no record carries exactly `I63`. B pulls in hemorrhagic strokes (I60–I62) and
+      billable, so clean records don't carry exactly `I63`. B pulls in hemorrhagic strokes (I60–I62) and
       **I69 sequelae**, which are late effects of old strokes. D happens to work on this synthetic
       data, which only uses I63.9, but on real data it misses every specific code like I63.4.
 
@@ -246,8 +246,9 @@ steps:
   - type: text
     title: Codes change every year
     text: |
-      ICD-10-CM is updated every **October 1** (the US federal fiscal year). Codes get added,
-      split, and occasionally deleted.
+      ICD-10-CM gets its main update every **October 1** (the start of the US federal fiscal
+      year), plus an occasional smaller April 1 update. Codes get added, split, and occasionally
+      deleted.
 
       The repo uses `N18.3` for chronic kidney disease stage 3. Real data from October 2020 onward
       doesn't: that code was split into `N18.30`, `N18.31` (stage 3a), and `N18.32` (stage 3b).

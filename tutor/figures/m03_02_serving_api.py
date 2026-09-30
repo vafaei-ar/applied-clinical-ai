@@ -46,7 +46,7 @@ def fig_request_flow():
 
     ax.text(0.1, 5.1, "startup (lifespan): load model  →  /readyz turns 200", fontsize=14,
             color=GREEN, weight="bold")
-    ax.text(0.1, 0.35, "every response carries X-Request-ID", fontsize=13, color=MUTED,
+    ax.text(0.1, 0.35, "every handled response carries X-Request-ID", fontsize=13, color=MUTED,
             style="italic")
     ax.set_title("POST /v1/predict, step by step", loc="left", pad=4)
     return save(fig, "m03-02-request-flow")

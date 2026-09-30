@@ -56,8 +56,8 @@ steps:
     image: m03-02-request-flow.png
     caption: |
       One request's path through the service. Validation rejects bad inputs before the model
-      runs. Every response, success or failure, carries the request ID, and each prediction
-      writes an audit record with the model version.
+      runs. Every handled response, success or failure, carries the request ID, and each
+      prediction writes an audit record with the model version.
 
   - type: code
     title: The request schema is the contract
@@ -199,6 +199,9 @@ steps:
     title: The versioned predict route
     language: python
     code: |
+      from fastapi import HTTPException, Request
+
+
       @app.post("/v1/predict", response_model=PredictResponse)
       def predict(req: PredictRequest, request: Request) -> PredictResponse:
           model = request.app.state.model
@@ -207,7 +210,7 @@ steps:
               prob = model.predict_one(req.features)
           except Exception:
               log.exception("prediction failed", extra={"request_id": rid})
-              raise HTTPException(status_code=500, detail="prediction failed")
+              raise HTTPException(status_code=500, detail="prediction failed") from None
 
           audit.info("prediction", extra={
               "request_id": rid, "encounter_id": req.encounter_id,
@@ -223,7 +226,13 @@ steps:
       retrain the model (new weights, same schema) without a new route, but adding a required
       feature is a breaking change that needs `/v2/` while `/v1/` keeps serving existing
       clients. The 500 detail is deliberately generic; the stack trace goes to logs, not to the
-      caller.
+      caller (`from None` also keeps Ruff's B904 rule quiet).
+
+      Two helpers are defined next to `PatientFeatures`. `PredictRequest` holds an
+      `encounter_id: str` and `features: PatientFeatures`. `PredictResponse` holds
+      `encounter_id`, `probability`, `risk_tier`, and `model_version`. In this lesson
+      `load_model` returns a thin wrapper around Lesson 1's pipeline that adds `predict_one()`
+      and a `version` attribute, and `log` and `audit` are ordinary `logging` loggers.
 
   - type: quiz
     question: |
@@ -263,6 +272,10 @@ steps:
     title: Two probes, two meanings
     language: python
     code: |
+      from fastapi import Request
+      from fastapi.responses import JSONResponse
+
+
       @app.get("/healthz")
       def healthz() -> dict[str, str]:
           return {"status": "ok"}
@@ -300,23 +313,35 @@ steps:
     title: Request ID middleware
     language: python
     code: |
+      import re
       import uuid
 
       from fastapi import Request
 
+      SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
 
       @app.middleware("http")
       async def add_request_id(request: Request, call_next):
-          request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+          supplied = request.headers.get("X-Request-ID", "")
+          request_id = supplied if SAFE_ID.fullmatch(supplied) else str(uuid.uuid4())
           request.state.request_id = request_id
           response = await call_next(request)
           response.headers["X-Request-ID"] = request_id
           return response
     after: |
-      Middleware wraps every request, including health checks and validation failures. A
-      related idea is **idempotency**: if the service also writes the score back to the EHR, a
-      client retry after a timeout could create a duplicate. Deduplicating on a client-supplied
-      request or idempotency key makes retries safe.
+      A caller-supplied value is untrusted input that ends up in your logs and response headers,
+      so accept it only if it matches a strict pattern (here, up to 64 safe characters) and
+      otherwise generate your own. That blocks log and header injection.
+
+      Middleware wraps every request, including health checks and validation failures. One gap:
+      an exception nobody handles is answered by Starlette's outermost error handler, so that
+      500 has no `X-Request-ID` header unless you convert errors to `HTTPException` (as the
+      route does) or add the header in your own 500 handler.
+
+      A related idea is **idempotency**: if the service also writes the score back to the EHR,
+      a client retry after a timeout could create a duplicate. Deduplicating on a
+      client-supplied request or idempotency key makes retries safe.
 
   - type: think
     interview: true
@@ -424,9 +449,11 @@ steps:
     title: Build and test the prediction API
     repo_path: 03-production-ml/src/readmission_service/app.py
     task: |
-      Create `app.py` with the schema, lifespan, request ID middleware, `/healthz`, `/readyz`,
-      and `/v1/predict`, loading the model you trained in Lesson 1. Then write
-      `tests/test_api.py` using `fastapi.testclient.TestClient` inside a `with TestClient(app)
+      First add `fastapi` and `uvicorn` to `dependencies` and an HTTP client for `TestClient` to
+      the `dev` extra (`httpx2` with current Starlette; plain `httpx` still works but warns),
+      then run `uv lock`. Create `app.py` with the schema, lifespan, request ID middleware,
+      `/healthz`, `/readyz`, and `/v1/predict`, loading the model you trained in Lesson 1. Then
+      write `tests/test_api.py` using `fastapi.testclient.TestClient` inside a `with TestClient(app)
       as client:` block (the `with` is what runs the lifespan). Test: a valid request returns
       200 with `model_version`; LDL of 2.8 returns 422; an unknown field returns 422; the
       `X-Request-ID` you send comes back. Open `http://127.0.0.1:8000/docs` after

@@ -21,6 +21,14 @@ modules:
   - m01-05-temporal-leakage
   - m01-06-data-quality
   - m01-07-scale-and-tools
+- id: m09
+  title: Missing data and imputation in clinical data
+  summary: Why clinical data is missing, what that does to models, and how to handle it defensibly in
+    analysis and in deployment. Assumes you have used imputation before.
+  lessons:
+  - m09-01-mechanisms
+  - m09-02-imputation-methods
+  - m09-03-deployment-sensitivity
 - id: m02
   title: Clinical machine learning with PyTorch
   summary: Frame clinical prediction correctly, train reproducibly with PyTorch, and evaluate the way
@@ -33,6 +41,25 @@ modules:
   - m02-05-calibration
   - m02-06-subgroups-shift
   - m02-07-experiment-tracking
+- id: m08
+  title: Statistics essentials for clinical AI
+  summary: 'The statistics that clinical AI work and interviews lean on: uncertainty on model performance,
+    multiplicity, sample size, and Bayesian thinking. Pitched at researchers who already know the basics
+    and need the clinical-evidence framing.'
+  lessons:
+  - m08-01-uncertainty-bootstrap
+  - m08-02-testing-multiplicity
+  - m08-03-sample-size-power
+  - m08-04-bayesian-basics
+- id: m10
+  title: Medical imaging AI in practice
+  summary: 'The clinical, regulatory, and deployment side of imaging AI for people who already understand
+    the models: data and labels, evaluation, FDA pathways, and privacy-preserving training.'
+  lessons:
+  - m10-01-data-and-labels
+  - m10-02-evaluation
+  - m10-03-regulation-deployment
+  - m10-04-federated-foundation
 - id: m03
   title: Production ML systems
   summary: Take a clinical model from notebook to a tested, containerized, monitored service, and know
@@ -56,6 +83,14 @@ modules:
   - m04-05-competing-risks-eval
   - m04-06-cdisc
   - m04-07-target-trial-emulation
+- id: m11
+  title: Clinical NLP and clinical notes
+  summary: 'Working with free-text notes: de-identification, information extraction, ontologies, and how
+    to evaluate NLP that feeds clinical decisions.'
+  lessons:
+  - m11-01-notes-and-deid
+  - m11-02-extraction
+  - m11-03-evaluation-and-use
 - id: m05
   title: Evaluating clinical LLM systems
   summary: 'Build and judge LLM and RAG systems for clinical use: retrieval, grounding, factuality, robustness,

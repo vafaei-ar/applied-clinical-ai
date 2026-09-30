@@ -1,0 +1,24 @@
+id: m10-01-data-and-labels
+title: 'Imaging data and labels: DICOM, PACS, scanners, and reader variability'
+summary: How imaging data actually arrives, what varies across scanners and sites, and why the reference
+  standard is the hardest part.
+minutes: 25
+status: seed
+why_it_matters: Most imaging AI failures trace to data provenance and labels, not architecture. Knowing
+  DICOM, PACS, and inter-reader variability lets you critique any imaging study.
+objectives:
+- Describe DICOM objects, tags, series, and how PACS and VNA store and route studies
+- Identify scanner, protocol, and site variation and the shift it causes
+- Handle de-identification of DICOM metadata and burned-in pixel PHI
+- 'Compare label sources: report mining, single reader, adjudicated consensus, pathology-proven'
+- Quantify inter-reader variability (kappa, Dice between readers) and use it as a ceiling
+key_points:
+- Metadata in DICOM headers can leak PHI and can also leak labels
+- Models learn scanner and site signatures that correlate with the label
+- Report-derived labels inherit report errors
+- Model performance cannot sensibly exceed inter-reader agreement
+tags:
+- imaging
+- dicom
+- labels
+- interview

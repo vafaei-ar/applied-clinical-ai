@@ -164,7 +164,10 @@ steps:
       control, audit logs, integrity, authentication, transmission security) for ePHI.
 
       Encryption is formally an "addressable" specification, but in practice it's expected. PHI encrypted
-      to HHS's standard is also not "unsecured" for breach notification purposes.
+      to HHS's standard is also not "unsecured" for breach notification purposes. (HHS proposed in
+      January 2025 to drop the addressable category and require encryption and multi-factor
+      authentication explicitly. As of September 2026 that proposal was not final, so check its
+      current status.)
 
       Where ML teams typically slip:
 
@@ -243,7 +246,8 @@ steps:
         that reveals the age, **including birth year**, must also go.
       - **ZIP codes**: you may keep the **first three digits** only if the area formed by all ZIP codes
         sharing those digits has **more than 20,000 people** (per current Census data). Otherwise it must
-        be **000**. HHS guidance lists the small set of ZIP3 areas that fail.
+        be **000**. HHS published a short list of failing ZIP3s (17, based on the 2000 Census), but
+        the rule refers to current Census data, so recompute rather than reuse an old list.
 
       Random per-patient **date shifting** is common in research datasets, but it isn't part of Safe
       Harbor. It's typically justified through Expert Determination. Module 01's `zip3` column is

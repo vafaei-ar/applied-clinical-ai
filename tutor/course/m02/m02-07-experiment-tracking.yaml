@@ -130,8 +130,8 @@ steps:
 
       - It logs what the **library** knows, like training scores and hyperparameters. It doesn't
         know your temporal split, calibration, subgroup table, or threshold. Log those yourself.
-      - For PyTorch, `mlflow.pytorch.autolog()` targets **PyTorch Lightning**. A hand-written
-        training loop needs explicit `log_metric` calls.
+      - For PyTorch, `mlflow.pytorch.autolog()` gives full autologging only for **PyTorch
+        Lightning**. A hand-written training loop needs explicit `log_metric` calls.
       - It can log a lot. Large models and many runs fill the artifact store quickly.
 
       A good pattern: autolog for the boilerplate, plus explicit logging for everything clinical.
@@ -241,7 +241,7 @@ steps:
     code: |
       runs = mlflow.search_runs(
           experiment_names=["stroke-readmission"],
-          filter_string="metrics.val_auroc > 0.70 and tags.data_sha256 = '3f9a1c...'",
+          filter_string="metrics.val_auroc > 0.70 AND tags.data_sha256 = '3f9a1c...'",
           order_by=["metrics.val_auroc DESC"],
       )
       cols = ["run_id", "params.C", "metrics.val_auroc", "metrics.val_cal_slope"]

@@ -1,0 +1,23 @@
+id: m08-04-bayesian-basics
+title: Bayesian thinking for clinical work
+summary: Priors, posteriors, and credible intervals; hierarchical shrinkage for subgroups and sites; Bayesian
+  adaptive trials; how to answer 'frequentist or Bayesian?'.
+minutes: 25
+status: seed
+why_it_matters: Bayesian methods are common in adaptive trials, device studies, and site-level modelling.
+  Interviewers probe whether you understand what a prior does, not whether you prefer a camp.
+objectives:
+- Update a Beta prior with binomial data and interpret the posterior
+- Explain what a credible interval says and how it differs from a CI
+- Use partial pooling to stabilize small-subgroup and small-site estimates
+- Describe a Bayesian adaptive trial (predictive probability, stopping rules) and its type I error considerations
+- Choose priors responsibly and run prior sensitivity analyses
+key_points:
+- Priors matter most when data are sparse
+- Hierarchical models shrink extreme subgroup estimates toward the mean
+- Regulators accept Bayesian designs when operating characteristics are simulated
+- Report the prior, the posterior, and a sensitivity analysis
+tags:
+- statistics
+- bayesian
+- interview

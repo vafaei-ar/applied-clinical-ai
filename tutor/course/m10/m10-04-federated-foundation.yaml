@@ -1,0 +1,25 @@
+id: m10-04-federated-foundation
+title: 'Privacy-preserving and foundation-model imaging: federated learning, differential privacy, and
+  cost'
+summary: Federated learning and differential privacy trade-offs, self-supervised and foundation models
+  in radiology and pathology, and the compute and carbon cost of training.
+minutes: 25
+status: seed
+why_it_matters: Multi-institution training and large pretrained models are where the field is moving.
+  You need to discuss the trade-offs concretely, including utility loss and heterogeneity.
+objectives:
+- Describe federated averaging and the effect of non-IID site data and client drift
+- Explain differential privacy budgets (epsilon, delta) and the utility-privacy trade-off
+- Compare federated, centralized, and swarm approaches and what each protects (and doesn't)
+- Explain self-supervised pretraining and foundation-model fine-tuning for imaging
+- Estimate training compute and emissions and weigh them against benefit
+key_points:
+- Federated learning does not guarantee privacy without additional protections
+- Non-IID sites can hurt convergence and fairness across sites
+- DP-SGD costs accuracy, especially on small or rare-class data
+- Report energy and emissions alongside accuracy
+tags:
+- imaging
+- federated
+- privacy
+- interview

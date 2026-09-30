@@ -138,8 +138,8 @@ steps:
   - type: text
     title: Tie every claim to evidence
     text: |
-      The repo's `SKILLS_MATRIX.md` has the right rule: _a skill is complete only when there is
-      visible technical evidence in the repository_.
+      The repo's `SKILLS_MATRIX.md` has the right rule: _a skill is marked complete only when
+      there is visible technical evidence in the repository_.
 
       Before an interview, make a private table: claim, then the file that proves it.
 

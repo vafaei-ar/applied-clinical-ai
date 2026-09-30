@@ -1,0 +1,24 @@
+id: m10-03-regulation-deployment
+title: 'Getting imaging AI into the clinic: FDA pathways, workflow, and monitoring'
+summary: CADe/CADx/CADt device categories, 510(k) and predicates, predetermined change control plans,
+  PACS/worklist integration, automation bias, and post-market monitoring.
+minutes: 25
+status: seed
+why_it_matters: Imaging AI is the most heavily cleared category of AI medical device. Understanding the
+  pathway and the workflow is what separates research from product work.
+objectives:
+- Distinguish triage, detection, and diagnosis devices and what evidence each needs
+- Explain predicate-based 510(k) clearance and when De Novo is needed
+- Describe a predetermined change control plan for a retrainable imaging model
+- Design integration with PACS and RIS worklists and DICOM SR/secondary capture output
+- Plan monitoring for drift across scanners and automation-bias effects on readers
+key_points:
+- Triage devices change queue order, so time-to-read is the outcome to measure
+- Vendor and protocol changes are the most common cause of drift
+- A model that is right but ignored (or over-trusted) has no clinical value
+- Check current FDA guidance; this area changes quickly
+tags:
+- imaging
+- regulation
+- deployment
+- interview

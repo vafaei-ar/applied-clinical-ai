@@ -1,0 +1,23 @@
+id: m08-03-sample-size-power
+title: 'How much data is enough: power and sample size for trials and prediction models'
+summary: Power, effect size, and sample size for trials; events per variable and the Riley criteria for
+  prediction-model sample size; precision-based planning.
+minutes: 25
+status: seed
+why_it_matters: Both trial teams and ML teams get asked 'how many patients do you need?'. The answer differs
+  by question type, and rules of thumb like 10 events per variable are misleading.
+objectives:
+- Compute sample size for a two-arm trial from alpha, power, and effect size
+- Convert between hazard ratio, events needed, and patients needed
+- Apply the Riley et al. criteria for prediction-model development sample size
+- Explain why 'events per variable' rules of thumb fail
+- Plan validation studies by precision of calibration and AUROC
+key_points:
+- Survival trials are powered on events, not patients
+- Prediction-model sample size targets shrinkage, optimism, and precision of the overall risk
+- Small validation sets give wide CIs and unstable calibration
+- Effect-size assumptions drive everything; state and stress-test them
+tags:
+- statistics
+- sample-size
+- interview

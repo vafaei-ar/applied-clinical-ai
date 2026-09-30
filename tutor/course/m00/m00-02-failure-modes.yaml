@@ -45,8 +45,8 @@ steps:
       - **Temporal leakage**: a feature comes from after time zero. Example: a "prior
         diagnosis" that was actually recorded after the index stroke.
       - **Target leakage**: a feature is a consequence or a restatement of the outcome. Example:
-        predicting sepsis with "IV antibiotics given", or readmission with "discharged to
-        hospice".
+        predicting sepsis with "IV antibiotics given", or in-hospital mortality with "comfort
+        care order placed".
       - **Pipeline leakage**: information from the test set gets into training through the
         split or preprocessing. Example: the same patient in train and test, or imputation
         values computed on the full dataset.

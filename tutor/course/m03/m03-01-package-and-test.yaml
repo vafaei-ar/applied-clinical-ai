@@ -318,10 +318,12 @@ steps:
       (`trained_model` is a scikit-learn `Pipeline` with an imputer, so the missing LDL is
       handled inside the model.) Two details matter. The test raises `encounters_prior_365d` too, because an inpatient
       stay is also an encounter; an impossible input would make the test meaningless. And it
-      allows a tiny tolerance. For a logistic regression this should hold exactly. For a tree
-      ensemble or neural network it is **not guaranteed**, so either add monotonic constraints
-      in training (gradient-boosting libraries support this) or assert it on average and
-      investigate violations.
+      allows a tiny tolerance. For a logistic regression it holds only if the two coefficients
+      the test moves sum to a non-negative value (correlated features can give one a negative
+      sign), so check the fitted signs rather than assuming. For a tree ensemble or neural
+      network it is **not guaranteed**, so either add monotonic constraints in training
+      (gradient-boosting libraries support this) or assert it on average and investigate
+      violations.
 
   - type: quiz
     question: |

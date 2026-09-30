@@ -291,7 +291,7 @@ steps:
   - type: quiz
     question: |
       For each patient's **last** inpatient stay, `next_start` is NULL, so the CASE above
-      returns 0. A stay discharged on 2025-12-20 gets `readmit_30d = 0`. What's the problem?
+      returns 0. A stay discharged on 2025-12-19 gets `readmit_30d = 0`. What's the problem?
     options:
       - None, because NULL next_start proves no readmission
       - The CASE should return 1 when next_start is NULL
@@ -299,8 +299,9 @@ steps:
       - The data ends before 30 days of follow-up, so this 0 is really unknown (censored)
     answer: 3
     explanation: |
-      The synthetic encounters stop in mid-December 2025, and coverage can end even earlier. A
-      patient discharged on 20 December has only days of follow-up, so "no readmission seen" isn't
+      The synthetic encounters start no later than 15 December 2025 (the latest discharge is 19
+      December), and coverage can end even earlier. A patient discharged on 19 December has only
+      days of follow-up, so "no readmission seen" isn't
       "no readmission". Require 30 days of observable follow-up (data and coverage) or exclude
       these stays. It's the same **censoring** idea that Module 04's survival analysis formalizes.
 
@@ -384,9 +385,9 @@ steps:
       `WHERE date_diff('day', prev_end, coverage_start) > 0` to find gaps. What happens?
     options:
       - It correctly ignores this pair
-      - It flags a 1-day gap for a patient who was continuously covered
+      - It flags the pair as a gap, though the patient was continuously covered
       - It errors because the dates are adjacent
-      - It flags the gap but reports 0 gap days
+      - It flags the pair only when the two rows have different plan types
     answer: 1
     explanation: |
       `date_diff` is 1 for adjacent dates, and `1 > 0` is true, so continuous coverage is flagged
@@ -454,8 +455,10 @@ steps:
              ) AS ed_visits_prior_365d
       FROM encounters;
     after: |
-      For every encounter, this counts ED visits in the prior year, excluding that day. A row with
-      no earlier visits in its frame gets NULL, so wrap it in `COALESCE(..., 0)`. This per-encounter
+      For every encounter, this counts ED visits in the prior year, excluding that day. That is
+      exact here because every timestamp in this data is midnight. With real times of day, `1 DAY
+      PRECEDING` means 24 hours, not the calendar day, so order by a date column instead. A row
+      with no earlier visits in its frame gets NULL, so wrap it in `COALESCE(..., 0)`. This per-encounter
       version is useful when every admission is a prediction point, as in the all-discharges
       readmission model you'll meet in Module 02.
 
@@ -514,7 +517,9 @@ steps:
 
       Then do the stretch comparison. Compute ROW_NUMBER, RANK, and DENSE_RANK side by side,
       ordered by `index_date` only, and count patients where RANK = 1 returns more than one
-      encounter. Next, run the coverage-gap query and check that `gap_days` spans 30–180. Finally,
+      encounter. In the default data that count is 0, because the generator never puts two
+      stroke encounters on the same date, so the bug stays silent here; plant a same-day pair in
+      a scratch copy to see it. Next, run the coverage-gap query and check that `gap_days` spans 30–180. Finally,
       save it as a view (`CREATE VIEW coverage_gaps AS ...`), which starts the "continuously
       eligible patients" stretch task.
 

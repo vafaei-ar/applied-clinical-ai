@@ -1,0 +1,24 @@
+id: m11-02-extraction
+title: 'Information extraction: entities, negation, ontologies, and LLM extraction'
+summary: NER and entity linking to UMLS/SNOMED/RxNorm, negation and uncertainty (ConText), section detection,
+  and schema-constrained LLM extraction with annotation practice.
+minutes: 25
+status: seed
+why_it_matters: Turning text into structured data is the core clinical NLP task. The details (negation,
+  experiencer, temporality) decide whether extracted features are usable.
+objectives:
+- Explain NER, normalization to ontologies, and why linking is hard
+- Handle negation, uncertainty, experiencer (family history), and temporality
+- Use section detection to disambiguate mentions
+- Design schema-constrained LLM extraction with validation and abstention
+- Run an annotation study with guidelines and inter-annotator agreement
+key_points:
+- '''No evidence of stroke'' and ''family history of stroke'' are not stroke'
+- Normalize to ontologies to make extracted data joinable with codes
+- Validate LLM output against the source span
+- Agreement between annotators bounds achievable accuracy
+tags:
+- nlp
+- extraction
+- ontologies
+- interview

@@ -1,0 +1,24 @@
+id: m09-02-imputation-methods
+title: Imputation methods and how to evaluate them
+summary: Single vs multiple imputation, MICE and Rubin's rules, ML and deep imputers, and why RMSE on
+  masked values is a weak evaluation.
+minutes: 25
+status: seed
+why_it_matters: Choosing and justifying an imputation method, and proving it did not distort downstream
+  results, is a core clinical data science skill.
+objectives:
+- Contrast mean, regression, MICE, and ML/deep imputation
+- Apply Rubin's rules to combine estimates across imputed datasets
+- Explain why single imputation understates uncertainty
+- Fit imputers inside cross-validation folds to avoid leakage
+- Evaluate imputation by downstream task performance, distributional fidelity, and calibration, not only
+  masked-value error
+key_points:
+- Include the outcome in the imputation model for inference
+- Imputation is part of the model pipeline and must be refit per fold
+- Masked-value RMSE rewards regression to the mean
+- Compare against complete-case and missingness-aware baselines
+tags:
+- missing-data
+- imputation
+- interview

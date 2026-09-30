@@ -53,7 +53,9 @@ steps:
       can re-run your primary analysis, pool data across trials, and spot problems quickly.
 
       Datasets go in as SAS transport files (**XPT version 5**), which is why variable names are at
-      most 8 characters. That's an old format constraint, not a style choice.
+      most 8 characters. That's an old format constraint, not a style choice. FDA's technical
+      guidance still specifies XPT v5 at the time of writing, while CDISC's JSON-based
+      Dataset-JSON is being piloted as a possible successor, so check the current guide.
 
   - type: text
     title: The flow
@@ -232,9 +234,10 @@ steps:
       Read that again: **CNSR = 1 means censored**. Most survival software wants an _event_ indicator,
       where 1 means the event happened. Flip it, or you'll analyse the censorings as events.
 
-      ADaM has no dedicated competing-risk flag. Teams usually add a separate death parameter or a
-      documented censoring code for death, which is exactly what the programmer's CNSR = 2 question was
-      about.
+      Competing risks are not handled by a dedicated flag in ADTTE, as far as we know (check the
+      current ADaM time-to-event guide and your SAP). Teams usually add a separate death parameter or
+      a documented censoring code for death, which is exactly what the programmer's CNSR = 2 question
+      was about.
 
   - type: code
     title: Three ADTTE rows and a KM fit
@@ -242,7 +245,7 @@ steps:
     code: |
       # USUBJID         PARAMCD STARTDT     ADT         AVAL CNSR EVNTDESC / CNSDTDSC     SRCDOM
       # SSP301-014-042  TTRSTR  2024-03-04  2025-01-19   322  0   RECURRENT STROKE          CE
-      # SSP301-014-057  TTRSTR  2024-03-11  2028-03-10  1461  1   COMPLETED STUDY           DS
+      # SSP301-014-057  TTRSTR  2024-03-11  2026-03-10   730  1   COMPLETED STUDY           DS
       # SSP301-022-007  TTRSTR  2024-04-02  2026-02-14   684  2   DEATH WITHOUT STROKE      DS
 
       from lifelines import KaplanMeierFitter

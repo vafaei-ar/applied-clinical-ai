@@ -139,6 +139,9 @@ steps:
       a **strict** `<` so index-day diagnoses are excluded, and the window conditions live in the
       `ON` clause so patients with no prior diagnoses still get a row (with 0 after `COALESCE`).
 
+      One simplification: `= 'I10'` matches essential hypertension only. The synthetic data uses
+      just that code, but a real hypertension value set usually adds I11–I13 and I15–I16.
+
   - type: quiz
     question: |
       Why are the date conditions in the `ON` clause rather than a `WHERE` clause?
@@ -284,8 +287,8 @@ steps:
     answer: 1
     explanation: |
       The join window was widened to `+30 days` to compute the outcome, and the feature reuses
-      the same joined rows. So `encounters_365d` counts the index encounter and every
-      readmission, which leaks the label into a feature. Build features and outcomes in
+      the same joined rows. So `encounters_365d` counts the index encounter and every encounter
+      in the 30 days after it (readmissions included), which leaks the label into a feature. Build features and outcomes in
       **separate** CTEs with their own windows, as `02_features.sql` does.
 
   - type: text

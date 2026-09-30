@@ -24,10 +24,10 @@ key_points:
 tags: [spark, dbt, duckdb, databricks, interview]
 steps:
   - type: text
-    title: Two seconds on a laptop
+    title: A fraction of a second on a laptop
     text: |
-      Your stroke cohort builds in about two seconds in DuckDB on the repo's 5,000 synthetic
-      patients. Now a health system hires you. They have 8 million members, ten years of claims,
+      Your stroke cohort builds in well under a second in DuckDB on the repo's 5,000 synthetic
+      patients (each SQL script takes a few milliseconds). Now a health system hires you. They have 8 million members, ten years of claims,
       billions of rows, and a Databricks workspace.
 
       An interviewer asks: _"Would you rewrite everything in Spark?"_
@@ -479,8 +479,8 @@ steps:
     after: |
       It maps line for line onto the SQL: the join, `LIKE 'I63%'` as `startswith`, `DISTINCT`,
       `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`, and the filter. Nothing runs until
-      `.write`. In Databricks you could also run the SQL unchanged with `spark.sql(...)`, because
-      both go through the same optimizer.
+      `.write`. In Databricks you could also run nearly the same SQL with `spark.sql(...)`, apart
+      from dialect differences, because both go through the same optimizer.
 
   - type: quiz
     question: |

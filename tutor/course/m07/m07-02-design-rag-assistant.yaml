@@ -377,8 +377,8 @@ steps:
       **PHI.** If the tool lives in the EHR, users will paste patient details, whatever the
       policy says. Either detect and block it, or run the whole stack (LLM, logs, vector store)
       in an environment approved for PHI, with a business associate agreement (BAA) with the
-      LLM vendor where required. Logs of questions are PHI. Access, retention, and any reuse for
-      improvement need governance approval (Module 06).
+      LLM vendor where required. Treat logs of questions as PHI, since they will contain some.
+      Access, retention, and any reuse for improvement need governance approval (Module 06).
 
       **Governance.** Each document has an owner who approves its inclusion. A release is a
       tuple: corpus snapshot, prompt version, model version, and evaluation results, signed off
@@ -472,4 +472,4 @@ steps:
       - Layered checks, because a numeric check alone misses numbers attached to the wrong condition
       - Evaluate retrieval, generation, abstention, and safety **separately**
       - "A release = corpus snapshot + prompt + model + eval results, and every change reruns the suite"
-      - Logs are PHI, and every incident becomes a regression test
+      - Treat logs as PHI, and turn every incident into a regression test

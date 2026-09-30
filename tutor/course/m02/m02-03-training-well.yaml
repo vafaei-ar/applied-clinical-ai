@@ -237,6 +237,11 @@ steps:
     title: Save and resume
     language: python
     code: |
+      import os
+
+      import torch
+
+
       def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best, cfg):
           tmp = f"{path}.tmp"
           torch.save({
@@ -308,7 +313,8 @@ steps:
     title: An AMP training step (current torch.amp API)
     language: python
     code: |
-      amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+      bf16_ok = torch.cuda.is_bf16_supported(including_emulation=False)   # Ampere or newer
+      amp_dtype = torch.bfloat16 if bf16_ok else torch.float16
       scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
       for X, y in train_loader:
@@ -326,7 +332,10 @@ steps:
     after: |
       `torch.cuda.amp.autocast` and `torch.cuda.amp.GradScaler` are the deprecated spellings.
       Use `torch.autocast(device_type=...)` and `torch.amp.GradScaler("cuda")`. Only the
-      forward pass and loss go inside `autocast`. Backward runs outside it.
+      forward pass and loss go inside `autocast`. Backward runs outside it. Note
+      `including_emulation=False`: by default `is_bf16_supported()` also returns True on
+      pre-Ampere GPUs (T4, V100) where bf16 is emulated and slow, and there fp16 with the
+      scaler is the better choice.
 
   - type: quiz
     question: |
@@ -542,8 +551,9 @@ steps:
       point, with warmup, and check that validation curves match the single-GPU run. On the
       practical side, only rank 0 writes checkpoints and logs, evaluation metrics need all-gather
       before computing AUROC, and seeds are set per rank. I'd expect less than a 4x speedup
-      because of communication, and more like 3–3.5x on one node is realistic. If memory rather
-      than speed were the problem, I'd look at FSDP instead.
+      because of communication and any data-loading or synchronization overhead, so I'd measure
+      the actual scaling rather than assume it. If memory rather than speed were the problem,
+      I'd look at FSDP instead.
     key_points:
       - Profiles first and tries single-GPU wins (AMP, batch size, data loading)
       - Uses DDP with one process per GPU, DistributedSampler, and set_epoch

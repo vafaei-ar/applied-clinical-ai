@@ -1,0 +1,24 @@
+id: m11-01-notes-and-deid
+title: Clinical notes and de-identification
+summary: How notes are written and stored, why they are messy, and how de-identification works and is
+  evaluated.
+minutes: 25
+status: seed
+why_it_matters: Notes hold the richest signal and the highest privacy risk. Any clinical NLP project starts
+  with understanding the text and de-identifying it correctly.
+objectives:
+- Describe note types, sections, and templated text vs free text
+- Explain copy-forward and note bloat and how they distort features
+- Compare rule-based, ML, and LLM de-identification
+- Evaluate de-identification by PHI recall and residual risk, not overall accuracy
+- Connect de-identification to HIPAA Safe Harbor and Expert Determination
+key_points:
+- 'A missed PHI token is worse than a false alarm: optimize recall'
+- Copy-forward makes notes appear to have information that is old
+- Notes are timestamped by signing time, which matters for leakage
+- De-identified text can still be re-identified in context
+tags:
+- nlp
+- deid
+- privacy
+- interview

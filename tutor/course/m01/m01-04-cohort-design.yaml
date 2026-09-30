@@ -227,8 +227,8 @@ steps:
       representative cohort.
 
       Whichever you choose, **state it and count it**. In the default run, 15 patients are excluded
-      for a gap in their lookback. Because every synthetic gap is at least 30 days, a 30-day
-      allowance rescues none of them.
+      for a gap in their lookback. The shortest of those gaps is 35 days, so a 30-day allowance
+      rescues none of them (a 60-day allowance rescues 5).
 
   - type: code
     title: Stitching coverage periods (gaps-and-islands)

@@ -299,8 +299,9 @@ steps:
     title: The four non-device CDS criteria
     text: |
       Under section 520(o)(1)(E) of the FD&C Act (added by the Cures Act), and as interpreted
-      in FDA's final CDS guidance (September 2022), CDS software is **not** a device only if it
-      meets **all four** criteria:
+      in FDA's Clinical Decision Support Software guidance (first issued in September 2022,
+      revised in January 2026), CDS software is **not** a device only if it meets **all four**
+      criteria:
 
       - **1.** It does **not** acquire, process, or analyze a medical image, a signal from an
         in vitro diagnostic, or a pattern or signal from a signal acquisition system (like an
@@ -314,11 +315,15 @@ steps:
         recommendation, so they don't rely primarily on it. In practice that means explaining
         the inputs, the logic or model, and its validation in plain language.
 
-      The 2022 guidance read criteria 3 and 4 narrowly: for example, it treated time-critical
-      alarms and some single, specific risk outputs as device functions, citing automation
-      bias. That interpretation has been debated and FDA has revisited its CDS policy since,
-      so check the **current** guidance and involve regulatory experts rather than relying on
-      a summary.
+      The 2022 guidance read criterion 3 narrowly: a single, specific output (including a risk
+      score) was treated as a device function, and time-critical alerts were excluded, citing
+      automation bias. FDA loosened this in the January 2026 revision (the version current when
+      this lesson was checked, dated January 29, 2026): it now says it intends to exercise
+      **enforcement discretion** for a single recommendation when only one option is clinically
+      appropriate and the software otherwise meets the criteria. Time-critical use still fails
+      criterion 4, and image, signal, or pattern analysis still fails criterion 1. Guidance is
+      nonbinding and can change again, so check the **current** version on FDA's site and
+      involve regulatory experts rather than relying on a summary.
 
   - type: quiz
     question: |
@@ -381,15 +386,15 @@ steps:
       A **locked** algorithm gives the same output for the same input every time. It changes
       only through a deliberate, versioned update. An **adaptive** (continuously learning)
       algorithm changes its behaviour in the field as it sees new data. FDA's 2019 discussion
-      paper on modifications to AI/ML-based SaMD framed this distinction. In practice, nearly
-      all authorized AI devices are locked, and our registry-and-gates workflow is a locked
-      workflow.
+      paper on modifications to AI/ML-based SaMD framed this distinction. In practice, the great
+      majority of authorized AI devices are locked, and our registry-and-gates workflow is a
+      locked workflow.
 
       Traditionally, a significant change to a cleared device, such as retraining that affects
       performance, could require a new submission. A **Predetermined Change Control Plan
       (PCCP)** changes that. Authorized as part of the original submission (FDA's final
       guidance on PCCPs for AI-enabled device software functions was issued in
-      December 2024), it has three parts:
+      December 2024 and reissued in August 2025), it has three parts:
 
       - **Description of modifications**: exactly which changes are planned (for example,
         retraining on new data from the same sources, or recalibrating for a new site).
@@ -491,4 +496,4 @@ steps:
       - Retraining can hurt through **immature labels**, **feedback loops**, upstream artifacts, and user-visible calibration shifts
       - "**Intended use** decides device status; non-device CDS must meet **all four** criteria"
       - "510(k) needs a predicate, De Novo is for novel low–moderate risk, PMA is for Class III"
-      - Authorized AI devices are mostly **locked**; a **PCCP** (FDA final guidance, Dec 2024) pre-authorizes described changes only
+      - Authorized AI devices are mostly **locked**; a **PCCP** (FDA final guidance, Dec 2024, updated Aug 2025) pre-authorizes described changes only

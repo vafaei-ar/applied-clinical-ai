@@ -45,7 +45,7 @@ def fig_omop_mapping():
         if note:
             ax.text(4.85, y + 0.12, note, ha="center", va="bottom", fontsize=12.5, color=INK)
 
-    ax.text(0.1, -0.45, "zip3 → location · every table keys on person_id · codes → concept_id",
+    ax.text(0.1, -0.45, "zip3 → location · clinical event tables key on person_id · codes → concept_id",
             fontsize=12.5, color=MUTED, style="italic")
     return save(fig, "m06-01-omop-mapping")
 

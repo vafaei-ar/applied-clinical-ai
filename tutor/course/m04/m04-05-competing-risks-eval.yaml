@@ -21,14 +21,14 @@ key_points:
   - Cause-specific hazard ratios answer etiologic questions; Fine–Gray links directly to the CIF for prediction
   - Harrell's C ranks patients but ignores calibration and depends on censoring
   - Time-dependent AUC and Brier score evaluate at clinically meaningful horizons
-  - Calibration at a horizon compares predicted risk with KM or CIF estimates, never raw event proportions
+  - Calibration at a horizon compares predicted risk with KM or CIF estimates, not raw event proportions, whenever censoring occurs before the horizon
 tags: [survival, competing-risks, evaluation, interview]
 steps:
   - type: text
     title: A risk estimate that was too high
     text: |
-      Back to our secondary-stroke-prevention trial. Patients are on average in their mid-70s, and
-      follow-up runs five years. An analyst reports that the 5-year risk of recurrent stroke in the
+      Imagine a longer-follow-up version of our secondary-stroke-prevention trial. Patients are on
+      average in their mid-70s, and follow-up runs up to five years. An analyst reports that the 5-year risk of recurrent stroke in the
       control arm is **27%**, computed as 1 − Kaplan–Meier with deaths censored.
 
       The trial's neurologist frowns: "That's higher than anything we see in clinic."
@@ -287,7 +287,8 @@ steps:
       - **controls**: patients still event-free **after** _t_?
 
       This "cumulative/dynamic" definition matches clinical use: "who will have a stroke within two
-      years?" Censored patients are handled with IPCW. You typically plot AUC(t) over a few
+      years?" Censored patients are handled by weighting (IPCW in common implementations such as
+      scikit-survival). You typically plot AUC(t) over a few
       horizons (1, 2, 3 years) rather than report one number.
 
       Like any AUC, it's still pure discrimination: it says nothing about whether the risks are right.
@@ -413,4 +414,4 @@ steps:
       - "**Cause-specific** HRs for etiology (report both causes); **Fine–Gray** or combined models for prediction"
       - "Harrell's C only ranks: it ignores calibration, depends on censoring, and averages over all time"
       - Evaluate at a **horizon**, with time-dependent AUC, a Brier score vs a null model, and calibration
-      - Observed risk in calibration plots comes from KM or CIF, **never** raw event proportions
+      - Observed risk in calibration plots should come from KM or CIF, not raw event proportions, once censoring occurs before the horizon

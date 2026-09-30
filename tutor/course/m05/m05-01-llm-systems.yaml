@@ -81,7 +81,7 @@ steps:
   - type: text
     title: PHI and the BAA
     text: |
-      Under HIPAA, a vendor that creates, receives, stores, or transmits **protected health
+      Under HIPAA, a vendor that creates, receives, maintains, or transmits **protected health
       information** on behalf of a covered entity is a **business associate**. You need a
       signed **Business Associate Agreement (BAA)** before PHI is sent.
 

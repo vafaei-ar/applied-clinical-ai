@@ -40,8 +40,9 @@ steps:
     text: |
       - **HL7 v2** (1980s onward): **event messages** between systems inside a hospital. "Patient
         admitted." "Lab resulted." Pushed in real time.
-      - **FHIR** (HL7, R4 released 2019 and most widely deployed): **resource-based APIs** for apps,
-        patient access, and exchange between organizations. Pulled on demand, JSON over HTTPS.
+      - **FHIR** (HL7; R4, published 2018 with a 4.0.1 correction in 2019, is still the most widely
+        deployed release): **resource-based APIs** for apps, patient access, and exchange between
+        organizations. Pulled on demand, JSON over HTTPS.
       - **OMOP CDM** (from the OHDSI community): a **relational model for analytics**. Many sources are
         converted into one schema with standard vocabularies, so the same query runs everywhere.
 
@@ -73,7 +74,7 @@ steps:
       PID|1||MRN123456^^^GENHOSP^MR||DOE^JANE||19480512|F
       PV1|1|I|STROKE^4B^12
       OBR|1||LAB7781|13457-7^LDL cholesterol (calc)^LN
-      OBX|1|NM|13457-7^Cholesterol in LDL [Mass/volume] by calculation^LN||101|mg/dL|<100|H|||F
+      OBX|1|NM|13457-7^Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation^LN||101|mg/dL|<100|H|||F
     after: |
       Fields are positional. In `OBX`, field 2 is the value type (`NM` = numeric), 3 is the test code (a
       LOINC code, marked `LN`), 5 is the value, 6 the units, 7 the reference range, 8 the abnormal flag,
@@ -124,8 +125,9 @@ steps:
 
       Others appear often too: Procedure, DiagnosticReport, AllergyIntolerance.
 
-      In the US, the ONC Cures Act Final Rule requires certified EHRs to expose standardized FHIR APIs,
-      which is why FHIR endpoints are now widely available rather than an exotic option.
+      In the US, the ONC Cures Act Final Rule requires certified EHR developers to offer standardized
+      FHIR R4 APIs (based on US Core and SMART), which is why FHIR endpoints are now widely available
+      rather than an exotic option.
 
   - type: code
     title: An LDL result as a FHIR Observation
@@ -140,7 +142,7 @@ steps:
           "code": "laboratory"}]}],
         "code": {"coding": [{
           "system": "http://loinc.org", "code": "13457-7",
-          "display": "Cholesterol in LDL [Mass/volume] by calculation"}],
+          "display": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation"}],
           "text": "LDL (calc)"},
         "subject": {"reference": "Patient/p-000042"},
         "encounter": {"reference": "Encounter/e-000917"},
@@ -248,8 +250,8 @@ steps:
   - type: text
     title: OMOP CDM
     text: |
-      The **OMOP Common Data Model** (maintained by OHDSI, with v5.4 widely used) is a person-centric
-      relational schema. Every clinical fact becomes a row in a **domain table**, coded with a **standard
+      The **OMOP Common Data Model** (maintained by OHDSI; v5.4 is still widely deployed and v5.5 is the
+      newest release) is a person-centric relational schema. Every clinical fact becomes a row in a **domain table**, coded with a **standard
       concept**.
 
       Why people go to the trouble:
@@ -347,10 +349,12 @@ steps:
       - **RxNorm** (NLM): normalized names for **clinical drugs**, as ingredient + strength + dose form,
         linking to NDCs and brand names. OMOP's standard for drugs.
       - **ICD-10-CM** and **CPT/HCPCS**: billing classifications. ICD-10-CM is mapped to SNOMED for
-        conditions in OMOP. CPT and HCPCS are standard for procedures.
+        conditions in OMOP. For procedures, CPT4 and HCPCS codes are themselves standard concepts,
+        alongside SNOMED procedures.
       - **UCUM**: units, such as `mg/dL`.
 
-      In OMOP you download all of these, pre-mapped, from **Athena**.
+      In OMOP you download these, pre-mapped, from **Athena** (a few, such as CPT4, need an extra
+      licensing step to get their names).
 
   - type: quiz
     question: |

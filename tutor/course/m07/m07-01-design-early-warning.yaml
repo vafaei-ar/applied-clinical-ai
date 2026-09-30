@@ -267,9 +267,9 @@ steps:
   - type: image
     image: m07-01-alert-budget.png
     caption: |
-      Simulated ward: 30 beds, 12-hour shifts, 2% of patient-shifts followed by sepsis onset, and
-      a model with AUROC about 0.84. Each point on the curve is a threshold. The budget line picks
-      one.
+      Simulated ward: 30 beds, 12-hour shifts, 2% of patient-shifts followed by sepsis onset (a
+      deliberately high rate, for illustration), and a model with AUROC about 0.84. Each point on
+      the curve is a threshold. The budget line picks one.
 
   - type: text
     title: Reading the budget curve
@@ -281,6 +281,9 @@ steps:
       Going to 8 alerts per shift raises sensitivity to about 77% but drops PPV to about 6%.
       Nurses would evaluate around 17 patients per true case, which invites alert fatigue.
       Dropping to 1 alert raises PPV to 18% but catches under a third of cases.
+
+      The 2% rate is high for a general ward. At 0.5% the same 3-alert budget would give a PPV
+      of only about 3%, so always recompute the curve with your own units' rates.
 
       There's no correct point on the curve. The threshold is a **clinical and operational
       decision** you make with the unit leaders. Your job is to show them this curve in their

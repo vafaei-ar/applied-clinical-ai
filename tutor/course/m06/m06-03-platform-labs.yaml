@@ -39,11 +39,11 @@ steps:
   - type: text
     title: When Spark, and when not
     text: |
-      In Module 01, DuckDB builds the stroke cohort from 5,000 synthetic patients in about a
-      second. A national claims dataset has hundreds of millions of patients and billions of claim
-      lines, spread over thousands of files. That no longer fits on one machine, which is the
-      problem Spark solves: **split the data into partitions and process them in parallel on
-      many machines**.
+      In Module 01, DuckDB builds the stroke cohort from 5,000 synthetic patients in well
+      under a second. A national claims dataset has hundreds of millions of patients and
+      billions of claim lines, spread over thousands of files. That no longer fits on one
+      machine, which is the problem Spark solves: **split the data into partitions and process
+      them in parallel on many machines**.
 
       The honest counterpoint: a single modern machine with DuckDB or Polars handles tens to
       hundreds of gigabytes comfortably. Spark adds cluster startup time, cost, and a new class of
@@ -113,7 +113,7 @@ steps:
               & (F.to_date("e.encounter_start") >= F.date_sub("c.index_date", 365))
           )
           .groupBy("c.patient_id", "c.index_date")
-          .agg(F.countDistinct("e.encounter_id").alias("encounters_prior_365d"))
+          .agg(F.count_distinct("e.encounter_id").alias("encounters_prior_365d"))
       )
 
       prior.write.mode("overwrite").saveAsTable("clinical.stroke.prior_utilization")
@@ -137,7 +137,7 @@ steps:
     question: |
       The code above has a correctness bug you met in Module 01. What is it?
     options:
-      - "`countDistinct` double-counts encounters with multiple diagnoses"
+      - "`count_distinct` double-counts encounters with multiple diagnoses"
       - The `where` after the left join drops cohort patients with no prior encounters
       - "`date_sub` counts 365 business days, not calendar days"
       - Spark can't compare a timestamp with a date
@@ -231,7 +231,7 @@ steps:
     code: |
       terraform {
         required_providers {
-          azurerm = { source = "hashicorp/azurerm", version = "~> 4.0" }
+          azurerm = { source = "hashicorp/azurerm", version = "~> 5.0" }
         }
         backend "azurerm" {
           resource_group_name  = "rg-tfstate"
@@ -258,8 +258,10 @@ steps:
       }
     after: |
       The registry refers to `azurerm_resource_group.ml.name`, so Terraform knows to create the
-      group first. References define the dependency graph. The azurerm 4.x provider also needs a
-      subscription ID, usually supplied through the `ARM_SUBSCRIPTION_ID` environment variable.
+      group first. References define the dependency graph. The azurerm provider (since 4.0)
+      also needs a subscription ID, usually supplied through the `ARM_SUBSCRIPTION_ID`
+      environment variable. Pin the provider to a major version, and read the upgrade guide
+      before moving to the next one.
 
   - type: text
     title: init, plan, apply
@@ -315,7 +317,7 @@ steps:
       secrets.
 
       (OpenTofu, a community fork created after HashiCorp's 2023 license change, uses the same
-      concepts and file format.)
+      core concepts and configuration language.)
 
   - type: quiz
     question: |
@@ -405,11 +407,12 @@ steps:
                   requests: {cpu: 250m, memory: 512Mi}
                   limits: {memory: 1Gi}
                 readinessProbe:
-                  httpGet: {path: /health, port: 8000}
+                  httpGet: {path: /readyz, port: 8000}
     after: |
       Note the pinned image tag (never `:latest` in production), the resource **requests** (the
       scheduler and the HPA need them), and the readiness probe, which keeps traffic away from a
-      pod until the model has loaded. The `/health` endpoint is the one you'll build in Module 03.
+      pod until the model has loaded. The `/readyz` endpoint is the one you built in Module 03
+      (`/healthz` is its liveness counterpart).
 
   - type: quiz
     question: |
@@ -434,8 +437,10 @@ steps:
       Services find pods by label. The pods are labeled `app: stroke-readmit-api`, but the
       selector says `app: stroke-readmit`, so nothing matches and there's nowhere to send traffic.
       Mapping port 80 to container port 8000 is normal. The default `ClusterIP` type works inside
-      the cluster, and matching names are fine. `kubectl get endpoints stroke-readmit-api` would
-      show the empty list immediately.
+      the cluster, and matching names are fine. `kubectl describe service stroke-readmit-api`
+      would show `Endpoints: <none>` immediately (`kubectl get endpointslices -l
+      kubernetes.io/service-name=stroke-readmit-api` is the current way to inspect them, since
+      the older Endpoints API is deprecated).
 
   - type: image
     image: m06-03-k8s-request-path.png
@@ -543,7 +548,8 @@ steps:
     title: Run the feature logic in local Spark
     repo_path: 01-clinical-data-engineering/src/clinical_data_engineering/spark_features.py
     task: |
-      Install `pyspark` in a fresh virtual environment and create this module. Load the generated
+      Install `pyspark` in a fresh virtual environment (it also needs a Java 17, 21, or 25
+      runtime installed) and create this module. Load the generated
       `encounters` and `index_stroke_cohort` tables (export them from DuckDB to Parquet first)
       into a local `SparkSession`, and port the `prior_utilization` CTE from `sql/02_features.sql`
       with the window conditions in the **join**. Assert that the result matches the DuckDB
@@ -554,10 +560,11 @@ steps:
     title: Plan (don't apply) the Module 03 infrastructure
     repo_path: 03-production-ml/infra/main.tf
     task: |
-      Create this file with the resource group and container registry from this lesson, plus an
-      `outputs.tf` that prints the registry login server. Use local state for this exercise only.
-      Run `terraform init`, `terraform fmt`, `terraform validate`, and `terraform plan`, and read
-      the plan. Then change the registry `name` and see whether the plan says "must be replaced".
+      Create this file with the resource group and container registry from this lesson (leave
+      out the `backend` block), plus an `outputs.tf` that prints the registry login server. Use
+      local state for this exercise only. Run `terraform init`, `terraform fmt`,
+      `terraform validate`, and `terraform plan` (which needs `az login` and
+      `ARM_SUBSCRIPTION_ID`), and read the plan. Then change the registry `name` and see whether the plan says "must be replaced".
       Add `*.tfstate*` and `.terraform/` to `.gitignore` before your first commit.
 
   - type: recap

@@ -120,9 +120,9 @@ steps:
     answer: 1
     explanation: |
       Delay, or stretching of time, is what accelerated failure time models estimate. A Cox HR
-      is a ratio of rates. The two agree only under a Weibull model, and even then the time
-      ratio equals HR^(−1/shape), not the HR. "Exactly 24% lower risk" confuses the HR with a
-      risk ratio.
+      is a ratio of rates. A model can be both PH and AFT only if it is Weibull (or exponential),
+      and even then the time ratio equals HR^(−1/shape), not the HR. "Exactly 24% lower risk"
+      confuses the HR with a risk ratio.
 
   - type: text
     title: The Cox model
@@ -268,8 +268,9 @@ steps:
       - The HR is moving toward 1 over time, so the treatment effect on the hazard is strongest early
     answer: 3
     explanation: |
-      The vertical gap is log HR at each time. A shrinking gap means |log HR| is shrinking, so
-      the HR drifts toward 1. PH is violated even without crossing. It doesn't imply late harm,
+      Under PH the vertical gap is log HR at every time (in general it is the log ratio of
+      cumulative hazards). A shrinking gap means the effect is shrinking, so the HR drifts toward
+      1. PH is violated even without crossing. It doesn't imply late harm,
       which would need the curves to cross. As the Hernán step explains, a waning HR doesn't
       even prove the drug's effect wanes.
 
@@ -343,6 +344,7 @@ steps:
     title: Start-stop format and CoxTimeVaryingFitter
     language: python
     code: |
+      import pandas as pd
       from lifelines import CoxTimeVaryingFitter
 
       # One row per interval with constant covariates (first rows shown):
@@ -498,7 +500,7 @@ steps:
   - type: recap
     points:
       - "Hazard = instantaneous rate among the event-free; risk = 1 − exp(−cumulative hazard)"
-      - Under PH, S₁ = S₀^HR. The HR approximates the risk ratio only when events are rare, and it is never a time ratio
+      - Under PH, S₁ = S₀^HR. The HR approximates the risk ratio only when events are rare, and it is not a time ratio
       - "Cox: h₀(t) is unspecified; the partial likelihood uses only the order of events, and ties use Efron in lifelines"
       - Adjusted and unadjusted HRs differ in RCTs because the HR is non-collapsible, not because of confounding
       - Check PH with log(−log) plots and scaled Schoenfeld residuals, and judge the size of any violation

@@ -1,0 +1,23 @@
+id: m09-03-deployment-sensitivity
+title: Missing data at prediction time, sensitivity analysis, and reporting
+summary: What to do when inputs are missing in production, models that handle missingness natively, tipping-point
+  sensitivity analyses, and how to report it.
+minutes: 25
+status: seed
+why_it_matters: A model trained on imputed data can fail when production missingness looks different.
+  Regulators and reviewers expect a sensitivity analysis and clear reporting.
+objectives:
+- Decide how a deployed model treats missing inputs and document it
+- Explain native handling of missing values in gradient-boosted trees
+- Design a tipping-point or delta-adjustment sensitivity analysis for MNAR
+- Monitor missingness rates as a drift signal
+- Report missing data handling per TRIPOD+AI
+key_points:
+- Training-time and deployment-time missingness patterns must match or be handled explicitly
+- A sudden change in a feature's missingness is often an upstream data problem
+- Sensitivity analyses show how strong MNAR must be to change the conclusion
+- Report amount, pattern, and handling of missing data
+tags:
+- missing-data
+- deployment
+- interview

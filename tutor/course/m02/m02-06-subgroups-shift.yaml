@@ -199,7 +199,7 @@ steps:
     text: |
       Two influential results show that the criteria conflict:
 
-      - **Kleinberg, Mullainathan, and Raghavan (2016)**: calibration within groups and balance of
+      - **Kleinberg, Mullainathan, and Raghavan (arXiv 2016, ITCS 2017)**: calibration within groups and balance of
         error rates across groups can hold together only if the model predicts perfectly or the
         groups have **equal base rates**.
       - **Chouldechova (2017)**: at any threshold,
@@ -348,11 +348,11 @@ steps:
 
   - type: quiz
     question: |
-      You have stroke admissions from four facilities (`facility_id`) over 2016–2023. Which design
+      You have stroke admissions from four facilities (`facility_id`) over 2020–2025. Which design
       best estimates how the model will do when deployed next year at a fifth hospital?
     options:
       - Random 80/20 split of all patients, repeated five times
-      - Train on 2016–2021, test on 2022–2023 at the same four facilities
+      - Train on 2020–2023, test on 2024–2025 at the same four facilities
       - Leave-one-facility-out, with each held-out facility's test restricted to the later years
       - Train on all data, then report the bootstrap optimism-corrected AUROC
     answer: 2
@@ -369,8 +369,8 @@ steps:
 
       - **Covariate shift**: the feature distribution changes (older patients, more AF) but the
         risk given features is the same. Discrimination may hold. Check calibration and case mix.
-      - **Label (prior) shift**: the outcome rate changes (better post-discharge follow-up lowers
-        readmissions). Mostly an intercept problem, so a recalibration update is the fix.
+      - **Label (prior) shift**: the outcome rate changes (a bad flu season raises readmissions
+        across the board). Mostly an intercept problem, so a recalibration update is the fix.
       - **Concept shift**: the relationship itself changes (a new anticoagulation protocol changes
         what `prior_af` means for risk). This needs retraining.
 
@@ -415,11 +415,12 @@ steps:
       - the full development pipeline, including tuning and any recalibration
       - performance with **both discrimination and calibration**, with uncertainty, on each
         validation type
-      - **fairness**: performance across relevant subgroups
+      - **fairness**: any approaches used to address it, and performance across key subgroups
       - availability of code and models, and the model's limitations and intended use
 
-      Its companion, PROBAST, is used to assess risk of bias when reviewing prediction model
-      studies. Mentioning both in an interview signals that you know how this work is judged.
+      Its companion, PROBAST (updated as PROBAST+AI in 2025), is used to assess risk of bias
+      when reviewing prediction model studies. Mentioning both in an interview signals that you
+      know how this work is judged.
 
   - type: laptop
     title: Subgroup and leave-one-site-out evaluation

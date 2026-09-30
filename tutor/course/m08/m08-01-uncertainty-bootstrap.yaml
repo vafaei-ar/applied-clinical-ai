@@ -1,0 +1,23 @@
+id: m08-01-uncertainty-bootstrap
+title: 'Error bars on model performance: bootstrap and paired comparisons'
+summary: Confidence intervals for AUROC, calibration, and net benefit; the bootstrap done right for patient-level
+  data; comparing two models fairly.
+minutes: 25
+status: seed
+why_it_matters: A point estimate of AUROC is not evidence. Reviewers, regulators, and interviewers all
+  ask how uncertain it is and whether model B is really better than A.
+objectives:
+- Build percentile and BCa bootstrap CIs for a performance metric
+- Resample at the patient (cluster) level, not the row level
+- Explain optimism and use bootstrap optimism correction for internal validation (Harrell)
+- Compare two models on the same data with a paired bootstrap or DeLong test
+- Interpret a frequentist CI correctly and contrast it with a Bayesian credible interval
+key_points:
+- Repeated encounters per patient break row-level resampling
+- Bootstrap CIs for small subgroups are wide; say so
+- Non-overlapping vs overlapping CIs is not a significance test for paired models
+- Report CIs for calibration slope and Brier score, not only AUROC
+tags:
+- statistics
+- bootstrap
+- interview

@@ -75,7 +75,8 @@ steps:
     code: |
       # syntax=docker/dockerfile:1
       FROM python:3.12-slim@sha256:<digest> AS builder
-      COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /bin/uv
+      COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /bin/uv
+      ENV UV_PYTHON_DOWNLOADS=0
       WORKDIR /app
       COPY pyproject.toml uv.lock ./
       RUN uv sync --locked --no-install-project
@@ -95,7 +96,9 @@ steps:
       Stage 1 installs locked dependencies (cached separately from the source), then installs
       the package itself non-editable into `.venv`. Stage 2 starts clean and copies only the
       virtual environment and the model. `uv`, caches, and the source tree never reach the
-      runtime image. The `<digest>` placeholder is the base image's `sha256` from your registry;
+      runtime image. `UV_PYTHON_DOWNLOADS=0` makes uv use the image's own Python, so the copied
+      `.venv` points at an interpreter that also exists in stage 2 (both stages must use the same
+      base image). The `<digest>` placeholder is the base image's `sha256` from your registry;
       pinning it makes rebuilds reproducible. Update it deliberately (Dependabot or Renovate can
       open PRs for this) rather than letting a tag change under you.
 
@@ -119,10 +122,11 @@ steps:
   - type: text
     title: Why each hardening choice matters
     text: |
-      - **Slim base image**: `python:3.12-slim` is roughly a fifth the size of the full Debian
-        image. Fewer packages means a smaller attack surface and fewer CVEs for the scanner to
-        report. Alpine is smaller still, but its musl libc causes trouble with scientific
-        wheels, so slim Debian is the usual choice for ML.
+      - **Slim base image**: `python:3.12-slim` is roughly a tenth the size of the full
+        `python:3.12` image (about 43 MB vs 411 MB compressed on Docker Hub in September 2026).
+        Fewer packages means a smaller attack surface and fewer CVEs for the scanner to report.
+        Alpine is smaller still, but its musl libc can cause trouble with scientific wheels, so
+        slim Debian is the usual choice for ML.
       - **Non-root user**: if an attacker exploits your app, they get an unprivileged user
         rather than root inside the container, which limits what they can do to the container
         and makes escapes harder. Many platforms (and hospital security reviews) require it.
@@ -140,7 +144,7 @@ steps:
       **1. Control the build context.** `docker build .` sends the whole directory to the
       builder. A `.dockerignore` keeps out `.git`, `.venv`, `.env`, notebooks, and above all
       **data**: `*.duckdb`, `*.csv`, `data/`. A synthetic dataset is harmless; a real extract
-      with PHI copied into an image is a reportable incident.
+      with PHI copied into an image can become a reportable incident.
 
       **2. Layers are forever.** `COPY .env .` followed by `RUN rm .env` leaves the file in the
       earlier layer, recoverable with `docker save`. `ARG` and `ENV` values show up in
@@ -180,20 +184,22 @@ steps:
     code: |
       .git
       .github
-      .venv
-      __pycache__/
-      *.pyc
+      **/.venv
+      **/__pycache__
+      **/*.pyc
       .env
-      *.env
+      **/*.env
       notebooks/
       data/
-      *.duckdb
-      *.csv
-      *.parquet
+      **/*.duckdb
+      **/*.csv
+      **/*.parquet
       tests/
     after: |
-      A smaller context also makes builds faster. Excluding `tests/` is a choice: tests run in
-      CI against the installed package, not inside the production image.
+      Patterns match from the context root, so a bare `*.csv` would skip only root-level files.
+      The `**/` prefix matches at any depth, which is what you want for data files. A smaller
+      context also makes builds faster. Excluding `tests/` is a choice: tests run in CI against
+      the installed package, not inside the production image.
 
   - type: think
     interview: true
@@ -264,8 +270,8 @@ steps:
             run:
               working-directory: 03-production-ml
           steps:
-            - uses: actions/checkout@v4
-            - uses: astral-sh/setup-uv@v6
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v10.2.0
             - run: uv sync --locked --extra dev
             - run: uv run ruff check .
             - run: uv run ruff format --check .
@@ -275,8 +281,11 @@ steps:
       `on` lists the triggers. `permissions: contents: read` gives the workflow's token the
       minimum it needs (least privilege; the default can be broader). `uv sync --locked` fails
       if `uv.lock` is out of date with `pyproject.toml`, so CI tests exactly the locked
-      environment. Action versions shown were current at writing; for high-assurance
-      pipelines, pin third-party actions to a full commit SHA.
+      environment. Action versions shown were current in late September 2026, and they move
+      fast (older Node 20-based versions are being retired on GitHub's runners), so check each
+      action's releases page. `setup-uv` no longer publishes moving major tags such as `@v10`, so
+      it is pinned to a full release tag. For high-assurance pipelines, pin third-party actions
+      to a full commit SHA.
 
   - type: code
     title: GitHub Actions, build and push
@@ -291,15 +300,15 @@ steps:
             contents: read
             id-token: write        # for OIDC login, no stored cloud password
           steps:
-            - uses: actions/checkout@v4
-            - uses: azure/login@v2
+            - uses: actions/checkout@v7
+            - uses: azure/login@v3
               with:
                 client-id: ${{ secrets.AZURE_CLIENT_ID }}
                 tenant-id: ${{ secrets.AZURE_TENANT_ID }}
                 subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
             - run: az acr login --name readmitacr
-            - uses: docker/setup-buildx-action@v3
-            - uses: docker/build-push-action@v6
+            - uses: docker/setup-buildx-action@v4
+            - uses: docker/build-push-action@v7
               with:
                 context: 03-production-ml
                 push: true

@@ -32,9 +32,10 @@ steps:
 
       It answers: **"90 days [chunk 4812]."** Clear, confident, cited.
 
-      Your institution's protocol says **21 days**. Chunk 4812 was a paragraph describing the
-      POINT trial, which did use 90 days of DAPT. The model summarized its source faithfully.
-      The source was the wrong one.
+      Your institution's protocol says **21 days**, a local choice (the CHANCE trial used 21
+      days, POINT used 90). Chunk 4812 was a paragraph describing the POINT trial, which did
+      use 90 days of DAPT. The model summarized its source faithfully. The source was the wrong
+      one.
 
       This is the central lesson of RAG: **the generator can only be as good as what the
       retriever hands it.** Bad retrieval doesn't produce "I don't know". It produces fluent,
@@ -105,8 +106,8 @@ steps:
 
   - type: quiz
     question: |
-      A colleague drops `normalize_embeddings=True` but still ranks with `emb @ q`. What
-      changes?
+      Suppose the embedding model does not normalize its own outputs. A colleague drops
+      `normalize_embeddings=True` but still ranks with `emb @ q`. What changes?
     options:
       - Nothing; embeddings are always unit length
       - Scores become raw dot products, so longer vectors can outrank closer ones and the ranking can change
@@ -115,9 +116,10 @@ steps:
     answer: 1
     explanation: |
       Without normalization, `emb @ q` is a dot product, which mixes direction (meaning) with
-      vector length. Some models output near-unit vectors anyway, which is why this bug often
-      hides, but you can't rely on it. The shapes are unchanged, and a dot product is not a
-      Euclidean distance.
+      vector length. Some models already end with a normalization layer, including
+      `all-MiniLM-L6-v2` from the snippet, so for that model the flag is redundant and nothing
+      would change. That is why this bug often hides, but you can't rely on it for every model.
+      The shapes are unchanged, and a dot product is not a Euclidean distance.
 
   - type: text
     title: What embeddings miss
@@ -273,11 +275,11 @@ steps:
     code: |
       from sentence_transformers import CrossEncoder
 
-      reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+      reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L6-v2")
 
       candidates = hybrid_search(question, filters=filters, k=50)  # your retriever
       pairs = [(question, c.text) for c in candidates]
-      scores = reranker.predict(pairs)          # one relevance score per pair
+      scores = reranker.predict(pairs)          # one relevance logit per pair; only order matters
 
       order = sorted(range(len(candidates)), key=lambda i: -scores[i])
       context = [candidates[i] for i in order[:5]]
@@ -373,8 +375,9 @@ steps:
       - **Content**: the answer isn't in the corpus at all, yet the system answers anyway.
       - **Retrieval**: the right chunk exists but isn't ranked high enough, or is dropped when
         the context is assembled.
-      - **Generation**: the right chunk is in context but the model doesn't use it, adds
-        information that isn't there, gets the format wrong, or gives a partial answer.
+      - **Generation**: the right chunk is in context but the model doesn't extract the answer,
+        ignores the requested format, answers at the wrong level of specificity, or gives a
+        partial answer.
 
       Notice that most of these are invisible from the final answer alone. You can only locate
       them if you evaluate **retrieval and generation separately**, which is exactly what the

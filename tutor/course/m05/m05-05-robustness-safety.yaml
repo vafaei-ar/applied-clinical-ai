@@ -310,8 +310,10 @@ steps:
       - The answer is correct but twice as long as needed
     answer: 2
     explanation: |
-      Recent DOAC use is a key reason to withhold IV thrombolysis unless specific lab tests are
-      normal. Getting it wrong risks intracranial hemorrhage, and the answer is phrased as an
+      Recent DOAC use is a major reason for caution with IV thrombolysis. The 2019 AHA/ASA
+      guideline advised against it within 48 hours unless specific lab tests were normal, and the
+      2026 update lists it as a relative contraindication that needs individualized risk-benefit
+      review. Getting it wrong risks intracranial hemorrhage, and the answer is phrased as an
       actionable instruction in a time-pressured setting, so both severity and likelihood are
       high. The omitted pending result is a real but lower-risk issue, "4 weeks" vs "1 month"
       is equivalent, and verbosity is a usability problem.

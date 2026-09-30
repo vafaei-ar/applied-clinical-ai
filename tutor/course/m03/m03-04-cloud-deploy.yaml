@@ -61,7 +61,8 @@ steps:
       The readmission service on Azure. CI pushes images with a federated (OIDC) identity. The
       container app has its own managed identity with narrow roles: pull images, read one
       vault's secrets, read the model container. Data services are reached through private
-      endpoints inside the VNet, and the EHR connects over a private link, not the internet.
+      endpoints inside the VNet, and the EHR connects over VPN or ExpressRoute, not the public
+      internet.
 
   - type: text
     title: Three ways to run a container
@@ -72,12 +73,14 @@ steps:
       A strong default for one or a few model services.
 
       **Azure App Service** (Web App for Containers): a mature web-app platform with deployment
-      slots (swap staging into production), VNet integration, and a long compliance track
-      record. Common in hospitals that already host web apps there.
+      slots (swap staging into production; Standard tier and up), VNet integration (for
+      outbound calls; inbound private access uses a private endpoint), and a long compliance
+      track record. Common in hospitals that already host web apps there.
 
       **Azure Kubernetes Service (AKS)**: managed Kubernetes. Full control over networking,
-      node pools (including GPUs), sidecars, and scheduling. You also own upgrades, node
-      patching, and cluster security. Worth it when there's a platform team and many services;
+      node pools (including GPUs), sidecars, and scheduling. You also carry much of the work of
+      upgrades, node patching, and cluster security (auto-upgrade options help, but the
+      responsibility is yours). Worth it when there's a platform team and many services;
       overkill for one API. Module 06 returns to Kubernetes.
 
       Rule of thumb: pick the **least operational burden** that meets your network and
@@ -203,9 +206,12 @@ steps:
         --role "Key Vault Secrets User" \
         --scope "$KV_ID"
     after: |
-      The scope is the vault's full resource ID, not the resource group or subscription. In
-      practice these assignments live in infrastructure-as-code (Bicep or Terraform, Module 06)
-      so they're reviewed and reproducible rather than clicked.
+      The scope is the vault's full resource ID, not the resource group or subscription. This
+      assumes the vault uses the **Azure RBAC** permission model (the default for vaults created
+      with API version 2026-02-01 and later); on an older vault that still uses access
+      policies, these roles have no effect. In practice these assignments live in
+      infrastructure-as-code (Bicep or Terraform, Module 06) so they're reviewed and
+      reproducible rather than clicked.
 
   - type: quiz
     question: |
@@ -232,7 +238,8 @@ steps:
       endpoints**: reachable from the internet, protected by authentication.
 
       A **private endpoint** gives the service a private IP inside your VNet via Azure Private
-      Link. Combined with **disabling public network access** on the service, it means:
+      Link (for ACR this needs the Premium tier). Combined with **disabling public network
+      access** on the service, it means:
 
       - traffic between your app and the data stays on Microsoft's backbone and your private
         network, not the internet;
@@ -241,10 +248,13 @@ steps:
         private DNS zone, which is a common source of "it works in the portal but not in the
         app" bugs).
 
-      For the service itself: use an **internal** ingress so it's reachable only inside the
-      network, with the hospital's EHR connecting over ExpressRoute or a site-to-site VPN. If
-      it must be public, put a WAF (Application Gateway or Front Door) in front and require
-      authentication.
+      For the service itself on Container Apps: create an **internal environment** in your VNet
+      (it has no public endpoint), so the app is reachable only from the network, with the
+      hospital's EHR connecting over ExpressRoute or a site-to-site VPN. Watch the wording: an
+      app's "internal" ingress setting means reachable only from other apps in the same
+      environment, so on an internal environment you publish the app with "external" ingress,
+      which there means reachable from the VNet. If it must be public, put a WAF (Application
+      Gateway or Front Door) in front and require authentication.
 
   - type: quiz
     question: |
@@ -282,9 +292,10 @@ steps:
       Some implementation specifications (including encryption) are **addressable**, which
       does **not** mean optional: you implement them or document why an equivalent measure is
       reasonable. In practice, encrypt everything. HHS proposed updates to the Security Rule in
-      January 2025 that would make more of these requirements explicit; check the current
-      status. The administrative and physical safeguards also apply, largely through your
-      organization and the cloud provider.
+      January 2025 that would drop the addressable category and make encryption and
+      multi-factor authentication explicit requirements. As of September 2026 the proposal was
+      not final, so check the current status. The administrative and physical safeguards also
+      apply, largely through your organization and the cloud provider.
 
   - type: text
     title: The BAA and shared responsibility
@@ -331,8 +342,9 @@ steps:
     model_answer: |
       I'd go piece by piece. The image goes to a private ACR, built and pushed by CI using
       OIDC federation, so there's no stored cloud secret, and scanned before deploy. I'd run it
-      on Container Apps or App Service in the hospital's VNet with internal-only ingress; the
-      EHR reaches it over the existing ExpressRoute or VPN. The app gets a managed identity
+      on Container Apps in an internal environment in the hospital's VNet, with no public
+      endpoint (App Service would need a private endpoint for inbound); the EHR reaches it
+      over the existing ExpressRoute or VPN. The app gets a managed identity
       with three narrow role assignments: AcrPull on the registry, Storage Blob Data Reader on
       the model container, and Key Vault Secrets User on one vault, only if there's a secret
       we can't eliminate. Storage, Key Vault, and any database get private endpoints with
@@ -344,7 +356,7 @@ steps:
       team reviews code, not screenshots.
     key_points:
       - Private registry with CI pushing via OIDC and image scanning
-      - Managed hosting in a VNet with internal ingress and private connectivity to the EHR
+      - Managed hosting with no public endpoint (internal environment in a VNet) and private connectivity to the EHR
       - Managed identity with narrowly scoped RBAC roles; Key Vault only for unavoidable secrets
       - Private endpoints with public access disabled; TLS and encryption at rest
       - Audit logging without PHI in general logs, BAA scope confirmed, synthetic data outside prod, infrastructure as code
@@ -436,8 +448,11 @@ steps:
       each role assignment with its scope, secrets (ideally none), encryption, logging and
       retention, and BAA scope. Add an Azure/AWS/GCP column for each component. If you have an
       Azure subscription (a free account works), push your image to ACR and deploy it with
-      `az containerapp create` using a system-assigned identity with `AcrPull`, then call
-      `/readyz`. Use synthetic data only.
+      `az containerapp create` using a user-assigned identity that has `AcrPull` (the CLI
+      can assign the role for you), then call `/readyz`. A system-assigned identity also works,
+      but it only exists once the app does, so create the app with a quickstart image first and
+      then switch it with `az containerapp registry set --identity system`. Use synthetic data
+      only.
 
   - type: recap
     points:

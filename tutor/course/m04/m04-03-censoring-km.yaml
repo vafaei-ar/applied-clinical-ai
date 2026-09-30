@@ -138,15 +138,17 @@ steps:
     question: What is the KM estimate S(5) for the table above?
     options:
       - "0.625 (5 of 8 patients are stroke-free after month 5)"
-      - "0.500 (0.875 × 4/7)"
+      - "0.250 (drop the four censored patients first, then recompute)"
       - "0.656 (0.875 × 6/8)"
       - "0.583 (0.875 × 4/6)"
     answer: 3
     explanation: |
       Just before month 5, patient 1 has had a stroke and patient 2 was censored at month 3, so
       **6** patients are at risk (3–8). Two strokes give 1 − 2/6 = 4/6, and 0.875 × 4/6 = 0.583.
-      The 0.625 answer counts the censored patient as stroke-free forever. The 4/7 option
-      keeps the censored patient in the denominator after they've left.
+      The 0.625 answer counts the censored patient as stroke-free forever (equivalently, it
+      keeps them in the risk set after they've left: 0.875 × 5/7). The 0.250 answer is the
+      "drop the censored" error from the start of the lesson (0.75 × 1/3). The 0.656 answer
+      never shrinks the risk set (n = 8).
 
   - type: quiz
     question: |
@@ -215,8 +217,8 @@ steps:
         tail.
       - **CIs.** Pointwise bands aren't a test of the difference between curves. Overlapping
         bands at one time point don't mean "no difference".
-      - **Fixed-time readings.** At 12 months, stroke-free probability is about 0.92 on
-        aspirin and 0.93 on zetagrel, so risk is roughly 8% vs 7%. Absolute differences like
+      - **Fixed-time readings.** At 12 months, stroke-free probability is about 0.91 on
+        aspirin and 0.93 on zetagrel, so risk is roughly 9% vs 7%. Absolute differences like
         this are what patients and payers care about.
 
   - type: quiz
@@ -225,7 +227,7 @@ steps:
       - About 12 months
       - About 28 months, where the curve ends
       - Not reached, because the curve never falls to 0.5
-      - 0.83, the lowest point of the curve
+      - 0.81, the lowest point of the curve
     answer: 2
     explanation: |
       The median is the time at which S(t) = 0.5. The aspirin curve stays above 0.80 for the
@@ -285,7 +287,7 @@ steps:
           a["time_months"], z["time_months"],
           event_observed_A=a["stroke"], event_observed_B=z["stroke"],
       )
-      print(res.test_statistic, res.p_value)   # about 6.3, 0.012 on the simulated data
+      print(res.test_statistic, res.p_value)   # about 6.4, 0.012 on the simulated data
     after: The p-value matches the one printed on the KM figure.
 
   - type: quiz
@@ -300,7 +302,7 @@ steps:
       A p-value measures how surprising the data are **under the null** of identical curves.
       It's not an effect size (the "1.2%" option), not the probability that the hypothesis
       is true (the "98.8%" option), and it doesn't test proportional hazards. For the size of the effect, read
-      the curves (about 1 to 1.5 percentage points lower risk at 12 months) or fit a Cox model.
+      the curves (about 2 percentage points lower risk at 12 months) or fit a Cox model.
 
   - type: text
     title: When curves cross

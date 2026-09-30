@@ -1,0 +1,23 @@
+id: m08-02-testing-multiplicity
+title: P-values, multiplicity, and subgroup fishing
+summary: What a p-value is and is not; type I and II error; Bonferroni, Holm, and Benjamini-Hochberg;
+  pre-specification; and why subgroup analyses mislead.
+minutes: 25
+status: seed
+why_it_matters: Clinical evidence is full of over-interpreted p-values and post hoc subgroups. Being precise
+  here is a fast signal of rigor.
+objectives:
+- State what a p-value means and list common misinterpretations
+- Distinguish family-wise error rate from false discovery rate and pick a correction
+- Explain why unplanned subgroup analyses produce false positives (ISIS-2 astrological signs)
+- Design interaction tests and pre-specified subgroups instead of fishing
+- Explain non-inferiority margins and one- vs two-sided tests
+key_points:
+- p is the probability of data this extreme given the null, not the probability the null is true
+- Holm dominates Bonferroni; BH controls FDR under independence or positive dependence
+- Test for interaction, don't compare p-values across subgroups
+- Absence of significance is not evidence of equivalence
+tags:
+- statistics
+- multiplicity
+- interview

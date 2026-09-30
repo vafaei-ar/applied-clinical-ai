@@ -53,9 +53,11 @@ steps:
       - **Follow-up**: 12 to 30 months, depending on when the patient enrolled
 
       The design mirrors a real question. Trials such as CHANCE (NEJM 2013) and POINT (NEJM
-      2018) tested adding clopidogrel to aspirin after minor stroke or TIA, and bleeding was
-      the price of the benefit. The patients look like the Module 01 cohort, but a trial
-      enrolls them prospectively instead of finding them in claims.
+      2018) tested adding clopidogrel to aspirin within hours of a minor stroke or high-risk
+      TIA. Both cut recurrent stroke over 90 days. POINT also found more major bleeding
+      (0.9% vs 0.4%), whereas CHANCE saw no significant excess. The patients look like the
+      Module 01 cohort, but a trial enrolls them prospectively instead of finding them in
+      claims.
 
   - type: text
     title: Phases, and the question each one asks
@@ -250,8 +252,8 @@ steps:
 
       That's why the abstract's "35% reduction in completers" should make you wary. ITT answers
       a clean question: what happens when you **assign** this treatment policy? Lesson 2 makes
-      this precise with estimands. ICH E9(R1) replaced the ITT vs PP debate with explicit
-      handling of events like discontinuation.
+      this precise with estimands. ICH E9(R1) reframes the ITT vs PP debate as explicit
+      handling of intercurrent events like discontinuation.
 
   - type: text
     title: Endpoints, and the surrogate trap
@@ -300,7 +302,8 @@ steps:
 
       - **Sloppiness helps NI.** Poor adherence, crossover, and misclassified outcomes all
         push arms toward looking similar, which is the NI hypothesis. So ITT is not
-        automatically conservative here. Guidelines ask for ITT and PP analyses to agree.
+        automatically conservative here. ICH E9 expects both analyses, and agreement between
+        them adds confidence.
       - **Assay sensitivity.** NI only means something if the comparator would have beaten
         placebo in this trial. A good active comparator, dosed and followed properly, is part
         of the design.
@@ -336,7 +339,7 @@ steps:
       - **Bonferroni / Holm** splitting of alpha across a family.
       - **Graphical approaches** that pass alpha between hypotheses according to a
         pre-specified diagram.
-      - **Alpha spending** (for example O'Brien–Fleming boundaries) for interim looks.
+      - **Alpha spending** (for example an O'Brien–Fleming-type spending function) for interim looks.
 
       The key word in all of these is **pre-specified**. Choosing the method after you see
       the data defeats the purpose.
@@ -356,8 +359,9 @@ steps:
       With 12 subgroups and a null primary, one p = 0.03 is roughly what chance produces. The
       right test is whether the effect **differs** across age groups (an interaction test),
       not whether one subgroup is significant on its own. ISIS-2 (Lancet 1988) famously showed
-      that aspirin appeared not to work in patients born under Gemini or Libra, which is a
-      reminder of how easily subgroups mislead. Subgroups can be informative, but they need
+      that aspirin appeared not to work (if anything, slightly harmful, and not significantly
+      so) in patients born under Gemini or Libra, which is a reminder of how easily subgroups
+      mislead. Subgroups can be informative, but they need
       replication.
 
   - type: text
@@ -390,14 +394,14 @@ steps:
       whether it could detect HR 0.85 with the same power. Roughly how many events would that need?
     options:
       - About the same, since power is already 90%
-      - About 1.4× as many
+      - About 1.7× as many
       - About 2× as many
       - About 3× as many
     answer: 3
     explanation: |
       Events scale with 1/(log HR)². (log 0.75 / log 0.85)² = (0.288 / 0.163)² ≈ 3.1, which
-      gives about 1,590 events. The tempting "1.4×" comes from comparing effect sizes linearly
-      (0.25 vs 0.15 reduction, about 1.7× smaller) and forgetting that the effect enters squared.
+      gives about 1,590 events. The tempting "1.7×" comes from comparing effect sizes linearly
+      (a 25% vs a 15% reduction) and forgetting that the effect enters squared.
       Detecting modest effects is very expensive.
 
   - type: think

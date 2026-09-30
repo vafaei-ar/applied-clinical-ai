@@ -1,0 +1,23 @@
+id: m09-01-mechanisms
+title: 'Why clinical data is missing: MCAR, MAR, MNAR and informative missingness'
+summary: The missingness mechanisms, why EHR missingness is usually informative, and what each implies
+  for bias.
+minutes: 25
+status: seed
+why_it_matters: Handling missing data without understanding its mechanism is the most common silent error
+  in clinical ML. Interviewers ask you to defend your choice.
+objectives:
+- Define MCAR, MAR, and MNAR with clinical examples
+- Explain why a lab is missing because it was never ordered, and what that says about the patient
+- Predict the bias from complete-case analysis under each mechanism
+- Use missingness indicators and understand when they help and when they leak
+- Explain why MAR cannot be verified from the data alone
+key_points:
+- Tests are ordered when clinicians are worried, so missingness carries signal
+- Missing values in EHR come from process, not from random noise
+- Complete-case analysis is unbiased only under strong assumptions
+- MAR vs MNAR is an assumption about unobserved data, not a testable fact
+tags:
+- missing-data
+- ehr
+- interview

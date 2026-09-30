@@ -49,7 +49,7 @@ def fig_azure_architecture():
     _arrow(ax, 7.0, 3.2, 8.0, 3.15, PURPLE)
     _arrow(ax, 7.0, 2.7, 8.0, 1.5, PURPLE)
 
-    ax.text(4.0, 1.3, "internal ingress only\npublic access disabled\non data services",
+    ax.text(4.0, 1.3, "internal environment\n(no public endpoint)\npublic access disabled\non data services",
             fontsize=12.5, color=MUTED, style="italic", va="center")
     ax.set_title("The readmission service on Azure", loc="left", pad=4)
     return save(fig, "m03-04-azure-architecture")

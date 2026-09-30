@@ -141,7 +141,8 @@ steps:
       import statsmodels.api as sm
 
       def calibration_intercept_slope(y, p, eps=1e-6):
-          p = np.clip(p, eps, 1 - eps)
+          y = np.asarray(y)                 # plain arrays, so .params is indexable by position
+          p = np.clip(np.asarray(p, dtype=float), eps, 1 - eps)
           lp = np.log(p / (1 - p))          # logit of predicted risk
 
           # CITL: intercept only, with lp as an offset (slope fixed at 1)
@@ -220,8 +221,8 @@ steps:
       - Brier is prevalence-invariant, so the difference must be sampling noise
     answer: 0
     explanation: |
-      No-skill references are 0.13 × 0.87 ≈ 0.113 at A and 0.05 × 0.95 ≈ 0.048 at B. Scaled
-      Brier is about 0.07 at A and about 0.04 at B, so the model is modest at both and not
+      No-skill references are 0.13 × 0.87 ≈ 0.113 at A and 0.05 × 0.95 = 0.0475 at B. Scaled
+      Brier is about 0.07 at A and about 0.03 at B, so the model is modest at both and not
       clearly better at B. Raw Brier falls mechanically as outcomes get rarer. Comparing raw
       values across sites is a common mistake.
 
@@ -439,7 +440,7 @@ steps:
     points:
       - Discrimination is **ranking**, calibration is **honest numbers**, and you need both when risks drive action
       - "Read a reliability diagram: below the diagonal means over-prediction, a flat curve means too extreme"
-      - "Calibration-in-the-large (ideal 0) and slope (ideal 1); slope < 1 means overfitting and too-extreme risks"
+      - "Calibration-in-the-large (ideal 0) and slope (ideal 1); slope < 1 means too-extreme risks, usually from overfitting"
       - Always compare Brier with the no-skill reference π(1 − π), or report scaled Brier
       - ECE depends on binning and hides direction; report the curve plus intercept and slope with CIs
       - Calibration drifts with prevalence and case mix; update the intercept first, then the slope

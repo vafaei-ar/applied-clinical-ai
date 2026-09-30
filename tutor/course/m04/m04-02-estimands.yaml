@@ -18,7 +18,7 @@ key_points:
   - Intercurrent events change the question, so each needs an explicit strategy
   - Loss to follow-up is missing data, not an intercurrent event
   - Missing data handling follows from the strategy
-  - Sensitivity analyses test assumptions for the same estimand; supplementary analyses target different estimands
+  - Sensitivity analyses test assumptions for the same estimand; supplementary analyses add insight (often under a different question) and carry less weight
 tags: [trials, estimands, interview]
 steps:
   - type: text
@@ -56,7 +56,9 @@ steps:
   - type: text
     title: The five attributes
     text: |
-      E9(R1) describes an estimand with five attributes:
+      E9(R1) section A.3.3 lists treatment, population, variable, and a population-level
+      summary, and section A.3.2 adds the strategy for each intercurrent event. Most training
+      material counts that strategy as a fifth attribute, and so does this course:
 
       - **Treatment**: the treatment condition of interest and the comparator. This can be a
         whole regimen ("zetagrel + aspirin, with any rescue medication a clinician adds").
@@ -69,7 +71,7 @@ steps:
       - **Population-level summary**: how arms are compared, such as a hazard ratio, a
         difference in 12-month risk, or a difference in restricted mean survival time.
 
-      The fourth attribute is the new one. It's where most of the thinking happens.
+      The intercurrent-events attribute is the new one. It's where most of the thinking happens.
 
   - type: image
     image: m04-02-estimand-attributes.png
@@ -314,16 +316,19 @@ steps:
     text: |
       E9(R1) separates two kinds of extra analysis, and mixing them up is a common mistake.
 
-      - A **sensitivity analysis** targets the **same estimand** under different assumptions.
-        For example: what if patients lost to follow-up had a higher stroke risk than those who
-        stayed? A **tipping-point** analysis increases that assumed risk until the conclusion
-        flips, and asks whether that assumption is clinically plausible.
-      - A **supplementary analysis** targets a **different estimand**, such as the
-        hypothetical-strategy effect next to the treatment-policy primary.
+      - A **sensitivity analysis** stays **focused on the same estimand** and probes the main
+        estimator's assumptions. For example: what if patients lost to follow-up had a higher
+        stroke risk than those who stayed? A **tipping-point** analysis increases that assumed
+        risk until the conclusion flips, and asks whether that assumption is clinically
+        plausible.
+      - A **supplementary analysis** is any other analysis run to understand the treatment
+        effect better, such as the hypothetical-strategy effect next to the treatment-policy
+        primary. It is not a robustness check of the main estimator, and it generally plays a
+        lesser role in interpreting the trial.
 
-      So the old "ITT is primary, PP is a sensitivity analysis" framing is inaccurate. PP
-      changes the question, which makes it supplementary at best, and a biased estimator of
-      any clear estimand at worst.
+      So the old "ITT is primary, PP is a sensitivity analysis" framing is inaccurate. The
+      addendum treats the per-protocol set as at most supplementary, notes that it may not
+      align with any clear estimand, and warns that it can be severely biased.
 
   - type: text
     title: The summary measure is a choice too
@@ -364,7 +369,7 @@ steps:
       - Explains the gap it fills, since analysis sets and missing-data methods were implicitly defining the question
       - Names the intercurrent-event strategies
       - States that estimator, data collection, and missing-data handling follow from the estimand
-      - Distinguishes sensitivity analyses (same estimand) from supplementary analyses (different estimand)
+      - Distinguishes sensitivity analyses (same estimand, testing assumptions) from supplementary analyses (extra insight, often another question)
 
   - type: think
     interview: true
@@ -382,7 +387,7 @@ steps:
       censoring is still wrong, because discontinuation is informative. Patients who bleed may
       be older or frailer, and they have a different stroke risk. We'd need inverse
       probability of censoring weights based on predictors of discontinuation, and we'd
-      present it as a supplementary estimand. Operationally, I'd make sure the protocol says
+      present it as a supplementary analysis of a second estimand. Operationally, I'd make sure the protocol says
       "stop drug, stay in the study" and that sites are trained on it, because the
       treatment-policy estimand depends on retrieving those outcomes.
     key_points:
@@ -413,4 +418,4 @@ steps:
       - Treatment policy needs follow-up after the ICE; hypothetical needs a modelled no-ICE assumption
       - Death can't be handled by treatment policy; use composite or while alive (competing risks, lesson 5)
       - Missing-data handling and censoring rules follow from the strategy
-      - Sensitivity analyses keep the estimand; supplementary analyses change it
+      - Sensitivity analyses keep the estimand and test assumptions; supplementary analyses add insight, often under a different question

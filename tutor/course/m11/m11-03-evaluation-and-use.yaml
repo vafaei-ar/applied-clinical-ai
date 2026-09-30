@@ -1,0 +1,24 @@
+id: m11-03-evaluation-and-use
+title: Evaluating and using clinical NLP
+summary: Span-level metrics, error analysis, phenotyping that combines notes and codes, embeddings and
+  retrieval over notes, and bias in clinical language.
+minutes: 25
+status: seed
+why_it_matters: NLP outputs enter models and decisions. You need to evaluate them at the right unit and
+  understand where language itself carries bias.
+objectives:
+- Choose span, mention, and document-level metrics and explain the differences
+- Do error analysis by category and drive improvements from it
+- Combine notes with codes for computable phenotypes and evaluate them against chart review
+- Use note embeddings and retrieval responsibly
+- Recognize stigmatizing language and documentation bias, and their effect on models
+key_points:
+- Exact-match span F1 penalizes acceptable boundary differences; use relaxed matching too
+- Chart-review validation (PPV and sensitivity of a phenotype) is the standard evidence
+- Documentation patterns differ by race, language, and site
+- Link to the LLM evaluation module for generation-based tasks
+tags:
+- nlp
+- evaluation
+- bias
+- interview
