@@ -21,7 +21,8 @@ def _validate(course_dir: Path) -> int:
     steps = sum(len(lesson.steps) for lesson in course.lessons.values())
     print(
         f"OK: {len(course.spec.modules)} modules, {len(course.order)} lessons "
-        f"({authored} authored, {len(course.order) - authored} seed), {steps} steps."
+        f"({authored} authored, {len(course.order) - authored} seed), {steps} steps, "
+        f"{len(course.cases)} cases."
     )
     return 0
 

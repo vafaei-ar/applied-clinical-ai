@@ -34,6 +34,7 @@ from .content import (
     Step,
     TextStep,
     ThinkStep,
+    case_step,
     load_lesson_file,
 )
 from .llm import Tutor, TutorUnavailable
@@ -298,6 +299,8 @@ class Engine:
             "/map: the course map and jumping to any lesson\n"
             "/review: spaced review of things you missed\n"
             "/interview: a mock interview question on what you've covered\n"
+            "/case: a realistic scenario that combines several lessons\n"
+            "/notes: a study sheet of your completed lessons' recaps\n"
             "/later: your laptop to-do list\n"
             "/progress: your stats\n"
             + ("/quiz: fresh questions on the current lesson\n" if self.tutor else "")
@@ -472,11 +475,11 @@ class Engine:
             buttons.append([skip])
         return Out(text, buttons)
 
-    def _think_out(self, step: ThinkStep, fresh: bool = False) -> Out:
+    def _think_out(self, step: ThinkStep, fresh: bool = False, label: str | None = None) -> Out:
         buttons = [[Button("💡 Show answer", "rv"), Button("⏭ Skip", "sk")]]
         if fresh and self.tutor is not None:
             buttons.append([Button("🎲 Different question", "ivg")])
-        return Out(think_text(step), buttons)
+        return Out(think_text(step, label), buttons)
 
     async def _continuation(self, user_id: int, ctx: dict[str, Any]) -> list[list[Button]]:
         kind = ctx.get("kind")
@@ -491,6 +494,8 @@ class Engine:
             return [[Button("Next review ▶", "rev"), Button("Back to lesson", "go")]]
         if kind == "interview":
             return [[Button("🎤 Another question", "iv"), Button("Back to lesson", "go")]]
+        if kind == "case":
+            return [[Button("🧭 Another case", "cs"), Button("Back to lesson", "go")]]
         user = await self._user(user_id)
         return [[self._nav(user)]]
 
@@ -916,6 +921,83 @@ class Engine:
         if user.cursor > 1 and user.lesson_id not in completed:
             covered.append(user.lesson_id)
         return covered
+
+    # --- cases ---------------------------------------------------------------------------------
+
+    async def case(self, user_id: int) -> list[Out]:
+        """Serve a scenario that combines several lessons the learner has already covered."""
+        user = await self._user(user_id)
+        await self.store.touch(user_id)
+        if not self.course.cases:
+            return [Out("There are no cases in this course yet.", [[self._nav(user)]])]
+        covered = set(await self._covered_lessons(user))
+        answered = await self.store.answered_think_keys(user_id)
+
+        def ready(case) -> bool:
+            return sum(lid in covered for lid in case.lessons) * 2 >= len(case.lessons)
+
+        unlocked = [c for c in self.course.cases if ready(c)]
+        if not unlocked:
+            return [
+                Out(
+                    "🧭 Cases unlock as you cover the lessons they draw on. Each one is a realistic "
+                    "scenario that needs several ideas at once. Keep going and check back.",
+                    [[self._nav(user)]],
+                )
+            ]
+        unseen = [c for c in unlocked if f"case:{c.id}" not in answered]
+        chosen = random.choice(unseen or unlocked)
+        step = case_step(chosen)
+        await self.store.set_awaiting(
+            user_id,
+            {
+                "kind": "think",
+                "key": f"case:{chosen.id}",
+                "step": step.model_dump(),
+                "ctx": {"kind": "case"},
+            },
+        )
+        return [self._think_out(step, label="🧭 <b>Case of the day</b>")]
+
+    # --- notes ---------------------------------------------------------------------------------
+
+    def _recap_points(self, lesson_id: str) -> list[str]:
+        lesson = self.course.lessons[lesson_id]
+        if lesson.status == "seed":
+            cached = self.generated_dir / f"{lesson_id}.yaml"
+            if cached.is_file():
+                try:
+                    lesson = load_lesson_file(cached)
+                except Exception:  # noqa: BLE001 - fall back to the outline
+                    pass
+        for step in reversed(lesson.steps):
+            if isinstance(step, RecapStep):
+                return step.points
+        return lesson.key_points
+
+    async def notes(self, user_id: int) -> list[Out]:
+        """A study sheet: the recap of every completed lesson, grouped by module."""
+        user = await self._user(user_id)
+        completed = await self.store.completed_lessons(user_id)
+        if not completed:
+            return [
+                Out(
+                    "📝 Your notes build as you finish lessons: each lesson's recap is collected "
+                    "here as a study sheet, handy before an interview.",
+                    [[self._nav(user)]],
+                )
+            ]
+        blocks = [f"📝 <b>Your notes</b> · {len(completed)} lesson(s)"]
+        for module in self.course.spec.modules:
+            done = [lid for lid in module.lessons if lid in completed]
+            if not done:
+                continue
+            lines = [f"<b>{escape(module.title)}</b>"]
+            for lid in done:
+                points = "\n".join(f"• {md(p)}" for p in self._recap_points(lid))
+                lines.append(f"<u>{escape(self.course.lessons[lid].title)}</u>\n{points}")
+            blocks.append("\n\n".join(lines))
+        return [Out("\n\n".join(blocks), [[self._nav(user)]])]
 
     # --- navigation & stats -------------------------------------------------------------------
 

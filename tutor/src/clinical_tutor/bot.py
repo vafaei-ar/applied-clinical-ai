@@ -42,6 +42,8 @@ COMMANDS = [
     BotCommand(command="map", description="Course map and lessons"),
     BotCommand(command="review", description="Spaced review of missed items"),
     BotCommand(command="interview", description="Mock interview question"),
+    BotCommand(command="case", description="A scenario that combines several lessons"),
+    BotCommand(command="notes", description="Study sheet of your completed lessons"),
     BotCommand(command="quiz", description="Fresh questions on this lesson"),
     BotCommand(command="later", description="Laptop to-do list"),
     BotCommand(command="progress", description="Your stats"),
@@ -163,6 +165,14 @@ def build_router(engine: Engine, bot: Bot) -> Router:
         await typing(message.chat.id)
         await send(bot, message.chat.id, await engine.interview(message.from_user.id))
 
+    @router.message(Command("case"))
+    async def on_case(message: Message) -> None:
+        await send(bot, message.chat.id, await engine.case(message.from_user.id))
+
+    @router.message(Command("notes"))
+    async def on_notes(message: Message) -> None:
+        await send(bot, message.chat.id, await engine.notes(message.from_user.id))
+
     @router.message(Command("quiz"))
     async def on_quiz(message: Message) -> None:
         await typing(message.chat.id)
@@ -208,7 +218,7 @@ def build_router(engine: Engine, bot: Bot) -> Router:
         kind, _, rest = data.partition(":")
         args = [int(x) for x in rest.split(":") if x.lstrip("-").isdigit()] if rest else []
 
-        if kind in {"d", "mq", "iv", "ivg", "n", "L", "go", "tq"}:
+        if kind in {"d", "mq", "iv", "ivg", "cs", "n", "L", "go", "tq"}:
             await typing(chat_id)
         if kind == "n" and len(args) == 2:
             outs = await engine.advance(uid, args[0], args[1], notifier(chat_id))
@@ -232,6 +242,8 @@ def build_router(engine: Engine, bot: Bot) -> Router:
             outs = await engine.interview(uid)
         elif kind == "ivg":
             outs = await engine.interview(uid, fresh=True)
+        elif kind == "cs":
+            outs = await engine.case(uid)
         elif kind == "map":
             outs = await engine.course_map(uid)
         elif kind == "M" and len(args) == 1:

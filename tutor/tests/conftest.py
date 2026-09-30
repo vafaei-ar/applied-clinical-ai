@@ -100,6 +100,23 @@ def course_dir(tmp_path: Path) -> Path:
     (root / "m01" / "m01-01-alpha.yaml").write_text(yaml.safe_dump(LESSON_A))
     (root / "m01" / "m01-02-beta.yaml").write_text(yaml.safe_dump(LESSON_B))
     (root / "m01" / "m01-03-gamma.yaml").write_text(yaml.safe_dump(LESSON_C))
+    (root / "cases.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "cases": [
+                    {
+                        "id": "test-case",
+                        "title": "A test case",
+                        "scenario": "Something went wrong.",
+                        "question": "What do you check?",
+                        "model_answer": "Check the data first.",
+                        "key_points": ["data", "labels"],
+                        "lessons": ["m01-01-alpha", "m01-03-gamma"],
+                    }
+                ]
+            }
+        )
+    )
     return root
 
 

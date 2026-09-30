@@ -1,0 +1,125 @@
+# Cases of the day: realistic scenarios that combine several lessons. See CONTENT_GUIDE.md.
+# A case unlocks once most of the lessons it lists have been covered.
+cases:
+  - id: ppv-halved-after-go-live
+    title: PPV halved after go-live
+    scenario: |
+      Your 30-day stroke readmission model went live at a hospital eight weeks ago. In
+      retrospective testing, at the chosen alert threshold, it had sensitivity 0.60 and
+      PPV 0.32. The team's dashboard now shows PPV 0.17. The AUROC on the patients it has scored
+      is essentially unchanged. The unit manager asks whether the model is broken.
+    question: List the first things you check, in order, and say what each would tell you.
+    model_answer: |
+      I would not call it broken yet. In order:
+
+      **1. Is the metric itself valid?** Readmission takes up to 30 days to happen. If the
+      dashboard includes patients discharged in the last few weeks, their outcomes are
+      incomplete, so PPV is biased downward. I'd restrict to patients with a full follow-up
+      window.
+
+      **2. Did prevalence change?** PPV depends on prevalence even when discrimination is
+      unchanged. A lower event rate now than in the test data lowers PPV without any model
+      failure.
+
+      **3. Is the alert working?** If alerts trigger effective transitional care, some of the
+      events the model predicted get prevented, so PPV falls by design. I'd look at what
+      happens to alerted patients (a feedback loop), ideally against a comparison group.
+
+      **4. Input drift.** Feature distributions, missingness rates, units, and upstream coding
+      or mapping changes. A quiet data change is the most common real cause.
+
+      **5. Calibration.** Same AUROC but drifted calibration means the same threshold flags a
+      different number of patients. I'd check calibration and alert volume by month.
+
+      Only after that would I consider a fix, and I'd start with a threshold or recalibration
+      change before retraining, because retraining on outcomes shaped by the intervention can
+      make things worse.
+    key_points:
+      - Check whether the PPV measurement is valid, since incomplete follow-up biases it downward
+      - PPV moves with prevalence even when AUROC is unchanged
+      - An effective intervention lowers PPV by preventing the predicted events
+      - Look for input drift, missingness, and upstream data changes
+      - Check calibration and alert volume before deciding to retrain
+    lessons:
+      - m02-04-metrics-imbalance
+      - m02-05-calibration
+      - m03-05-monitoring-drift
+      - m00-02-failure-modes
+
+  - id: assistant-cited-old-protocol
+    title: The assistant that cited an outdated protocol
+    scenario: |
+      A guideline assistant told a resident that a medication washout window is 24 hours. The
+      current institutional protocol says 48 hours. The answer cites a real document with a
+      plausible citation, and users rate the assistant's answers as helpful on average.
+      Retrieval logs show the cited chunk came from a protocol PDF that was superseded two
+      years ago.
+    question: How do you find out what failed, and what changes so this can't happen silently again?
+    model_answer: |
+      **What failed.** The model reproduced its retrieved chunk faithfully, so this is a
+      retrieval and corpus failure, not a hallucination. A citation shows the answer is
+      grounded in a document; it does not show the document is current.
+
+      **Why it happened.** Probably several things: old versions were left in the index, there
+      was no effective-date or status metadata to filter on, and the old PDF was close enough
+      in wording that it ranked well. A reranker doesn't know about recency.
+
+      **Fixes.**
+      - Index only current versions, with an owner and effective date; retire superseded ones.
+      - Filter on that metadata and show the document date in the answer.
+      - If retrieved chunks disagree, don't pick one: surface both or abstain.
+      - Add a regression test for this question, with the superseded document as a hard
+        negative, and measure retrieval recall for the current document separately from
+        answer quality.
+      - Treat a release as a tuple (corpus snapshot, prompt, model, eval results).
+
+      **Why nobody noticed.** "Helpful on average" hides rare, high-severity errors. I'd
+      stratify evaluation by clinical risk, audit high-risk answers, and give users a report
+      button.
+    key_points:
+      - A correct citation proves grounding, not currency of the source
+      - Diagnose retrieval separately from generation
+      - Corpus versioning, effective-date metadata, and retiring old documents
+      - Handle conflicting sources by showing both or abstaining
+      - Average ratings hide rare high-severity errors; evaluate by risk tier
+    lessons:
+      - m05-02-rag
+      - m05-03-retrieval-eval
+      - m05-04-generation-eval
+      - m07-02-design-rag-assistant
+
+  - id: km-overestimates-risk
+    title: A 27% risk that isn't
+    scenario: |
+      A cohort study of stroke survivors reports a 5-year recurrent-stroke risk of 27%, computed
+      as 1 minus the Kaplan-Meier estimate. During follow-up, about a quarter of the patients
+      died without having a recurrent stroke. A colleague plans to quote "27%" when counseling
+      patients about their risk.
+    question: What is wrong with this, and what would you report instead?
+    model_answer: |
+      **The problem.** 1 minus Kaplan-Meier treats deaths as ordinary censoring. That assumes
+      a patient who died would otherwise have had the same future stroke risk as those still
+      being followed, which is not plausible: someone who has died cannot have a stroke. The
+      estimate answers a hypothetical question ("the risk if nobody died") and comes out too
+      high as an answer to the real one ("the chance that this patient has a recurrent stroke
+      within 5 years, given that they may die first"). The gap grows with longer follow-up and
+      more competing deaths.
+
+      **What I'd report.** The cumulative incidence function (Aalen-Johansen), which counts
+      strokes in the presence of death, alongside the cumulative incidence of death. For an
+      etiologic question about what drives stroke, I'd use cause-specific hazards; for
+      absolute risk and prediction, I'd base the quantity on the cumulative incidence.
+
+      **Framing.** It comes down to the estimand: is the question the risk in the real world
+      with competing death, or the risk in a world where death is removed? For counseling,
+      it's the former.
+    key_points:
+      - 1 minus KM treats competing deaths as censored, which overstates real-world risk
+      - Dead patients cannot have the event, so censoring is informative
+      - Report cumulative incidence (Aalen-Johansen) plus the competing event
+      - Cause-specific hazards for etiology; cumulative incidence for absolute risk
+      - Decide which estimand the question needs before choosing the method
+    lessons:
+      - m04-03-censoring-km
+      - m04-05-competing-risks-eval
+      - m04-02-estimands

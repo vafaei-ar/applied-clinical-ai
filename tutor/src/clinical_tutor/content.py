@@ -147,6 +147,31 @@ class Module(BaseModel):
     lessons: list[str] = Field(min_length=1)
 
 
+class Case(BaseModel):
+    """A realistic scenario that needs several lessons at once ("case of the day")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str = Field(max_length=100)
+    scenario: str = Field(max_length=1000)
+    question: str = Field(max_length=300)
+    model_answer: str = Field(max_length=MAX_TEXT)
+    key_points: list[str] = Field(min_length=2)
+    # Lessons whose ideas the case draws on; a case unlocks once most of them are covered.
+    lessons: list[str] = Field(min_length=1)
+
+
+def case_step(case: Case) -> ThinkStep:
+    """The open question a learner sees for a case (scenario and task in one message)."""
+    return ThinkStep(
+        type="think",
+        prompt=f"**{case.title}**\n\n{case.scenario.strip()}\n\n**Your task:** {case.question}",
+        model_answer=case.model_answer,
+        key_points=case.key_points,
+    )
+
+
 class CourseSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -158,10 +183,17 @@ class CourseSpec(BaseModel):
 class Course:
     """The loaded course: modules, lessons in order, and lookup helpers."""
 
-    def __init__(self, root: Path, spec: CourseSpec, lessons: dict[str, Lesson]):
+    def __init__(
+        self,
+        root: Path,
+        spec: CourseSpec,
+        lessons: dict[str, Lesson],
+        cases: list[Case] | None = None,
+    ):
         self.root = root
         self.spec = spec
         self.lessons = lessons
+        self.cases: list[Case] = cases or []
         self.order: list[str] = [lid for module in spec.modules for lid in module.lessons]
         self.module_of: dict[str, Module] = {
             lid: module for module in spec.modules for lid in module.lessons
@@ -227,9 +259,43 @@ def load_course(root: Path = DEFAULT_COURSE_DIR) -> Course:
 
     for orphan in sorted(set(files) - seen):
         errors.append(f"{files[orphan].relative_to(root)}: not listed in course.yaml")
+    cases = _load_cases(root, set(lessons), errors)
     if errors:
         raise CourseError(errors)
-    return Course(root, spec, lessons)
+    return Course(root, spec, lessons, cases)
+
+
+def _load_cases(root: Path, lesson_ids: set[str], errors: list[str]) -> list[Case]:
+    path = root / "cases.yaml"
+    if not path.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        cases = [Case.model_validate(item) for item in raw.get("cases", [])]
+    except Exception as exc:  # noqa: BLE001 - report every validation problem
+        errors.append(f"cases.yaml: {exc}")
+        return []
+    seen: set[str] = set()
+    for case in cases:
+        if case.id in seen:
+            errors.append(f"cases.yaml: duplicate case id {case.id}")
+        seen.add(case.id)
+        for lesson_id in case.lessons:
+            if lesson_id not in lesson_ids:
+                errors.append(f"cases.yaml: case {case.id} references unknown lesson {lesson_id}")
+        for problem in _case_render_problems(case):
+            errors.append(f"cases.yaml: case {case.id}: {problem}")
+    return cases
+
+
+def _case_render_problems(case: Case) -> list[str]:
+    from .render import check_html
+    from .steps import model_answer_text, think_text
+
+    step = case_step(case)
+    return check_html(think_text(step, "🧭 <b>Case of the day</b>")) + check_html(
+        model_answer_text(step)
+    )
 
 
 def _render_problems(step: Step) -> list[str]:

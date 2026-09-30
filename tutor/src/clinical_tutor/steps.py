@@ -62,8 +62,9 @@ def quiz_result_text(step: QuizStep, chosen: int, header: str = "🧩 <b>Quick c
     return "\n\n".join(parts)
 
 
-def think_text(step: ThinkStep) -> str:
-    label = "🎤 <b>Interview question</b>" if step.interview else "🤔 <b>Think it through</b>"
+def think_text(step: ThinkStep, label: str | None = None) -> str:
+    if label is None:
+        label = "🎤 <b>Interview question</b>" if step.interview else "🤔 <b>Think it through</b>"
     return (
         f"{label}\n\n{md(step.prompt)}\n\n"
         "<i>Type your answer in your own words — a few sentences is enough.</i>"

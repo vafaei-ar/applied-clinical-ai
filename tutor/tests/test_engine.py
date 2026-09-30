@@ -288,3 +288,47 @@ async def test_test_out_is_ignored_when_stale(make_engine):
     await _at_gamma_header(engine)
     outs = await engine.test_out(UID, 0)  # a card for a different lesson
     assert "out of date" in outs[0].text
+
+
+async def test_case_is_locked_until_lessons_are_covered(make_engine, store):
+    engine = make_engine()
+    await engine.start(UID, None)
+    locked = await engine.case(UID)
+    assert "unlock" in locked[0].text
+
+    await store.complete_lesson(UID, "m01-01-alpha")  # half of the case's lessons
+    outs = await engine.case(UID)
+    assert "Case of the day" in outs[0].text and "Something went wrong." in outs[0].text
+    assert "Your task:" in outs[0].text
+
+    outs = await engine.text(UID, "I would check the data")  # offline: shows model answer
+    assert "Check the data first." in outs[0].text
+    outs = await engine.self_rate(UID, 0)  # missed: goes to spaced review
+    assert any(d == "cs" for d in _button_data(outs))
+    due, total, _ = await store.review_counts(UID)
+    assert total == 1
+    review = await store.get_review(UID, "case:test-case")
+    assert review is not None and review.kind == "think"
+
+
+async def test_case_prefers_unseen(make_engine, store):
+    engine = make_engine()
+    await engine.start(UID, None)
+    await store.complete_lesson(UID, "m01-01-alpha")
+    await store.log_think(UID, "case:test-case", "answer", 3)
+    outs = await engine.case(UID)  # only one case exists, so it repeats rather than dead-ending
+    assert "Case of the day" in outs[0].text
+
+
+async def test_notes_collect_recaps_of_completed_lessons(make_engine, store):
+    engine = make_engine()
+    await engine.start(UID, None)
+    empty = await engine.notes(UID)
+    assert "build as you finish" in empty[0].text
+
+    await store.complete_lesson(UID, "m01-01-alpha")  # authored, recap: "done"
+    await store.complete_lesson(UID, "m01-02-beta")  # seed, no cache: falls back to key points
+    notes = (await engine.notes(UID))[0].text
+    assert "<u>Alpha</u>" in notes and "• done" in notes
+    assert "<u>Beta</u>" in notes and "• beta point" in notes
+    assert "Gamma" not in notes  # not completed

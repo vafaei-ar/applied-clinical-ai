@@ -112,6 +112,16 @@ Design figures for a phone: one message per figure, large fonts, few labels, hig
 white background. Timelines, curves (ROC, calibration, Kaplan–Meier), and architecture sketches
 work well. Reference the file with an `image` step.
 
+## Cases of the day
+
+`course/cases.yaml` holds scenarios that make the learner combine several lessons, served by
+`/case`. Each case has an `id`, a `title`, a short `scenario` (up to 1000 characters), the
+`question` (up to 300), a `model_answer`, at least two `key_points` a grader looks for, and the
+`lessons` it draws on (a case unlocks once at least half of them are covered). Good cases read like
+something that actually happened: a metric moved, a pipeline broke, a stakeholder asked a hard
+question. The strongest model answers give an ordered plan ("first check X, because it would show
+Y"), not a list of facts. The validator checks that every listed lesson exists.
+
 ## Workflow
 
 ```bash

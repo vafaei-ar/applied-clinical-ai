@@ -20,6 +20,11 @@ or add to it. Clone the repo, add your own Telegram bot token, and you have your
 - **Test out of what you know.** Every lesson header has **⚡ Test me first**: 4 to 5 of the
   lesson's hardest quiz questions. Pass (at most one miss) and the lesson is marked complete;
   miss and the questions are queued for review and you start the lesson.
+- **Cases of the day.** `/case` serves a realistic scenario that needs several lessons at once
+  ("PPV halved after go-live: what do you check first?"). It unlocks once you've covered most of
+  the lessons it draws on, and misses come back in spaced review.
+- **Study sheet.** `/notes` collects the recap of every lesson you've completed, by module. It's
+  handy the night before an interview.
 - **Laptop queue.** Coding tasks that need a computer land in `/later` with the repo path.
 - **Mock interviews.** `/interview` asks questions from the lessons you've covered.
 - **A daily nudge** (optional) if you've been away for a day.
@@ -92,6 +97,8 @@ it comes back. For 24/7 availability, run the same commands on any small Linux s
 | `/map` | Course map with progress; jump to any module or lesson |
 | `/review` | Spaced review of items that are due |
 | `/interview` | A mock interview question on what you've covered |
+| `/case` | A realistic scenario that combines several lessons |
+| `/notes` | A study sheet of your completed lessons' recaps |
 | `/quiz` | Fresh questions on the current lesson (AI tutor) |
 | `/later` | Your laptop to-do list |
 | `/progress` | Lessons completed, quiz accuracy, reviews due |
