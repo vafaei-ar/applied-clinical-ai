@@ -132,13 +132,29 @@ def build_report(course: Course, db_path: Path, min_attempts: int = 1) -> str:
 
     # Where learners ask for help ----------------------------------------------------------
     asked: Counter[tuple[str, int]] = Counter()
-    for r in _rows(db, "SELECT lesson_id, item FROM questions"):
+    for r in _rows(db, "SELECT lesson_id, item FROM questions WHERE kind IN ('ask', 'deeper')"):
         asked[(r["lesson_id"], r["item"])] += 1
     add("STEPS THAT DREW QUESTIONS OR 'GO DEEPER' (most first)")
     if not asked:
         add("  no data yet (needs the AI tutor enabled)")
     for (lesson_id, item), n in asked.most_common(10):
         add(f"  {n:>3}x {_step_label(course, lesson_id, item)}")
+    add("")
+
+    # Listening ----------------------------------------------------------------------------
+    listened: Counter[tuple[str, int]] = Counter()
+    for r in _rows(db, "SELECT lesson_id, item FROM questions WHERE kind = 'listen'"):
+        listened[(r["lesson_id"], r["item"])] += 1
+    lessons_listened = _rows(
+        db, "SELECT lesson_id, COUNT(*) AS n FROM questions WHERE kind = 'listen_lesson' GROUP BY 1"
+    )
+    add("AUDIO: STEPS LISTENED TO (most first) AND WHOLE-LESSON LISTENS")
+    if not listened and not lessons_listened:
+        add("  none yet")
+    for (lesson_id, item), n in listened.most_common(8):
+        add(f"  {n:>3}x {_step_label(course, lesson_id, item)}")
+    for r in sorted(lessons_listened, key=lambda r: -r["n"])[:8]:
+        add(f"  {r['n']:>3}x whole lesson {r['lesson_id']}")
     add("")
 
     # Flags --------------------------------------------------------------------------------

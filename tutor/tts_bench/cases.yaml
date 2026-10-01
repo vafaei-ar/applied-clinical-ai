@@ -1,0 +1,890 @@
+# Challenge set for choosing a text-to-speech voice. Every case is real lesson text (or a whole
+# lesson step) that voices tend to get wrong. `terms` are the things a listener should hear;
+# 'a|b' lists acceptable renderings. `source` is lesson#step. Run: python tts_bench/run.py
+cases:
+- id: acr-terminologies
+  category: acronyms
+  kind: text
+  source: m06-01-interop-standards#2
+  why: 'Four ways to say an acronym in one line: as a word (SNOMED, LOINC), with a half word (RxNorm),
+    and by letters.'
+  terms:
+  - SNOMED CT|snow med
+  - LOINC|loink|lonk|lynk|loint|loyn
+  - RxNorm|R x norm|rx norm
+  - ICD-10-CM
+  - CPT
+  text: 'Under all three sit the **terminologies**: SNOMED CT, LOINC, RxNorm, ICD-10-CM, CPT.'
+- id: acr-dicom
+  category: acronyms
+  kind: text
+  source: m10-01-data-and-labels#6
+  why: Hyphenated protocol names that look like words in capitals but must not be spelled out.
+  terms:
+  - DICOM
+  - C-STORE|C store
+  - C-FIND|C find
+  - C-MOVE|C move
+  - DICOMweb|DICOM web
+  - QIDO-RS|QIDORS|QIDO|quito rs|keto rs
+  - WADO-RS|WADORS|WADO
+  - STOW-RS|STORS|STOWRS|stow rs
+  - HTTPS
+  text: |-
+    Images move by DICOM network services: **C-STORE** pushes, **C-FIND** and **C-MOVE** query and
+    retrieve, and **DICOMweb** (QIDO-RS, WADO-RS, STOW-RS) does the same over HTTPS.
+- id: acr-sdtm
+  category: acronyms
+  kind: text
+  source: m04-06-cdisc#24
+  why: A run of two-letter domain codes that sound alike when spoken fast.
+  terms:
+  - SDTM
+  - USUBJID
+  - ISO 8601
+  - DM
+  - AE
+  - LB
+  - VS
+  - EX
+  - CM
+  - DS
+  text: 'SDTM: `USUBJID`, domain-prefixed variables, ISO 8601 dates; know DM, AE, LB, VS, EX, CM, DS'
+- id: acr-id-spaces
+  category: acronyms
+  kind: text
+  source: m11-02-extraction#30
+  why: Four similar identifiers that must stay distinct to the ear.
+  terms:
+  - CUI
+  - SNOMED CT|snow med
+  - RxCUI
+  - ICD-10-CM
+  text: CUI, SNOMED CT ID, RxCUI, and ICD-10-CM code are different ID spaces
+- id: acr-auroc
+  category: acronyms
+  kind: text
+  source: m02-04-metrics-imbalance#4
+  why: The most common acronym in the course, in a sentence that also stresses 'non-readmitted'.
+  terms:
+  - AUROC
+  - randomly chosen
+  - readmitted
+  - non-readmitted
+  text: |-
+    AUROC is the probability that a randomly chosen readmitted patient
+    scores higher than a randomly chosen non-readmitted one.
+- id: acr-databricks
+  category: acronyms
+  kind: text
+  source: m01-07-scale-and-tools#6
+  why: Product names that are not dictionary words.
+  terms:
+  - Databricks
+  - Spark
+  - Delta Lake
+  - Unity Catalog
+  - Snowflake
+  - BigQuery
+  text: |-
+    **Databricks** is a managed Spark platform. It
+    adds Delta Lake tables, Unity Catalog governance and access control, scheduled jobs, and
+    notebooks.
+
+    Snowflake and BigQuery
+- id: acr-saMD
+  category: acronyms
+  kind: text
+  source: m03-06-lifecycle-regulation#13
+  why: A long expansion followed by two acronyms.
+  terms:
+  - Software as a Medical Device
+  - SaMD|sam D|S A M D|SAMD
+  - International Medical Device Regulators Forum
+  - IMDRF
+  text: |-
+    is called **Software as a Medical Device
+    (SaMD)**, a term from the International Medical Device Regulators Forum (IMDRF).
+- id: acr-tripod
+  category: acronyms
+  kind: text
+  source: m02-06-subgroups-shift#22
+  why: A '+' inside a name, and an author citation.
+  terms:
+  - TRIPOD+AI|tripod plus AI
+  - BMJ
+  - '2015'
+  - TRIPOD
+  text: |-
+    **TRIPOD+AI** (Collins et al., BMJ 2024) updates the 2015 TRIPOD statement for prediction
+    models built with regression or machine learning.
+- id: acr-ckd-epi
+  category: acronyms
+  kind: text
+  source: m02-06-subgroups-shift#14
+  why: En dash between acronyms, a hyphenated name, and a year said three times.
+  terms:
+  - '2021'
+  - NKF
+  - ASN
+  - CKD-EPI|CKD EP|CKDAP|CKD epi|CKDEP
+  - NEJM
+  text: |-
+    In **2021** the NKF–ASN task force recommended dropping race, and the **CKD-EPI 2021
+    equation** was refit without it (Inker et al., NEJM 2021).
+- id: acr-fhir-omop
+  category: acronyms
+  kind: text
+  source: m06-01-interop-standards#2
+  why: FHIR is read 'fire' and OMOP 'oh-mop'; both are commonly mispronounced.
+  terms:
+  - FHIR|fire
+  - exchange
+  - OMOP|oh mop
+  - analysis
+  text: 'The one-liner to remember: **FHIR for exchange, OMOP for analysis.**'
+- id: code-icd-ranges
+  category: medical codes
+  kind: text
+  source: m01-05-temporal-leakage#8
+  why: 'ICD code ranges with an en dash: ''I eleven to I thirteen''.'
+  terms:
+  - I11
+  - I13
+  - I15
+  - I16
+  - hypertension
+  text: but a real hypertension value set usually adds I11–I13 and I15–I16.
+- id: code-hl7
+  category: medical codes
+  kind: text
+  source: m06-01-interop-standards#3
+  why: HL7 message types joined by a caret.
+  terms:
+  - ADT A01|ADTA01
+  - ADT A03|ADTA03
+  - ADT A08|ADTA08
+  - ORU R01|ORUR01
+  - labs
+  text: |-
+    Message types you'll hear: `ADT^A01` (admit), `ADT^A03` (discharge), `ADT^A08` (update), and
+    `ORU^R01` (observation results, meaning labs).
+- id: code-cpt
+  category: medical codes
+  kind: text
+  source: m01-01-data-sources#15
+  why: Five-digit CPT codes must be read digit by digit, not as '70 thousand'.
+  terms:
+  - '70450'
+  - '70551'
+  - 93000|9300
+  - '93306'
+  - CT head
+  - ECG
+  text: |-
+    In the repo, `procedures.cpt_hcpcs_code` uses `70450` (CT head without contrast), `70551`
+    (MRI brain without contrast), `93000` (ECG), and `93306` (transthoracic echo).
+- id: code-icd-history
+  category: medical codes
+  kind: text
+  source: m01-04-cohort-design#6
+  why: Letter-digit codes with a decimal part, and a trailing dash.
+  terms:
+  - I63
+  - Z86.73|Z86 73|Z 86 73
+  - I69.3|I69 3|I69.3-
+  - washout
+  - cerebral infarction
+  text: |-
+    An explicit washout would also look for outpatient `I63` codes and history
+    codes such as `Z86.73` (personal history of cerebral infarction) or `I69.3-` (sequelae).
+- id: code-icd-family
+  category: medical codes
+  kind: text
+  source: m11-02-extraction#8
+  why: Two history codes in a row.
+  terms:
+  - Z82.3|Z82 3
+  - Z86.73|Z86 73
+  - family history
+  - TIA
+  text: |-
+    Note the history codes, such as `Z82.3`
+      (family history of stroke) and `Z86.73` (personal history of TIA and cerebral infarction without
+      residual deficits).
+- id: code-icd-drift
+  category: medical codes
+  kind: text
+  source: m03-05-monitoring-drift#1
+  why: A 'point x' wildcard inside a code.
+  terms:
+  - I10
+  - I11
+  - I12
+  - hypertensive heart
+  - kidney disease
+  text: |-
+    Hypertension that used to be
+    coded `I10` is now often coded more specifically, as hypertensive heart or kidney
+    disease (`I11.x`, `I12.x`).
+- id: code-loinc
+  category: medical codes
+  kind: text
+  source: m01-01-data-sources#18
+  why: A LOINC code with a hyphen and a check digit.
+  terms:
+  - 2160-0|2160 0|2160
+  - creatinine
+  - mass per volume
+  - serum
+  - plasma
+  text: |-
+    For example, `2160-0` is
+    creatinine, mass per volume, in serum or plasma.
+- id: code-loinc-list
+  category: medical codes
+  kind: text
+  source: m06-01-interop-standards#24
+  why: A dense run of LOINC codes with test names.
+  terms:
+  - LOINC
+  - 2160-0|2160 0
+  - 13457-7|13457 7
+  - 4548-4|4548 4
+  - 718-7|718 7
+  - creatinine
+  - HbA1c|hemoglobin A1c
+  - hemoglobin
+  text: (LOINC 2160-0 creatinine, 13457-7 LDL calculated, 4548-4 HbA1c, 718-7 hemoglobin;
+- id: code-like
+  category: medical codes
+  kind: text
+  source: m01-01-data-sources#10
+  why: A SQL wildcard pattern inside a code span, next to a bare ICD category.
+  terms:
+  - bare category
+  - I63
+  - prefix tree
+  - valid claim
+  - subtree
+  text: |-
+    so a valid claim never carries the bare
+    category `I63`. That makes the hierarchy a **prefix tree**, and `LIKE 'I63%'` selects a whole
+    subtree.
+- id: id-ldl
+  category: identifiers
+  kind: text
+  source: m09-01-mechanisms#1
+  why: snake_case column names with an abbreviation and a unit suffix.
+  terms:
+  - stroke features
+  - '333'
+  - '275'
+  - latest LDL prior 365 days|latest ldl prior 365
+  - 'NULL'
+  text: |-
+    You open `stroke_features`, the table you built in Module 01. It has **333 patients**. One
+    feature matters clinically: `latest_ldl_prior_365d`. It is NULL for **275** of them.
+- id: id-omop-person
+  category: identifiers
+  kind: text
+  source: m06-01-interop-standards#15
+  why: A list of long snake_case identifiers.
+  terms:
+  - person
+  - person ID|person_id
+  - gender concept ID
+  - year of birth
+  - race concept ID
+  - ethnicity concept ID
+  text: '**person**: `person_id`, `gender_concept_id`, `year_of_birth`, `race_concept_id`, `ethnicity_concept_id`'
+- id: id-cte-chain
+  category: identifiers
+  kind: text
+  source: m01-02-sql-core#7
+  why: Identifiers joined by arrows.
+  terms:
+  - CTEs|C T Es|CTE
+  - qualifying strokes
+  - stroke candidates
+  - first stroke
+  - eligible
+  text: |-
+    It's a chain of CTEs: `qualifying_strokes` →
+    `stroke_candidates` → `first_stroke` → `eligible`.
+- id: id-service-date
+  category: identifiers
+  kind: text
+  source: m11-01-notes-and-deid#11
+  why: Two identifiers in one sentence that differ by one word.
+  terms:
+  - ED
+  - 3 weeks|three weeks
+  - service date
+  - index date
+  - signed
+  - 2 days|two days
+  - after
+  text: |-
+    A prior ED visit 3 weeks before the index stroke has a note whose `service_date` is before
+    `index_date`, but which was signed 2 days **after** `index_date`.
+- id: id-note-nlp
+  category: identifiers
+  kind: text
+  source: m11-02-extraction#8
+  why: An upper-case identifier with an underscore and a version number.
+  terms:
+  - NOTE NLP|note_nlp
+  - CDM
+  - '5.4'
+  - snippet
+  - offset
+  - lexical variant
+  text: |-
+    whose `NOTE_NLP` table (CDM 5.4) already has fields for our
+    output: `snippet`, `offset`, `lexical_variant`
+- id: id-prior-af
+  category: identifiers
+  kind: text
+  source: m02-06-subgroups-shift#1
+  why: An abbreviation inside an identifier ('prior af').
+  terms:
+  - prior AF
+  - inpatient visits prior 365 days|inpatient visits prior 365
+  - false zeros
+  text: |-
+    Their `prior_af` and
+    `inpatient_visits_prior_365d` features are more often false zeros.
+- id: id-partition
+  category: identifiers
+  kind: text
+  source: m01-07-scale-and-tools#20
+  why: '''id'' read as a word instead of ''I D''.'
+  terms:
+  - patient ID
+  - claim ID
+  - millions
+  - tiny partitions
+  text: '`patient_id` and `claim_id` create millions of tiny partitions.'
+- id: num-auroc-ci
+  category: numbers and statistics
+  kind: text
+  source: m08-01-uncertainty-bootstrap#19
+  why: 'Many close decimals and en-dash ranges: easy to blur.'
+  terms:
+  - AUROC
+  - '0.72'
+  - '0.7'
+  - '0.74'
+  - '0.735'
+  - '0.715'
+  - '0.755'
+  - 95%
+  text: |-
+    On the same test patients, model A has AUROC 0.720 (95% CI 0.700–0.740) and model B has
+    0.735 (0.715–0.755).
+- id: num-kappa
+  category: numbers and statistics
+  kind: text
+  source: m05-04-generation-eval#19
+  why: An equation read aloud, with a Greek letter and a subscript.
+  terms:
+  - 70%|70 percent|seventy percent
+  - '0.58'
+  - '0.52'
+  - kappa|cap|capa
+  - equals
+  text: |-
+    Each rater says "supported" 70% of the time, so p_e = 0.7 ×
+    0.7 + 0.3 × 0.3 = 0.58. κ = (0.80 − 0.58)/(1 − 0.58) ≈ 0.52.
+- id: num-bh
+  category: numbers and statistics
+  kind: text
+  source: m08-02-testing-multiplicity#9
+  why: Four-decimal numbers in a row.
+  terms:
+  - '0.0083'
+  - '0.0167'
+  - '0.025'
+  - 0.0333|0.033
+  - '0.0417'
+  - '0.041'
+  text: 'BH: cut-offs are 0.0083, 0.0167, 0.025, 0.0333, 0.0417'
+- id: num-ndcg
+  category: numbers and statistics
+  kind: text
+  source: m05-03-retrieval-eval#13
+  why: A sum, a fraction, and an '@' sign.
+  terms:
+  - IDCG
+  - '4.19'
+  - DCG|nDCG|NDCG
+  - '2.54'
+  - '0.6'
+  - '1.26'
+  text: |-
+    The ideal ranking is
+    2, 2, 1, 1, 0: IDCG = 2 + 1.26 + 0.50 + 0.43 = 4.19. nDCG@5 = 2.54/4.19 ≈ 0.60.
+- id: num-ppv
+  category: numbers and statistics
+  kind: text
+  source: m10-02-evaluation#3
+  why: Letter 'x' used as a multiplication sign.
+  terms:
+  - PPV
+  - '0.95'
+  - '0.05'
+  - '0.5'
+  - times
+  text: PPV = 0.95 x 0.05 / (0.95 x 0.05 + 0.05 x 0.95) = 0.50.
+- id: num-hr
+  category: numbers and statistics
+  kind: text
+  source: m04-01-trial-anatomy#1
+  why: An invented drug name plus a hazard ratio and a CI.
+  terms:
+  - 3,000|3000|three thousand
+  - zetagrel
+  - aspirin
+  - hazard ratio|HR
+  - '0.76'
+  - '95'
+  - '0.62'
+  - '0.94'
+  text: |-
+    In 3,000 patients with recent ischemic stroke, zetagrel plus aspirin reduced recurrent
+    stroke versus aspirin alone (HR 0.76, 95% CI 0.62–0.94)
+- id: num-power
+  category: numbers and statistics
+  kind: text
+  source: m04-04-cox-model#3
+  why: A caret for exponentiation.
+  terms:
+  - 12-month|12 month|twelve month
+  - '0.9'
+  - '0.76'
+  - power
+  - '0.923'
+  - zetagrel
+  text: |-
+    If 12-month stroke-free probability on
+    aspirin is 0.90, then with HR 0.76 it is 0.90^0.76 = 0.923 on zetagrel.
+- id: num-slope
+  category: numbers and statistics
+  kind: text
+  source: m08-03-sample-size-power#16
+  why: Bold run-in heading and several ranges.
+  terms:
+  - 100 events
+  - AUROC
+  - '0.67'
+  - '0.77'
+  - slope
+  - '0.74'
+  - '1.3'
+  text: '**100 events**: AUROC 0.67 to 0.77 (width 0.10); slope 0.74 to 1.30.'
+- id: num-log
+  category: numbers and statistics
+  kind: text
+  source: m03-05-monitoring-drift#11
+  why: Minus signs, a middle dot, and ln().
+  terms:
+  - '0.15'
+  - natural log|ln|L N
+  - '0.4'
+  - '0.137'
+  - '0.05'
+  - '0.8'
+  - '0.011'
+  text: 'Terms: (−0.15)·ln(0.4) ≈ 0.137, (−0.05)·ln(0.8) ≈ 0.011'
+- id: num-rmst
+  category: numbers and statistics
+  kind: text
+  source: m04-03-censoring-km#20
+  why: A Greek letter, an acronym, and close numbers.
+  terms:
+  - tau|tao|tow
+  - 24 months
+  - RMST|R M S T
+  - '21.4'
+  - zetagrel
+  - '20.9'
+  - aspirin
+  text: Over τ = 24 months, RMST is 21.4 months on zetagrel and 20.9 months on aspirin.
+- id: unit-ldl
+  category: units
+  kind: text
+  source: m01-06-data-quality#23
+  why: Clinical units that are easy to flatten into noise.
+  terms:
+  - LDL|L D L
+  - milligrams per deciliter|mg/dL|mg per dL
+  - millimoles per liter|mmol/L|mmol per L
+  - '38.7'
+  text: |-
+    A lab system switches LDL from mg/dL to mmol/L
+    (1 mmol/L is about 38.7 mg/dL).
+- id: unit-ml
+  category: units
+  kind: text
+  source: m10-02-evaluation#10
+  why: A unit that is also an abbreviation of other words.
+  terms:
+  - 5 mL|5 milliliters|five milliliters
+  - 10 mL|10 milliliters
+  - 68 mL|68 milliliters
+  - irrelevant
+  - decisive
+  text: |-
+    A 5 mL error is irrelevant at 10 mL and
+      decisive at 68 mL.
+- id: unit-gb
+  category: units
+  kind: text
+  source: m01-07-scale-and-tools#8
+  why: Storage units next to a file-format name.
+  terms:
+  - 40 GB|40 gigabytes
+  - Parquet|parquet|parkay|per K
+  - claims
+  - 32 GB|32 gigabytes
+  - RAM
+  text: |-
+    A researcher has a 40 GB Parquet extract of de-identified claims, works alone, and has a
+    laptop with 32 GB of RAM.
+- id: unit-lborres
+  category: units
+  kind: text
+  source: m04-06-cdisc#11
+  why: An unpronounceable variable name next to two units.
+  terms:
+  - LBORRES
+  - '2.6'
+  - mmol/L|millimoles
+  - '71'
+  - mg/dL|milligrams
+  text: |-
+    `LBORRES` mixes units and is stored as text, so
+    averaging it silently combines 2.6 mmol/L with 71 mg/dL.
+- id: sym-not-in
+  category: symbols and SQL
+  kind: text
+  source: m01-02-sql-core#20
+  why: Operators and keywords inside code spans.
+  terms:
+  - NOT IN|not in
+  - NULL|null
+  - UNKNOWN|unknown
+  - never
+  - TRUE|true
+  text: |-
+    `x NOT IN (a, b, NULL)` means `x <> a AND x <> b AND x <> NULL`, and `x <> NULL` is
+    **UNKNOWN**, never TRUE.
+- id: sym-logical-order
+  category: symbols and SQL
+  kind: text
+  source: m01-03-window-functions#27
+  why: A chain of SQL clauses joined by arrows.
+  terms:
+  - FROM|from
+  - WHERE|where
+  - GROUP BY|group by
+  - HAVING|having
+  - windows
+  - QUALIFY|qualify
+  - SELECT|select
+  - ORDER BY|order by
+  text: 'Logical order: FROM → WHERE → GROUP BY → HAVING → **windows** → QUALIFY → SELECT → ORDER BY'
+- id: sym-bayes
+  category: symbols and SQL
+  kind: text
+  source: m02-01-problem-framing#9
+  why: A fraction with nested parentheses.
+  terms:
+  - Bayes
+  - PPV
+  - spec
+  - times
+  - minus
+  - over
+  text: |-
+    By Bayes' rule:
+
+    PPV = sens × prev / (sens × prev + (1 − spec) × (1 − prev))
+- id: sym-net-benefit
+  category: symbols and SQL
+  kind: text
+  source: m02-04-metrics-imbalance#18
+  why: A subscript character.
+  terms:
+  - NB|N B
+  - prev
+  - minus
+  - '1'
+  text: Treat all has NB = prev − (1 − prev) × pₜ/(1 − pₜ).
+- id: sym-sorted-p
+  category: symbols and SQL
+  kind: text
+  source: m08-02-testing-multiplicity#8
+  why: A chain of inequalities with an ellipsis and function-style subscripts.
+  terms:
+  - p values|p-values
+  - Bonferroni
+  - alpha
+  - reject
+  text: |-
+    Sort the m p-values: `p(1) ≤ p(2) ≤ … ≤ p(m)`.
+
+    - **Bonferroni.** Reject if `p ≤ α/m`.
+- id: sym-frame
+  category: symbols and SQL
+  kind: text
+  source: m01-03-window-functions#22
+  why: A SQL clause in a code span followed by bold prose.
+  terms:
+  - rows between
+  - 3 preceding|three preceding
+  - current row
+  - last 4|last four
+  - encounters
+  - far apart
+  text: |-
+    `ROWS BETWEEN 3 PRECEDING AND CURRENT ROW` counts **rows**: the last 4 encounters,
+      however far apart.
+- id: sym-case
+  category: symbols and SQL
+  kind: text
+  source: m01-02-sql-core#16
+  why: Nested SQL, an identifier, and a file name.
+  terms:
+  - flag
+  - max
+  - case when
+  - then 1
+  - else 0
+  - prior AF
+  - features
+  - sequel|SQL
+  text: '**Flag**: `MAX(CASE WHEN cond THEN 1 ELSE 0 END)`, as in `prior_af` in `02_features.sql`.'
+- id: drug-doac
+  category: drug and clinical names
+  kind: text
+  source: m05-04-generation-eval#1
+  why: Two generic drug names and doses.
+  terms:
+  - apixaban
+  - 5 mg|5 milligrams|five milligrams
+  - twice daily
+  - atorvastatin
+  - 80 mg|80 milligrams|eighty
+  text: Started on **apixaban 5 mg twice daily** and atorvastatin 80 mg.
+- id: drug-dapt
+  category: drug and clinical names
+  kind: text
+  source: m05-02-rag#12
+  why: A drug combination with a duration.
+  terms:
+  - guideline
+  - aspirin
+  - clopidogrel|clopidagrel|clopidogrelle|clop a dog
+  - 21 days|twenty-one days
+  - dose table
+  text: |-
+    A guideline recommendation has a condition sentence, the action "aspirin plus clopidogrel
+    for 21 days", and a dose table.
+- id: drug-rxnorm
+  category: drug and clinical names
+  kind: text
+  source: m01-01-data-sources#17
+  why: The same drug name twice in different roles.
+  terms:
+  - ingredient
+  - atorvastatin
+  - 40 mg|40 milligrams|forty
+  - oral tablet
+  - branded
+  text: |-
+    It links an ingredient (atorvastatin) to clinical drugs
+    (atorvastatin 40 mg oral tablet) and branded forms.
+- id: drug-tpa
+  category: drug and clinical names
+  kind: text
+  source: m05-05-robustness-safety#1
+  why: A bracketed guideline reference and a drug name.
+  terms:
+  - alteplase|alter place|all to place|altaplace|alta place|ultaplace
+  - protocol
+  - G-2.1|G 2.1|G 2 1|G2.1
+  - brand name
+  - abbreviation
+  - dangerous
+  text: |-
+    → "Yes, proceed with
+      alteplase per protocol. [G-2.1]"
+
+    The first answer matches the guideline. The second, after a brand name, an abbreviation,
+    and a casual tone, is dangerous.
+- id: drug-tenecteplase
+  category: drug and clinical names
+  kind: text
+  source: m05-02-rag#8
+  why: Hard-to-pronounce drug name beside two codes.
+  terms:
+  - exact tokens
+  - tenecteplase|tenectaplace|tenectoplace|tenecta|ten ect
+  - NIHSS|N I H S S
+  - I63
+  - synonyms
+  - paraphrase
+  text: |-
+    It nails **exact tokens**: `tenecteplase`,
+    `NIHSS`, `I63`. It fails on **synonyms and paraphrase**.
+- id: date-iso
+  category: dates and versions
+  kind: text
+  source: m01-04-cohort-design#10
+  why: ISO dates must become spoken dates.
+  terms:
+  - Commercial
+  - January 1|1 January
+  - '2019'
+  - December 31|31 December
+  - '2021'
+  - Medicare
+  - '2022'
+  - '2025'
+  text: |-
+    Commercial runs 2019-01-01 to 2021-12-31 and Medicare runs
+    2022-01-01 to 2025-12-31.
+- id: date-years
+  category: dates and versions
+  kind: text
+  source: m01-05-temporal-leakage#12
+  why: A year range with an en dash.
+  terms:
+  - temporal
+  - '2018'
+  - '2021'
+  - '2022'
+  - deployment
+  text: Prefer a **temporal** split (train on 2018–2021, test on 2022) to mimic deployment.
+- id: ver-medspacy
+  category: dates and versions
+  kind: text
+  source: m11-02-extraction#4
+  why: A three-part version number.
+  terms:
+  - README|readme
+  - version
+  - 1.3.1|1 point 3 point 1
+  - November
+  - '2024'
+  text: Its README lists version 1.3.1 (November 2024).
+- id: ver-cdm
+  category: dates and versions
+  kind: text
+  source: m06-01-interop-standards#14
+  why: A 'v' version prefix and an unusual acronym.
+  terms:
+  - OHDSI|odyssey
+  - '5.4'
+  - '5.5'
+  - widely deployed
+  - newest release
+  text: |-
+    (maintained by OHDSI; v5.4 is still widely deployed and v5.5 is the
+    newest release)
+- id: long-dpsgd
+  category: long and dense
+  kind: text
+  source: m10-04-federated-foundation#11
+  why: A long list sentence with symbols, stamina for the voice.
+  terms:
+  - DP-SGD|DP SGD
+  - CCS 2016
+  - clip
+  - Gaussian noise
+  - standard deviation
+  - sigma
+  - summed gradient
+  text: |-
+    DP-SGD (Abadi et al., CCS 2016) changes the training step in three ways:
+
+    - **Clip** each example's gradient to a maximum norm C, which bounds any one person's
+      influence.
+    - **Add Gaussian noise** scaled to C (standard deviation sigma times C) to the summed
+      gradient
+- id: long-alarm
+  category: long and dense
+  kind: text
+  source: m10-03-regulation-deployment#20
+  why: A bulleted list with an identifier in the middle.
+  terms:
+  - week one
+  - header
+  - SoftwareVersions|software versions
+  - control chart
+  - per scanner
+  - override-rate|override rate
+  - radiology physics
+  text: |-
+    What would have caught it in week one:
+
+    - a header-combination alarm on `SoftwareVersions`
+    - a control chart on daily flag rate per scanner
+    - an override-rate trend
+    - a named contact in radiology physics who notifies the AI team about upgrades
+- id: long-model-answer
+  category: long and dense
+  kind: text
+  source: m01-05-temporal-leakage#11
+  why: A spoken-style interview answer of about eighty words.
+  terms:
+  - suspicious
+  - '0.95'
+  - timestamp
+  - feature importance
+  - length of stay
+  - discharge disposition
+  - train and test
+  text: |-
+    I'd start by being suspicious: 0.95 is unusually high for most clinical outcomes, so it's
+    a signal to audit. First I'd write down the prediction time and check every feature's
+    timestamp against it, using when the data was recorded or available, not the clinical
+    event date. I'd look at feature importance. If the top features are things like length of
+    stay, discharge disposition, or treatments that follow the outcome, that's a red flag. I'd
+    make sure the split is by patient and ideally by time, so the same patient or future data
+    isn't in both train and test.
+- id: step-quiz-code
+  category: whole steps
+  kind: step
+  source: m01-02-sql-core#5
+  why: A quiz whose question and options contain code, read as 'question, options, think, answer'.
+  terms:
+  - paid totals|paid total
+  - place of service
+  - claims
+  - encounter
+  - diagnosis
+- id: step-think
+  category: whole steps
+  kind: step
+  source: m01-05-temporal-leakage#11
+  why: 'An interview question step: prompt, a pause, model answer, key points.'
+  terms:
+  - interviewer
+  - '0.95'
+  - leaking
+  - temporal
+  - prospective
+- id: step-recap
+  category: whole steps
+  kind: step
+  source: m09-01-mechanisms#27
+  why: A recap with several acronyms in a row.
+  terms:
+  - MCAR
+  - MAR
+  - MNAR
+  - complete
+  - missing

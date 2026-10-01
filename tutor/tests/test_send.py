@@ -23,6 +23,11 @@ class StubBot:
             )
         self.sent.append({"kind": "text", "text": text, "markup": reply_markup})
 
+    async def send_audio(self, chat_id, audio, title=None, performer=None, reply_markup=None):
+        self.sent.append(
+            {"kind": "audio", "title": title, "performer": performer, "markup": reply_markup}
+        )
+
     async def send_photo(self, chat_id, photo, caption=None, reply_markup=None):
         self.sent.append({"kind": "photo", "caption": caption, "markup": reply_markup})
 
@@ -47,3 +52,16 @@ async def test_image_is_sent_as_photo(tmp_path: Path):
     bot = StubBot()
     await send(bot, 1, [Out("caption", image=image)])
     assert bot.sent[0]["kind"] == "photo" and bot.sent[0]["caption"] == "caption"
+
+
+async def test_audio_is_sent_as_an_audio_file_with_a_title(tmp_path: Path):
+    clip = tmp_path / "clip.m4a"
+    clip.write_bytes(b"fake")
+    bot = StubBot()
+    await send(
+        bot,
+        1,
+        [Out("", [[Button("Continue ▶", "n:0:1")]], audio=clip, audio_title="Lesson (part 1/3)")],
+    )
+    assert bot.sent[0]["kind"] == "audio" and bot.sent[0]["title"] == "Lesson (part 1/3)"
+    assert bot.sent[0]["performer"] == "Applied Clinical AI" and bot.sent[0]["markup"] is not None

@@ -188,9 +188,31 @@ async def store(tmp_path: Path):
     await s.close()
 
 
+class FakeAudio:
+    """Stands in for AudioCache: writes a tiny file per script and remembers what it was asked."""
+
+    def __init__(self, directory: Path, fail_with: Exception | None = None) -> None:
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.scripts: list[list] = []
+        self.fail_with = fail_with
+
+    def cached(self, script: list) -> bool:
+        return script in self.scripts
+
+    async def get(self, script: list) -> Path:
+        if self.fail_with is not None:
+            raise self.fail_with
+        if script not in self.scripts:
+            self.scripts.append(script)
+        path = self.directory / f"clip{self.scripts.index(script)}.m4a"
+        path.write_bytes(b"fake audio")
+        return path
+
+
 @pytest.fixture
 def make_engine(course_dir: Path, store: Store, tmp_path: Path):
-    def _make(tutor: Any = None) -> Engine:
-        return Engine(load_course(course_dir), store, tutor, tmp_path / "data")
+    def _make(tutor: Any = None, audio: Any = None) -> Engine:
+        return Engine(load_course(course_dir), store, tutor, tmp_path / "data", audio=audio)
 
     return _make

@@ -30,6 +30,9 @@ DEFAULT_COURSE_DIR = Path(__file__).resolve().parents[2] / "course"
 class _Step(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Optional hand-written narration for the audio version; replaces the generated text.
+    speak: str | None = Field(default=None, max_length=3000)
+
     @field_validator("options", "points", "key_points", mode="before", check_fields=False)
     @classmethod
     def _stringify_items(cls, value):

@@ -332,3 +332,79 @@ async def test_notes_collect_recaps_of_completed_lessons(make_engine, store):
     assert "<u>Alpha</u>" in notes and "• done" in notes
     assert "<u>Beta</u>" in notes and "• beta point" in notes
     assert "Gamma" not in notes  # not completed
+
+
+async def test_listen_buttons_only_appear_when_audio_is_enabled(make_engine, tmp_path):
+    from .conftest import FakeAudio
+
+    for uid, (audio, expected) in enumerate(
+        ((None, False), (FakeAudio(tmp_path / "a"), True)), 500
+    ):
+        engine = make_engine(audio=audio)
+        outs = await engine.start(uid, None)
+        header = await engine.advance(uid, *_continue(outs))
+        step = await engine.advance(uid, *_continue(header))
+        assert any(d.startswith("ls:") for d in _button_data(header)) is expected
+        assert any(d.startswith("lt:") for d in _button_data(step)) is expected
+
+
+async def test_listen_step_sends_audio_and_records_it(make_engine, store, tmp_path):
+    from .conftest import FakeAudio
+
+    audio = FakeAudio(tmp_path / "a")
+    engine = make_engine(audio=audio)
+    outs = await engine.start(UID, None)
+    outs = await engine.advance(UID, *_continue(outs))  # header
+    outs = await engine.advance(UID, *_continue(outs))  # step 1 (text)
+    listen = next(d for d in _button_data(outs) if d.startswith("lt:"))
+    _, li, item = listen.split(":")
+
+    result = await engine.listen_step(UID, int(li), int(item))
+    assert result[0].audio is not None and result[0].audio.read_bytes() == b"fake audio"
+    assert result[0].audio_title == "Alpha · step 1"
+    assert any(d.startswith("n:") for d in _button_data(result))  # a way to carry on
+    assert [x for x in audio.scripts[0] if isinstance(x, str)][:2] == ["Hello.", "Some bold text."]
+    rows = await (await store.db.execute("SELECT kind, item FROM questions")).fetchall()
+    assert [tuple(r) for r in rows] == [("listen", 1)]
+    assert await engine.listen_step(UID, 0, 99) == []  # out-of-range step
+
+
+async def test_listen_lesson_makes_parts_with_pauses_for_quizzes(make_engine, tmp_path):
+    from .conftest import FakeAudio
+
+    audio = FakeAudio(tmp_path / "a")
+    engine = make_engine(audio=audio)
+    await engine.start(UID, None)
+    notes: list[str] = []
+
+    async def notify(text: str) -> None:
+        notes.append(text)
+
+    outs = await engine.listen_lesson(UID, 2, notify)  # gamma: three quizzes
+    assert outs and all(o.audio is not None for o in outs)
+    assert outs[-1].audio_title.startswith("Gamma") and any(
+        d.startswith("n:") for d in _button_data(outs[-1:])
+    )
+    spoken = " ".join(x for script in audio.scripts for x in script if isinstance(x, str))
+    assert "The answer is A." in spoken and "Take a moment to think." in spoken
+    assert any(isinstance(x, float) and x >= 5 for script in audio.scripts for x in script)
+    assert len(notes) == 1 and "Preparing the audio" in notes[0]
+
+    notes.clear()
+    await engine.listen_lesson(UID, 2, notify)  # now cached: no "preparing" message
+    assert notes == []
+
+
+async def test_audio_failures_and_disabled_audio_are_reported_politely(make_engine, tmp_path):
+    from clinical_tutor.tts import TTSError
+
+    from .conftest import FakeAudio
+
+    engine = make_engine(audio=None)
+    await engine.start(UID, None)
+    assert "isn't enabled" in (await engine.listen_lesson(UID))[0].text
+    assert "isn't enabled" in (await engine.listen_step(UID, 0, 1))[0].text
+
+    failing = make_engine(audio=FakeAudio(tmp_path / "b", fail_with=TTSError("say crashed")))
+    out = await failing.listen_lesson(UID, 0, None)
+    assert "Couldn't make the audio" in out[0].text and "say crashed" in out[0].text

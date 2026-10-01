@@ -116,6 +116,35 @@ Design figures for a phone: one message per figure, large fonts, few labels, hig
 white background. Timelines, curves (ROC, calibration, Kaplan–Meier), and architecture sketches
 work well. Reference the file with an `image` step.
 
+## Audio
+
+Every lesson can be listened to (🎧, `/listen`), and the audio is generated from the same YAML, so
+you rarely need to do anything. Two things are worth knowing:
+
+- **Pronunciations** live in `course/pronunciations.yaml`. If a term is read wrongly, add it there
+  (`SaMD: "S A M D"`, `LOINC: "loynk"`), spell letters in CAPITALS (a lowercase "a" is read as the
+  article "uh"), then check with `python tts_bench/run.py --voices Samantha --cases <id>`. Unknown
+  all-caps words of two or three letters are spelled out automatically; longer ones are read as
+  words, so list any acronym that should be spelled.
+- **`speak:`** is an optional field on any step. When present it replaces the generated narration
+  for that step (it still goes through the pronunciation list). Use it where the written step
+  doesn't work aloud: a table, a code block that needs describing, or a figure whose point isn't in
+  its caption. Write it as you would say it to a colleague, with no symbols:
+
+  ```yaml
+  - type: code
+    code: |
+      SELECT patient_id, MIN(index_date) FROM strokes GROUP BY patient_id
+    speak: |
+      This query keeps each patient's earliest stroke date. Grouping by patient
+      collapses repeated strokes into one row.
+  ```
+
+Steps that read well aloud as written need nothing. Code blocks are not read; the narration says
+"A code example is shown in the text version" unless you provide `speak:`, so prose before and
+after code matters. Quiz and open-question steps are read as "question, options, a pause to think,
+answer", and are only available through the whole-lesson audio so the answer isn't given away.
+
 ## Cases of the day
 
 `course/cases.yaml` holds scenarios that make the learner combine several lessons, served by

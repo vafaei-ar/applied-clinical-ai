@@ -39,6 +39,7 @@ from .content import (
 )
 from .llm import Tutor, TutorUnavailable
 from .render import escape, md, progress_bar
+from .speech import Lexicon, lesson_parts, load_lexicon, script_seconds, step_script
 from .steps import (
     LETTERS,
     Button,
@@ -50,6 +51,7 @@ from .steps import (
     think_text,
 )
 from .store import DAY, Store, User
+from .tts import AudioCache, TTSError
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +116,11 @@ class Engine:
         tutor: Tutor | None,
         data_dir: Path,
         guide_text: str = "",
+        audio: AudioCache | None = None,
+        lexicon: Lexicon | None = None,
     ):
+        self.audio = audio
+        self.lexicon = lexicon if lexicon is not None else load_lexicon()
         self.course = course
         self.store = store
         self.tutor = tutor
@@ -303,6 +309,7 @@ class Engine:
             "/notes: a study sheet of your completed lessons' recaps\n"
             "/later: your laptop to-do list\n"
             "/progress: your stats\n"
+            + ("/listen: hear the current lesson as audio\n" if self.audio else "")
             + ("/quiz: fresh questions on the current lesson\n" if self.tutor else "")
             + f"\n{ask}Typing <i>next</i> also continues."
         )
@@ -377,6 +384,8 @@ class Engine:
         extras: list[Button] = []
         if self.tutor is not None and not isinstance(step, (RecapStep, LaptopStep)):
             extras.append(Button("🔍 Go deeper", f"d:{index}:{item}"))
+        if self.audio is not None:
+            extras.append(Button("🎧", f"lt:{index}:{item}"))
         extras.append(Button("🚩", f"f:{index}:{item}"))
 
         if isinstance(step, QuizStep):
@@ -412,7 +421,7 @@ class Engine:
         progress = f"\n\n<i>{item}/{len(lesson.steps)}</i>" if item % 5 == 0 else ""
         last = outs[-1]
         last.text += progress
-        last.buttons = [[nav, *extras]]
+        last.buttons = [[nav], extras] if len(extras) > 2 else [[nav, *extras]]
         return outs
 
     def _header(self, lesson: Lesson, index: int, n_steps: int) -> Out:
@@ -430,7 +439,10 @@ class Engine:
         row = [Button("Start ▶", f"n:{index}:1")]
         if len(self._testout_items(lesson)) >= 2:
             row.append(Button("⚡ Test me first", f"tt:{index}"))
-        return Out(text, [row])
+        rows = [row]
+        if self.audio is not None:
+            rows.append([Button("🎧 Listen to this lesson", f"ls:{index}")])
+        return Out(text, rows)
 
     async def _complete(self, user: User, lesson: Lesson) -> list[Out]:
         await self.store.complete_lesson(user.user_id, lesson.id)
@@ -786,6 +798,58 @@ class Engine:
         await self.store.add_chat(user_id, "assistant", reply)
         await self.store.log_question(user_id, self.course.order[lesson_index], item, "deeper")
         return [Out(f"🔍 {md(reply)}", [[self._nav(user), Button("🧪 Quiz me", "mq")]])]
+
+    # --- audio --------------------------------------------------------------------------------
+
+    async def listen_step(self, user_id: int, lesson_index: int, item: int) -> list[Out]:
+        """The audio version of one step (not offered on quiz and open-question steps)."""
+        user = await self._user(user_id)
+        if self.audio is None:
+            return [Out("Audio isn't enabled on this server.", [[self._nav(user)]])]
+        if not 0 <= lesson_index < len(self.course.order):
+            return []
+        lesson_id = self.course.order[lesson_index]
+        lesson = await self.lesson(lesson_id)
+        if not 1 <= item <= len(lesson.steps):
+            return []
+        script = step_script(lesson.steps[item - 1], self.lexicon)
+        if not any(isinstance(x, str) for x in script):
+            return [Out("There's nothing to read aloud for this step.", [[self._nav(user)]])]
+        try:
+            path = await self.audio.get(script)
+        except TTSError as exc:
+            return [Out(f"⚠️ Couldn't make the audio. {escape(str(exc))}", [[self._nav(user)]])]
+        await self.store.log_question(user_id, lesson_id, item, "listen")
+        title = f"{lesson.title} · step {item}"
+        return [Out("", [[self._nav(user)]], audio=path, audio_title=title)]
+
+    async def listen_lesson(
+        self, user_id: int, lesson_index: int | None = None, notify: Notify | None = None
+    ) -> list[Out]:
+        """The whole lesson as a few audio parts. Quizzes become 'question, pause, answer'."""
+        user = await self._user(user_id)
+        if self.audio is None:
+            return [Out("Audio isn't enabled on this server.", [[self._nav(user)]])]
+        lesson_id = user.lesson_id if lesson_index is None else self.course.order[lesson_index]
+        lesson = await self.lesson(lesson_id, notify)
+        parts = lesson_parts(lesson, self.lexicon)
+        if notify is not None and not all(self.audio.cached(p) for p in parts):
+            minutes = round(sum(script_seconds(p) for p in parts) / 60)
+            await notify(
+                f"🎧 Preparing the audio (about {minutes} minutes in {len(parts)} parts). "
+                "It's saved afterwards, so it's instant next time."
+            )
+        outs: list[Out] = []
+        try:
+            for n, part in enumerate(parts, 1):
+                path = await self.audio.get(part)
+                title = f"{lesson.title} (part {n}/{len(parts)})"
+                outs.append(Out("", audio=path, audio_title=title))
+        except TTSError as exc:
+            return [Out(f"⚠️ Couldn't make the audio. {escape(str(exc))}", [[self._nav(user)]])]
+        await self.store.log_question(user_id, lesson_id, 0, "listen_lesson")
+        outs[-1].buttons = [[self._nav(user)]]
+        return outs
 
     # --- feedback -----------------------------------------------------------------------------
 

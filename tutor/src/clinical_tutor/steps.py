@@ -34,6 +34,8 @@ class Out:
     buttons: list[list[Button]] = field(default_factory=list)
     image: Path | None = None
     edit: bool = False
+    audio: Path | None = None
+    audio_title: str | None = None
 
 
 def quiz_text(step: QuizStep, header: str = "🧩 <b>Quick check</b>") -> str:

@@ -33,6 +33,7 @@ from .llm import Tutor
 from .render import split_message
 from .steps import Out
 from .store import Store
+from .tts import AudioCache, make_tts
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,22 @@ async def send(bot: Bot, chat_id: int, outs: list[Out], source: Message | None =
                 if "message is not modified" in str(exc):
                     continue
                 log.info("edit failed (%s); sending a new message", exc)
+        if out.audio is not None:
+            try:
+                await bot.send_audio(
+                    chat_id,
+                    FSInputFile(out.audio),
+                    title=out.audio_title,
+                    performer="Applied Clinical AI",
+                    reply_markup=markup,
+                )
+                continue
+            except (TelegramBadRequest, FileNotFoundError) as exc:
+                log.warning("audio %s failed: %s", out.audio, exc)
+                await bot.send_message(
+                    chat_id, "I couldn't send that audio. Try again in a moment."
+                )
+                continue
         if out.image is not None:
             try:
                 await bot.send_photo(
@@ -169,6 +186,12 @@ def build_router(engine: Engine, bot: Bot) -> Router:
     async def on_case(message: Message) -> None:
         await send(bot, message.chat.id, await engine.case(message.from_user.id))
 
+    @router.message(Command("listen"))
+    async def on_listen(message: Message) -> None:
+        await typing(message.chat.id)
+        outs = await engine.listen_lesson(message.from_user.id, None, notifier(message.chat.id))
+        await send(bot, message.chat.id, outs)
+
     @router.message(Command("notes"))
     async def on_notes(message: Message) -> None:
         await send(bot, message.chat.id, await engine.notes(message.from_user.id))
@@ -218,7 +241,7 @@ def build_router(engine: Engine, bot: Bot) -> Router:
         kind, _, rest = data.partition(":")
         args = [int(x) for x in rest.split(":") if x.lstrip("-").isdigit()] if rest else []
 
-        if kind in {"d", "mq", "iv", "ivg", "cs", "n", "L", "go", "tq"}:
+        if kind in {"d", "mq", "iv", "ivg", "cs", "n", "L", "go", "tq", "lt", "ls"}:
             await typing(chat_id)
         if kind == "n" and len(args) == 2:
             outs = await engine.advance(uid, args[0], args[1], notifier(chat_id))
@@ -256,6 +279,10 @@ def build_router(engine: Engine, bot: Bot) -> Router:
             outs = await engine.test_out(uid, args[0])
         elif kind == "tq" and len(args) == 1:
             outs = await engine.test_next(uid, args[0])
+        elif kind == "lt" and len(args) == 2:
+            outs = await engine.listen_step(uid, args[0], args[1])
+        elif kind == "ls" and len(args) == 1:
+            outs = await engine.listen_lesson(uid, args[0], notifier(chat_id))
         elif kind == "f" and len(args) == 2:
             outs = await engine.flag_menu(uid, args[0], args[1])
         elif kind == "fr" and len(args) == 3:
@@ -313,17 +340,25 @@ async def main(course_dir: Path) -> None:
         else None
     )
     guide = GUIDE_PATH.read_text(encoding="utf-8") if GUIDE_PATH.is_file() else ""
-    engine = Engine(course, store, tutor, settings.data_dir, guide)
+    voice = make_tts(settings.tts_backend, settings.tts_voice, settings.tts_rate)
+    audio = AudioCache(settings.data_dir / "audio", voice) if voice else None
+    engine = Engine(course, store, tutor, settings.data_dir, guide, audio)
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher()
     dispatcher.update.outer_middleware(AllowlistMiddleware(allowed))
     dispatcher.include_router(build_router(engine, bot))
-    await bot.set_my_commands(COMMANDS)
+    commands = COMMANDS + (
+        [BotCommand(command="listen", description="Hear the current lesson as audio")]
+        if audio
+        else []
+    )
+    await bot.set_my_commands(commands)
 
     log.info(
-        "Course loaded: %d lessons. AI tutor: %s%s. Allowed users: %s",
+        "Course loaded: %d lessons. Audio: %s. AI tutor: %s%s. Allowed users: %s",
         len(course.order),
+        voice.fingerprint if voice else "off",
         f"on ({settings.tutor_model})" if tutor else "off",
         ", personalized from data/profile.md" if tutor and tutor.profile else "",
         sorted(allowed),

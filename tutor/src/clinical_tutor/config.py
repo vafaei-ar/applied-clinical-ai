@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     # Local hour (0-23) for a gentle "continue where you left off" nudge; -1 disables it.
     nudge_hour: int = 19
 
-    @field_validator("anthropic_api_key")
+    # Audio versions of lessons (🎧 buttons and /listen). "auto" uses the macOS built-in voice when
+    # it is available, "none" turns audio off. List installed voices with `say -v '?'`.
+    tts_backend: str = "auto"
+    tts_voice: str | None = "Daniel"
+    tts_rate: int = 175
+
+    @field_validator("anthropic_api_key", "tts_voice")
     @classmethod
     def _blank_is_none(cls, value: str | None) -> str | None:
         return value or None

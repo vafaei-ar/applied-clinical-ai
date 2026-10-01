@@ -20,6 +20,12 @@ or add to it. Clone the repo, add your own Telegram bot token, and you have your
 - **Test out of what you know.** Every lesson header has **⚡ Test me first**: 4 to 5 of the
   lesson's hardest quiz questions. Pass (at most one miss) and the lesson is marked complete;
   miss and the questions are queued for review and you start the lesson.
+- **Listen instead of read.** Every lesson has an audio version: a 🎧 button under each text step,
+  a "🎧 Listen to this lesson" button on the lesson card, and `/listen`. A lesson is about 20 to 30
+  minutes in a few parts, with quizzes turned into "question, options, a few seconds to think,
+  answer". Codes, acronyms, units, and equations are rewritten so they sound right ("I sixty-three",
+  "A U ROC", "milligrams per deciliter"). It uses the free built-in macOS voice, so nothing is
+  installed and nothing leaves your computer; on other systems the buttons simply don't appear.
 - **Cases of the day.** `/case` serves a realistic scenario that needs several lessons at once
   ("PPV halved after go-live: what do you check first?"). It unlocks once you've covered most of
   the lessons it draws on, and misses come back in spaced review.
@@ -97,6 +103,7 @@ it comes back. For 24/7 availability, run the same commands on any small Linux s
 | `/map` | Course map with progress; jump to any module or lesson |
 | `/review` | Spaced review of items that are due |
 | `/interview` | A mock interview question on what you've covered |
+| `/listen` | The current lesson as audio (needs the macOS built-in voice) |
 | `/case` | A realistic scenario that combines several lessons |
 | `/notes` | A study sheet of your completed lessons' recaps |
 | `/quiz` | Fresh questions on the current lesson (AI tutor) |
@@ -113,6 +120,19 @@ it comes back. For 24/7 availability, run the same commands on any small Linux s
   for cost. The requests opt into Anthropic's server-side fallback, so a declined request is
   retried on another model automatically.
 - The course uses synthetic data only. Don't send real patient information to the bot.
+
+## Voices
+
+On a Mac the default voice works out of the box. macOS also offers noticeably better voices as a
+free download: **System Settings > Accessibility > Spoken Content > System Voice > Manage Voices**
+(look for "Premium" or "Enhanced"). To use one, set `TTS_VOICE` in `.env` (list installed voices with
+`say -v '?'`) and adjust `TTS_RATE`.
+
+To choose between voices objectively, `tts_bench/` holds 62 of the hardest passages from the
+lessons (ICD and CPT codes, acronyms, units, equations, drug names) and a runner that renders them
+with any voice, transcribes the result, and scores how many key terms came through, plus a blind
+listening page. See [`tts_bench/README.md`](tts_bench/README.md). Other speech engines can be
+plugged in without touching the bot.
 
 ## Improving the course from real usage
 
@@ -158,9 +178,11 @@ tutor/
 │   ├── llm.py              # AI tutor (Anthropic API)
 │   ├── bot.py              # Telegram transport (aiogram, long polling)
 │   ├── store.py            # SQLite persistence
+│   ├── speech.py, tts.py   # lesson text -> speakable script; voice backends and audio cache
 │   ├── stats.py            # usage report (clinical-tutor stats)
 │   ├── render.py, steps.py # Markdown → Telegram HTML, step rendering
 │   └── cli.py              # run / validate / outline / preview
+├── tts_bench/              # challenge set and runner for comparing voices
 ├── deploy/                 # macOS background service
 └── tests/
 ```
