@@ -1,0 +1,481 @@
+id: m10-02-evaluation
+title: 'Evaluating imaging AI: metrics, test sets, and reader studies'
+summary: Classification, detection, and segmentation metrics and their pitfalls; test-set construction;
+  spectrum bias; shortcut learning; saliency; and what a reader study shows that standalone metrics cannot.
+minutes: 28
+status: authored
+why_it_matters: Imaging models get reported with flattering metrics. Being able to say what a fair evaluation
+  looks like, and what a headline number hides, is central to reviewing, regulating, and hiring.
+objectives:
+  - 'Choose metrics per task: AUROC plus an operating point, FROC or per-lesion sensitivity for detection, Dice with surface-distance and volume metrics for segmentation'
+  - Explain with examples why Dice can hide clinically important errors, in both directions
+  - 'Build a test set: patient-level split, external sites, adjudicated reference standard, representative case mix'
+  - Recognize spectrum bias, hidden stratification, and shortcut learning, and say why saliency maps are not validation
+  - Describe a multi-reader multi-case study, what it shows, and how automation bias can undermine it
+key_points:
+  - Report per-lesion and per-patient performance separately
+  - No single segmentation metric is enough, and Dice can be high while a lesion is missed
+  - An external test set from a new scanner vendor is more informative than a bigger internal one
+  - Overall sensitivity depends on case mix, so stratify and use consecutive cases
+  - Saliency maps are not validation
+  - Standalone AUROC is not the same as improved reader performance
+tags: [imaging, evaluation, stroke, interview]
+steps:
+  - type: text
+    title: AUROC 0.97 on a vendor slide
+    text: |
+      A vendor's slide: intracranial hemorrhage detection, **AUROC 0.97** on 500 head CTs, "validated
+      at three sites". The radiology chair asks whether to switch it on in the ED.
+
+      Nothing on the slide need be false. But five things that decide the answer are missing:
+
+      - how the 500 cases were **chosen**
+      - what the **reference standard** was
+      - what the **threshold** is and what happens at it
+      - how it does on the **small, subtle bleeds** readers find hard
+      - whether any site or scanner was **unseen** by the model
+
+      This lesson is that checklist for classification, detection, and segmentation, plus what a
+      reader study shows that standalone metrics cannot. The stroke tasks stay the same:
+      hemorrhage on non-contrast CT, LVO on CTA, and infarct core segmentation.
+
+  - type: text
+    title: Match the metric to the decision
+    text: |
+      Start from what the output will be used for, then pick the metric.
+
+      - **Exam-level classification** (hemorrhage flag, LVO flag): AUROC for ranking, but the product
+        runs at one **operating point**. Report sensitivity, specificity, PPV, NPV, and **flags per
+        100 exams** there.
+      - **Detection** (mark each lesion): per-lesion sensitivity at a stated number of false
+        positives per scan, or a **FROC** curve.
+      - **Segmentation** (outline the infarct core): overlap, boundary, and **volume** metrics,
+        because volume drives some decisions.
+      - **Clinical utility**: does anything get better? Time to treatment, reader accuracy,
+        outcomes.
+
+      Module 02's metrics lesson covered AUROC, AUPRC, thresholds, and alert budgets. Everything
+      there applies. What is new here is the image-specific ways to fool yourself.
+
+  - type: quiz
+    question: |
+      The model has sensitivity 0.95 and specificity 0.95. On the vendor's enriched set (40% bleeds) its PPV is
+      about 0.93. What is its PPV in an ED where 5% of head CTs have a bleed?
+    options:
+      - About 0.93, because sensitivity and specificity do not change
+      - About 0.75
+      - About 0.50
+      - About 0.05
+    answer: 2
+    explanation: |
+      PPV = 0.95 x 0.05 / (0.95 x 0.05 + 0.05 x 0.95) = 0.50. Half of the flags are false at 5%
+      prevalence, even though the model is unchanged. At 2% the PPV falls to about 0.28. This is the
+      "prevalence caps PPV" point from the problem-framing lesson, and it is why enriched test sets
+      cannot be used to forecast alert burden. Report PPV at the **deployment** prevalence.
+
+  - type: text
+    title: Numbers that survive contact with a hospital
+    text: |
+      For exam-level claims:
+
+      - **Lock the operating point on development data** before touching the test set. Choosing the
+        threshold on the test set inflates sensitivity and specificity.
+      - Report sensitivity and specificity at that point with **confidence intervals that resample
+        patients, not images or studies** (Module 08 covers bootstrap intervals). A patient with
+        three head CTs is one patient.
+      - Translate to workload: at the local prevalence, how many flags per shift, and how many are
+        false?
+      - Break results down by **site, scanner vendor, bleed type and size, age, and inpatient versus
+        ED**. A pooled number averages over differences you care about.
+      - AUROC alone can hide a threshold that lands at 15% of studies flagged. It says nothing
+        about what happens at the point where people use the tool.
+
+  - type: text
+    title: Detection, per lesion and per patient
+    text: |
+      When the model marks lesions, you have two units of analysis, and they can tell different
+      stories.
+
+      - **Per-lesion sensitivity** counts every true lesion. A patient with six lesions contributes
+        six.
+      - **Per-patient sensitivity** counts a patient as found if the model finds (at least) one.
+
+      You also need a written **hit rule**: what counts as detecting a lesion? Centre inside the
+      reference lesion? Overlap above a threshold? Within a distance? Different rules give
+      different FROC curves, so comparing papers with different rules is meaningless.
+
+      Watch for "right exam, wrong reason". An exam-level flag that fires on a calcification while
+      the real bleed is missed still counts as a true positive at exam level. That is acceptable
+      for a triage device that does not claim to localize, and unacceptable for a detection device
+      that draws a box.
+
+  - type: quiz
+    question: |
+      Read the code. What do the two numbers come out as?
+    code: |
+      import numpy as np
+      # one row per true lesion: (patient_id, detected)
+      lesions = np.array([(1, 1), (2, 0), (3, 0)] + [(4, 1)] * 6)
+
+      per_lesion = lesions[:, 1].mean()
+      per_patient = np.mean([
+          lesions[lesions[:, 0] == p, 1].any() for p in np.unique(lesions[:, 0])
+      ])
+    language: python
+    options:
+      - Both 0.78
+      - per_lesion about 0.78, per_patient 0.50
+      - per_lesion 0.50, per_patient about 0.78
+      - per_lesion about 0.33, per_patient 1.00
+    answer: 1
+    explanation: |
+      Seven of nine lesions are found, so per-lesion sensitivity is 0.78. But only patients 1 and 4
+      have any lesion found, so per-patient sensitivity is 2/4 = 0.50. One patient with six easy
+      lesions (multifocal embolic infarcts, say) props up the per-lesion number while half the
+      patients are missed completely. Report both, and say which one the clinical claim needs.
+
+  - type: text
+    title: Segmentation metrics and what each ignores
+    text: |
+      Four families, each blind to something:
+
+      - **Overlap** (Dice, IoU). Counts misplaced pixels, not where they are. Depends strongly on lesion
+        size (you saw that in Lesson 1).
+      - **Boundary distance**. Hausdorff distance (HD) is the worst point, so one stray blob
+        dominates it. HD95 uses the 95th percentile, which is robust to annotation noise, and for
+        the same reason can ignore a small spurious object. **Normalized surface distance** (NSD)
+        is the fraction of boundary within a **tolerance** you must justify, for example from
+        inter-reader boundary variation.
+      - **Volume** (absolute and relative error, Bland-Altman). Right for quantities that feed
+        decisions.
+      - **Lesion-wise detection** (found or missed, false blobs). The only family that notices a
+        whole missing lesion.
+
+      Empty cases need a rule too: Dice is undefined when both masks are empty, and conventions
+      differ. State yours.
+
+      Metrics Reloaded (Maier-Hein et al., Nature Methods 2024) is a framework for choosing
+      metrics from the properties of the problem. Its point is that metrics should be chosen from
+      the task, not by habit, and that Dice alone is rarely enough.
+
+  - type: image
+    image: m10-02-dice-failure-cases.png
+    caption: |
+      Synthetic masks, not real images. The two cases with the highest Dice (0.97 and 0.95) are the
+      dangerous ones: a missed small lesion, and a false-positive blob far away. The case with the lowest Dice
+      (0.62) is a one-pixel shift on a tiny lesion. HD catches the first two. NSD at 2 px passes the
+      third but barely registers the first (0.94). Only lesion-wise detection exposes the missed lesion.
+
+  - type: quiz
+    question: |
+      Your protocol says "accept the model if mean Dice is 0.85 or higher". Using the three cases in the figure,
+      which statement is correct?
+    options:
+      - Reject case C and accept A and B, since only C is below 0.85
+      - Dice is enough. The other metrics only add noise
+      - NSD alone would have caught all three problems
+      - Dice ranks the two clinically worst cases highest, so pair it with lesion-wise detection and a distance metric, and judge small lesions with a tolerance
+    answer: 3
+    explanation: |
+      Case A misses a whole lesion at Dice 0.97. Case B has a far false positive at 0.95. Case C is
+      off by one pixel, which is probably within reader variation, and scores 0.62 only because
+      the lesion is tiny. NSD at 2 px passes C (1.00), drops for B (0.88), but barely moves for A
+      (0.94), because the missed lesion's few boundary points are swamped by the large lesion's.
+      A protocol needs a metric per failure mode.
+
+  - type: text
+    title: In stroke, volume is the quantity
+    text: |
+      Infarct core volume feeds treatment selection. In DEFUSE 3 (Albers et al., NEJM 2018),
+      thrombectomy in the 6 to 16 hour window required a core of up to 70 mL on RAPID perfusion
+      software, among other criteria. Trial criteria have moved since, and cutoffs differ between
+      protocols, so check the current ones. What matters for evaluation:
+
+      - Two models with the **same Dice** can have **opposite volume bias**. One overestimates
+        core by 10 mL on average, the other is unbiased.
+      - What matters is the error **near the cutoff**. A 5 mL error is irrelevant at 10 mL and
+        decisive at 68 mL.
+      - So report the **mean difference and limits of agreement** (Bland-Altman) and the fraction
+        of patients **classified on the wrong side** of the clinical threshold, with a CI.
+
+      That is a clinically meaningful metric, and it is one Dice cannot give you.
+
+  - type: quiz
+    question: |
+      Models A and B both reach mean Dice 0.80 for core volume. A overestimates volume by about 10 mL on
+      average. B has no average bias. A protocol excludes patients above a 70 mL core. Which is more
+      likely to wrongly exclude eligible patients?
+    options:
+      - Model A, because overestimates push borderline patients over the cutoff
+      - Model B, because unbiased models make more random errors
+      - Neither, because equal Dice means equal clinical effect
+      - Only a model with Dice above 0.90
+    answer: 0
+    explanation: |
+      An upward bias shifts every estimate toward the exclusion side, so patients whose true core
+      is 60 to 70 mL get labelled as above 70. Equal Dice says nothing about bias direction. If the
+      rule were reversed (exclude patients below a value), underestimation would be the harm. The
+      direction of harm comes from the clinical use.
+
+  - type: text
+    title: Building a test set you can defend
+    text: |
+      - **Split by patient**, and watch for repeat patients across studies, follow-ups, and
+        copies of the same scan in several PACS folders.
+      - **Include external sites**, and especially a **new scanner vendor**. One honest external
+        set tells you more than more data from the sites you trained on.
+      - **Adjudicated, blinded reference standard** (Lesson 1), with the definition of positive
+        written before reading.
+      - **Consecutive, unselected cases** from the intended population, including the ugly ones:
+        motion, hardware, postoperative changes, old strokes, calcifications.
+      - **Lock and firewall.** Developers do not see test performance until the model is frozen.
+        Repeated peeks turn the test set into a validation set.
+      - **Report with a checklist**: CLAIM (Checklist for AI in Medical Imaging; 2020, updated in
+        2024) for imaging, TRIPOD+AI for prediction models.
+
+  - type: quiz
+    question: |
+      You can add 20,000 more studies from the three hospitals you trained on, or get 800 studies from a
+      hospital with a different scanner vendor that the model has never seen. Which improves your deployment
+      estimate more?
+    options:
+      - The 20,000 internal studies, because narrower intervals always win
+      - The 800 external studies. The internal data only tightens an estimate of the wrong quantity
+      - Equal, because total sample size is what matters
+      - Neither, because external data is always too small to use
+    answer: 1
+    explanation: |
+      The deployment question is "how will it do at a site and scanner unlike my training data?".
+      More internal data narrows the interval around internal performance, which is biased toward
+      the answer you wanted. A smaller external set has a wider interval, but it is centred on the
+      right target. Report it with its interval, and state the width honestly.
+
+  - type: text
+    title: Spectrum bias and hidden stratification
+    text: |
+      **Spectrum bias** means the test cases do not span the clinical spectrum. Enrichment is the
+      usual cause: the CQ500 head CT set, for example, was enriched with hemorrhage (205 of 491
+      scans had ICH). That is sensible for comparing readers and algorithms efficiently. It is not
+      a forecast of ED alerts.
+
+      The deeper problem is the **case mix inside the positives and negatives**.
+
+      - Positives: curated sets over-represent large, obvious bleeds. Real ED positives include many
+        small and subtle ones.
+      - Negatives: a test set of clean normals hides the mimics, such as calcifications, old
+        infarcts, hardware, and artifacts.
+
+      **Hidden stratification** (Oakden-Rayner et al., CHIL 2020) is the related failure: a model with
+      good average performance does poorly on a clinically important subset nobody labelled, with
+      relative performance gaps above 20% in their experiments. The defence is to **define and
+      report strata in advance** (size, subtype, scanner, age) instead of discovering them after
+      deployment.
+
+  - type: image
+    image: m10-02-spectrum-bias.png
+    caption: |
+      A simulation with an assumed detection curve (not real data). The model is identical in both
+      sets. A curated set with mostly large bleeds gives overall sensitivity near 0.90. A
+      consecutive ED mix with more small bleeds gives near 0.78. The per-size sensitivities on the
+      left are the same in both.
+
+  - type: quiz
+    question: |
+      In the figure, the same model scores 0.90 on the curated set and 0.78 on the consecutive ED mix. What
+      is the right interpretation?
+    options:
+      - The model performs worse in the ED because the ED has noisier scanners
+      - The curated result is a mistake and should be discarded
+      - The model did not change, but the case mix did. Only a consecutive set estimates ED experience, and per-size reporting explains the gap
+      - Sensitivity depends on prevalence, so the enriched set inflated it
+    answer: 2
+    explanation: |
+      In this simulation, per-size sensitivity is fixed and only the mix of sizes differs. Option D
+      is the tempting wrong answer. Sensitivity is computed among positives only, so it depends on
+      **which positives** are included, not on how many negatives surround them. Prevalence changes
+      PPV. Both the case mix of positives and the prevalence need reporting.
+
+  - type: text
+    title: Where people go wrong, the shortcut
+    text: |
+      A realistic failure (invented for illustration). A hemorrhage detector trained at a hospital
+      with an active neurosurgery service scores well. Many patients with external ventricular
+      drains and craniotomy defects have blood, so the **hardware itself** predicts the label. At a
+      community hospital with few such patients, PPV collapses.
+
+      Real evidence that shortcuts are common: Zech et al. (2018) showed hospital identity driving
+      chest X-ray predictions. Badgeley et al. (npj Digital Medicine, 2019) found that hip-fracture
+      models leaned on patient and hospital process variables, and that performance dropped to
+      near-random when those were controlled.
+
+      Tests that find shortcuts:
+
+      - **Header-only and metadata-only baselines** (Lesson 1).
+      - **Held-out sites and vendors.**
+      - **Negative controls**: mask the corners, cover burned-in text or laterality markers, and see
+        whether performance survives.
+      - **Slice by confounders** such as hardware, transfer status, and portable versus fixed
+        scanner.
+
+  - type: text
+    title: Saliency maps are not validation
+    text: |
+      A heatmap over a bleed is reassuring. It is also weak evidence.
+
+      - Adebayo et al. (NeurIPS 2018) showed that some popular saliency methods produce nearly the
+        same maps whether the network is trained or has randomized weights, so those maps reflect
+        the image, not the model.
+      - Arun et al. (Radiology: Artificial Intelligence, 2021) tested eight saliency methods on
+        medical imaging tasks on four criteria, including localization utility, sensitivity to model
+        randomization, and repeatability. All eight failed at least one.
+
+      Use saliency as a **debugging hypothesis generator**: maybe the model looks at the drain.
+      Then test the hypothesis with an intervention (mask the region and measure the change). For
+      claims about localization, measure localization directly, with lesion-wise detection against
+      a reference standard.
+
+  - type: quiz
+    question: |
+      A saliency map highlights the hemorrhage on ten example scans. What can you conclude about the model?
+    options:
+      - It has learned the right features and is ready for external validation
+      - It has learned the right features, so a reader study is unnecessary
+      - The model is explainable, so its regulatory evidence is lighter
+      - Little by itself. Maps can look plausible even when they do not depend on the model, so test with interventions and measure localization against a reference
+    answer: 3
+    explanation: |
+      Ten hand-picked plausible maps are anecdotes. Sanity checks such as weight randomization, and
+      quantitative localization against reference annotation, are what give saliency any evidential
+      value. And plausible maps do not reduce the evidence regulators or reviewers expect
+      (Lesson 3).
+
+  - type: text
+    title: Reader studies, and what standalone metrics miss
+    text: |
+      A model with AUROC 0.95 beside readers at 0.93 does not show that readers **with** the model
+      do better. Radiologists may ignore it, over-trust it, or already catch what it catches.
+
+      A **multi-reader multi-case (MRMC)** study measures this directly: several readers read the
+      same cases **with and without** the tool. Design points:
+
+      - **Both readers and cases are random samples.** The analysis (Obuchowski-Rockette or
+        Dorfman-Berbaum-Metz style) accounts for reader and case variability so you can generalize
+        to both, rather than to "these three readers".
+      - **Crossover with a washout period**, or a sequential design (read unaided, then aided),
+        to avoid memory effects.
+      - Outcomes: reader AUROC, sensitivity at fixed specificity, reading time, and confidence.
+      - A mix of reader experience levels.
+
+      FDA's guidance on CADe devices in 510(k) submissions (final 2012, revised September 2022)
+      is where sponsors look for expected designs. Read it for exact expectations. **Triage
+      devices** are different: standalone performance plus evidence of effective triage, such as
+      improved time to review, is what their special controls focus on (Lesson 3).
+
+  - type: text
+    title: Automation bias
+    text: |
+      Readers can be led astray by a confident tool. In Dratsch et al. (Radiology, 2023), 27
+      radiologists assigned BI-RADS categories to mammograms while shown (purported) AI suggestions,
+      some deliberately wrong. Experienced readers' accuracy fell from about 82% to about 45% when the
+      suggestion was wrong, and inexperienced readers' fell from about 80% to under 20%.
+
+      That is one small study of mammography, so do not over-generalize the numbers. The design
+      lesson is general:
+
+      - A reader study where the AI is **almost always right** cannot reveal over-reliance.
+      - Include cases where the AI is **wrong** (false positives and misses), in realistic
+        proportions, and report reader accuracy on them separately.
+      - Report by reader experience.
+
+      This is why "AI improves average reader AUROC" and "AI is safe in use" are separate claims.
+
+  - type: quiz
+    question: |
+      A reader study has three radiologists from the developing institution read 150 cases unaided and then
+      aided in the same session. Which design weakness is the biggest threat to a claim that the tool
+      improves reading?
+    options:
+      - Order, memory, and reader sampling. The same-session aided read follows the unaided read on the same cases, and three developer-site readers cannot stand for readers in general
+      - The cases are too easy, because only 150 were used
+      - The readers are too experienced to benefit
+      - Nothing. With and without reads on identical cases is the gold-standard design
+    answer: 0
+    explanation: |
+      Reading unaided then aided in one session confounds the tool with learning and memory of the
+      case (a washout or randomized order fixes it). Three readers from the developing site are
+      neither random nor representative, and they may have an incentive to trust the tool. The
+      number of cases (B) matters for power, but it is not the threat to validity.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A vendor shows an AUROC of 0.97 for intracranial hemorrhage detection on 500 head CTs. What do
+      you ask before you believe it?"
+    model_answer: |
+      I'd ask how the 500 cases were selected, because enriched sets with mostly obvious bleeds
+      inflate the numbers, and I'd want consecutive ED cases with the real prevalence and hard
+      negatives. I'd ask about the reference standard: how many radiologists, blinded to the model
+      and the report, how disagreements were handled. I'd want the operating point and the
+      sensitivity, specificity, and PPV at that point, with intervals that resample patients, not
+      only AUROC, and flags per hundred scans at our prevalence. I'd ask for results by bleed
+      type and size, because small subdurals and subarachnoid blood are where models fail, and by
+      scanner vendor. Were the sites external, and was any vendor unseen? Was the test set locked
+      before the threshold was chosen? Then I'd ask what a reader study or a silent run shows,
+      because standalone accuracy does not tell me whether our radiologists get faster or safer.
+      Finally, I'd check for shortcuts: a metadata-only baseline and results with hardware or
+      text masked.
+    key_points:
+      - Questions how cases were selected, and asks for consecutive, representative data with hard negatives
+      - Asks about the blinded, adjudicated reference standard and handling of disagreements
+      - Wants the locked operating point, PPV at local prevalence, and patient-level CIs, not just AUROC
+      - Asks for stratified results by lesion size and type, and by scanner, including unseen sites and vendors
+      - Asks for shortcut checks and evidence of reader or workflow benefit
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you design the validation of an LVO triage tool for CT angiography that will be
+      deployed at five hospitals?"
+    model_answer: |
+      I'd start with the intended use. It's a triage flag that reorders a worklist and does not
+      localize, so the primary question is exam-level performance at a locked threshold plus time
+      effects. I'd use a consecutive, retrospective multi-site cohort of CTAs ordered for suspected
+      stroke from all five hospitals, including at least one site and scanner vendor not used in
+      development. The reference standard would be blinded expert reads, at least two
+      neuroradiologists with adjudication, acknowledging that angiography exists only for treated
+      patients, so I'd describe that verification limit. I'd report sensitivity, specificity, PPV and
+      NPV at the locked threshold with patient-level intervals, overall and by site, scanner,
+      occlusion location (proximal versus more distal vessels), and image quality, since
+      missed M2 or posterior occlusions are the predictable failures. I'd convert that to flags
+      per day per site. Then I'd measure what triage is for: time from scan completion to
+      radiologist opening the study, in a silent run or a before-and-after comparison, plus a
+      look at reader behaviour on false flags. After go-live, I'd monitor it (Lesson 3).
+    key_points:
+      - Ties the evaluation to the intended use (triage, exam-level, no localization claim)
+      - Uses consecutive multi-site data with at least one unseen site and vendor
+      - Uses a blinded adjudicated reference standard and names the verification limits
+      - Reports metrics at a locked threshold with patient-level CIs, stratified by site, scanner, occlusion location
+      - Measures time to review, alert burden, and plans post-deployment monitoring
+
+  - type: laptop
+    title: Segmentation metrics from scratch
+    repo_path: 10-medical-imaging/src/seg_metrics.py
+    task: |
+      Create `10-medical-imaging/src/seg_metrics.py` with numpy-only functions `dice(a, b)`,
+      `surface_distances(a, b)`, `hd95(a, b)`, and `nsd(a, b, tol)` for 2D boolean masks. Add
+      `tests/test_seg_metrics.py` that builds the three cases from this lesson (a large disc plus
+      a missed small disc, a large disc plus a far false-positive blob, a tiny disc shifted by one
+      pixel) and asserts the pattern: Dice high and HD large for the first two, Dice low and
+      HD 1 for the third. Add a `lesion_recall(reference_blobs, prediction)` function. Then write
+      down what Dice should return when both masks are empty, and why.
+
+  - type: recap
+    points:
+      - Start from the decision, then choose metrics. Report the **operating point**, PPV at local prevalence, and flags per 100 exams
+      - Report **per-lesion and per-patient** results separately, with a written hit rule
+      - No single segmentation metric is enough. Use overlap, boundary distance, **volume error**, and lesion-wise detection
+      - "Dice can be highest when the case is worst: a missed small lesion or a far false-positive blob"
+      - Test sets need patient-level splits, an **adjudicated reference**, consecutive cases, and at least one **external site or vendor**
+      - Case mix changes overall sensitivity, so stratify by lesion size, type, and scanner
+      - Shortcuts are found with metadata-only baselines, held-out sites, and masking tests, and **saliency maps are not validation**
+      - A **reader study** shows clinical effect, and it must include cases where the AI is wrong because of automation bias

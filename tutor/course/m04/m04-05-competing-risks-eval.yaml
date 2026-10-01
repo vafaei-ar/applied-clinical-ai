@@ -1,0 +1,417 @@
+id: m04-05-competing-risks-eval
+title: Competing risks and evaluating survival models
+summary: Why 1 − KM overstates risk when death competes, the Aalen–Johansen CIF, cause-specific vs
+  Fine–Gray models, and how to evaluate survival models with C-index, time-dependent AUC, Brier score,
+  and calibration at a horizon.
+minutes: 25
+status: authored
+why_it_matters: In older, sicker populations like stroke survivors, ignoring death as a competing risk
+  quietly overstates event risk, and reviewers notice. Survival ML models also need survival-aware
+  evaluation, and "is a higher C-index enough?" is a standard interview probe.
+objectives:
+  - Explain why 1 − KM overestimates cumulative incidence when competing events occur
+  - Estimate cumulative incidence with the Aalen–Johansen estimator
+  - Choose between cause-specific hazards (etiology) and Fine–Gray subdistribution hazards (prediction)
+  - Interpret Harrell's C-index and name its limitations
+  - Use time-dependent AUC, the Brier score over time, and calibration at a fixed horizon
+key_points:
+  - A competing event prevents the event of interest; it is not the same as censoring
+  - 1 − KM with deaths censored estimates risk in a world without death, so it overstates real risk
+  - The Aalen–Johansen CIF weights each event by the probability of still being event-free
+  - Cause-specific hazard ratios answer etiologic questions; Fine–Gray links directly to the CIF for prediction
+  - Harrell's C ranks patients but ignores calibration and depends on censoring
+  - Time-dependent AUC and Brier score evaluate at clinically meaningful horizons
+  - Calibration at a horizon compares predicted risk with KM or CIF estimates, not raw event proportions, whenever censoring occurs before the horizon
+tags: [survival, competing-risks, evaluation, interview]
+steps:
+  - type: text
+    title: A risk estimate that was too high
+    text: |
+      Imagine a longer-follow-up version of our secondary-stroke-prevention trial. Patients are on
+      average in their mid-70s, and follow-up runs up to five years. An analyst reports that the 5-year risk of recurrent stroke in the
+      control arm is **27%**, computed as 1 − Kaplan–Meier with deaths censored.
+
+      The trial's neurologist frowns: "That's higher than anything we see in clinic."
+
+      Nothing is wrong with the code. The problem is conceptual. Roughly one in eight of these patients
+      dies each year from cancer, heart failure, or infection, and **a patient who has died can never
+      have a recurrent stroke**. The KM calculation pretended they could.
+
+      This lesson fixes that, then turns to a related question: how do you tell whether a survival
+      _model_ is any good?
+
+  - type: text
+    title: Competing risk is not censoring
+    text: |
+      A **competing event** is one that makes the event of interest impossible (or changes its
+      meaning). For recurrent stroke, non-stroke death is the classic competing event.
+
+      Censoring is different. A censored patient (study ended, moved away) _could still have_ a stroke;
+      we just stopped watching. KM's key assumption is that censored patients have the same future risk
+      as those still under observation. Their risk is carried forward.
+
+      Treat death as censoring and you carry a dead patient's "future stroke risk" forward as if they
+      were still alive. That assumption is false by construction.
+
+      Competing risks matter most when the competing event is **common** relative to the event of
+      interest: elderly cohorts, cancer patients, long follow-up.
+
+  - type: quiz
+    question: |
+      In the stroke trial, which of these is a **competing risk** for recurrent stroke rather than
+      censoring?
+    options:
+      - The patient moves to another country and is lost to follow-up
+      - The patient dies of metastatic cancer in year 2
+      - The trial reaches its planned end date
+      - The patient withdraws consent for further visits
+    answer: 1
+    explanation: |
+      Death from cancer makes a later stroke impossible, so it competes. The other three stop
+      _observation_ but the patient could still have a stroke afterwards, so they are censoring.
+      Withdrawal is tempting because it feels like an "outcome", but it's a follow-up problem (and a
+      potential source of informative censoring), not a competing event.
+
+  - type: text
+    title: What 1 − KM actually estimates
+    text: |
+      With deaths censored, 1 − KM estimates the stroke risk in a **hypothetical world where nobody can
+      die of anything else** (and where the cause-specific stroke hazard is unchanged). That quantity is
+      not observable and rarely what a patient or clinician wants.
+
+      The real-world quantity is the **cumulative incidence function (CIF)**: the probability of having
+      a recurrent stroke by time _t_, in a world where death also happens.
+
+      Two facts to remember:
+
+      - 1 − KM is always **≥** the CIF. The gap grows with the rate of the competing event.
+      - If the competing event is rare, the two nearly coincide, and KM is fine.
+
+      This is also one reason trials often use composite endpoints (stroke, MI, or vascular death):
+      with death _in_ the endpoint, there is less left to compete.
+
+  - type: text
+    title: The Aalen–Johansen estimator
+    text: |
+      The **Aalen–Johansen** estimator gives the nonparametric CIF. At each event time _tⱼ_:
+
+      `CIF_stroke(t) = Σ over tⱼ ≤ t of  S(tⱼ−) × d_stroke,j / nⱼ`
+
+      - `S(tⱼ−)` is the **all-cause** KM survival just before _tⱼ_ (alive and free of any event).
+      - `d_stroke,j / nⱼ` is the fraction of those at risk who have a stroke at _tⱼ_.
+
+      Read it as: "to have a stroke at _tⱼ_, you first have to get there alive and stroke-free."
+      Deaths lower `S`, which shrinks every later stroke contribution.
+
+      A nice sanity check: the CIF for stroke + the CIF for death + all-cause event-free survival
+      add up to exactly 1 at every time point. 1 − KM curves for each cause add up to more than 1.
+
+  - type: image
+    image: m04-05-km-vs-cif.png
+    caption: |
+      Simulated trial arm with stroke at 6%/year and non-stroke death at 12%/year. By year 5,
+      1 − KM (deaths censored) says 27% while the Aalen–Johansen CIF says 21%. Early on, few patients
+      have died, so the curves agree; the gap opens as deaths accumulate.
+
+  - type: code
+    title: Both estimates in lifelines
+    language: python
+    text: "`adtte` has one row per patient: `years` and `status` (0 = censored, 1 = stroke, 2 = death)."
+    code: |
+      from lifelines import AalenJohansenFitter, KaplanMeierFitter
+
+      km = KaplanMeierFitter().fit(adtte.years, event_observed=(adtte.status == 1))
+      aj = AalenJohansenFitter().fit(adtte.years, adtte.status, event_of_interest=1)
+
+      risk_km = 1 - km.predict(5.0)
+      risk_cif = aj.cumulative_density_.loc[:5.0].iloc[-1, 0]
+      print(f"5-year stroke risk: 1-KM {risk_km:.1%}  CIF {risk_cif:.1%}")
+    after: |
+      `AalenJohansenFitter` needs the full status code so it knows which non-stroke events compete.
+      It may warn about tied times and jitter them slightly; that's expected. In R, the equivalent
+      is `survfit()` with a multi-state factor status, or `cmprsk::cuminc()`.
+
+  - type: quiz
+    question: In the KM line above, what happens to a patient with `status == 2` (death at 1.3 years)?
+    options:
+      - They are treated as censored at 1.3 years, so their stroke risk is carried forward
+      - They are dropped from the dataset before fitting
+      - They are counted as a stroke at 1.3 years
+      - They stay in the risk set until the end of follow-up
+    answer: 0
+    explanation: |
+      `event_observed` is False for them, so KM treats the death as censoring at 1.3 years and
+      assumes they would have had the same future stroke risk as survivors. That is exactly what
+      inflates 1 − KM. The last option describes the Fine–Gray risk set, which you'll meet next.
+
+  - type: text
+    title: Two different hazards
+    text: |
+      For regression, there are two hazards, and they answer different questions.
+
+      **Cause-specific hazard**: the instantaneous rate of stroke among patients who are currently
+      **alive and stroke-free**. Fit it with an ordinary Cox model where deaths are censored. Yes,
+      censoring deaths is legitimate _here_: the cause-specific hazard is defined among the living.
+      The mistake is converting that one hazard into a risk with 1 − KM.
+
+      **Subdistribution hazard** (Fine & Gray, JASA 1999): the rate of stroke among patients who have
+      not had a stroke yet, **including those who already died**. The dead stay in the risk set
+      forever. That odd risk set is what makes it map one-to-one onto the CIF: covariates that raise
+      the subdistribution hazard raise the cumulative incidence.
+
+  - type: text
+    title: Etiology vs prediction
+    text: |
+      A practical rule used across the methods literature (see Austin, Lee & Fine, Circulation 2016):
+
+      - **Etiology** ("does the drug lower the rate of stroke?"): report **cause-specific** hazard ratios,
+        for the event of interest _and_ for the competing event. The risk set is the patients who can
+        actually have a stroke, so the effect is interpretable as an effect on the rate.
+      - **Prediction** ("what is this patient's 5-year stroke risk?"): you need the CIF. Use a
+        **Fine–Gray** model, or combine the cause-specific models for all causes into a CIF.
+
+      Why not always Fine–Gray? A subdistribution hazard ratio mixes effects on stroke with effects on
+      death. A drug that does nothing to stroke but kills people earlier will show a "protective"
+      subdistribution HR for stroke. That's the right answer for risk, and the wrong one for mechanism.
+
+  - type: quiz
+    question: |
+      A drug has a cause-specific HR for stroke of **1.0** but a cause-specific HR for non-stroke death
+      of **1.5**. What happens to the drug arm's cumulative incidence of stroke?
+    options:
+      - Unchanged, because the stroke hazard is unchanged
+      - Higher, because sicker patients are left in the risk set
+      - Lower, because more patients die before they can have a stroke, so the subdistribution HR is below 1
+      - It cannot be estimated when the two HRs disagree
+    answer: 2
+    explanation: |
+      Cumulative incidence depends on _both_ hazards. More early deaths mean fewer patients alive to
+      have strokes, so the stroke CIF drops and the Fine–Gray HR looks protective. The tempting
+      answer, "unchanged", is only true of the cause-specific rate. This is why you report both causes.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our stroke trial has a lot of non-stroke mortality. The sponsor asks whether the primary
+      analysis should use a cause-specific Cox model or Fine–Gray. What would you recommend?"
+    model_answer: |
+      First I'd pin down the estimand, because the two models answer different questions. If the
+      question is whether the drug changes the rate of recurrent stroke among patients who are alive,
+      the cause-specific Cox model is the natural choice, and I'd always report the cause-specific HR
+      for non-stroke death alongside it so nobody misses a harm signal. If the question is how many
+      strokes the drug prevents in the real population over five years, which matters for absolute
+      risk reduction and NNT, then I want cumulative incidence, estimated with Aalen–Johansen curves
+      and either Fine–Gray or cause-specific models combined into a CIF. In practice I'd pre-specify
+      the cause-specific analysis as primary for efficacy, show CIF curves (not 1 − KM) for absolute
+      risk, and add Fine–Gray as a supportive analysis. I'd also note the ICH E9(R1) angle: death is an
+      intercurrent event, and a composite or "while alive" strategy has to be stated explicitly.
+    key_points:
+      - Starts from the estimand, because the two models answer different questions
+      - Cause-specific HRs for etiology and efficacy, reported for both stroke and death
+      - CIF or Fine–Gray for absolute risk and prediction
+      - Never uses 1 − KM for absolute risk when death is common
+      - Connects death to intercurrent-event strategies in the estimand framework
+
+  - type: text
+    title: Evaluating survival models
+    text: |
+      Now switch hats. Say you build a model that predicts recurrent-stroke risk from baseline data:
+      a Cox model, a random survival forest, or a neural net such as DeepSurv. How do you judge it?
+
+      The same three questions from Module 02 apply, adapted for censoring:
+
+      - **Discrimination**: does it rank high-risk patients above low-risk ones? (C-index, time-dependent AUC)
+      - **Calibration**: when it says 20% by year 2, do about 20% have the event? (calibration at a horizon)
+      - **Overall accuracy**: both at once. (Brier score over time)
+
+      The twist is that a survival model predicts a **curve** per patient, not one number, and that
+      censored patients' outcomes are only partly known.
+
+  - type: text
+    title: "Harrell's C-index"
+    text: |
+      **Harrell's C** looks at pairs of patients. A pair is **comparable** if the one with the shorter
+      observed time actually had the event (otherwise we don't know who failed first). Among comparable
+      pairs, C is the fraction where the model gave **higher risk to the one who failed first**. Tied
+      predictions count as 0.5.
+
+      C = 0.5 is coin-flip ranking; 1.0 is perfect. For a binary outcome with no censoring, it reduces
+      to the AUROC.
+
+      It's popular because it's a single number that works with any model that outputs a risk score.
+      That's also its weakness, as you'll see in a minute.
+
+  - type: quiz
+    question: |
+      Three patients. What is Harrell's C?
+
+      - P1: stroke at year 2, predicted risk 0.8
+      - P2: censored at year 5, predicted risk 0.6
+      - P3: stroke at year 4, predicted risk 0.5
+    options:
+      - "1.0"
+      - "0.5"
+      - "0.67"
+      - "0.33"
+    answer: 2
+    explanation: |
+      All three pairs are comparable, because in each the earlier time is an event: P1–P2 (P1 fails at 2
+      while P2 is event-free until 5), P1–P3 (P1 fails first), and P3–P2 (P3 fails at 4 while P2 is
+      event-free until 5). P1–P2 and P1–P3 are concordant because P1 has the highest risk. P3–P2 is
+      discordant: P3 failed first but got a lower risk (0.5 vs 0.6). So C = 2/3. A pair where the
+      _censored_ patient has the shorter time would not be comparable.
+
+  - type: text
+    title: What the C-index hides
+    text: |
+      - **It ignores calibration.** It only uses ranks. Double everyone's predicted risk and C doesn't
+        change, though every absolute risk is now wrong.
+      - **It depends on censoring.** Harrell's C can be biased when censoring is heavy or depends on
+        covariates. **Uno's C** (Uno et al., Statistics in Medicine 2011) uses inverse probability of
+        censoring weights (IPCW) and a truncation time to fix this.
+      - **It averages over all follow-up.** Clinical decisions happen at a horizon ("2-year risk"), and
+        pairs that fail at year 4.8 vs 4.9 count as much as pairs that matter.
+      - **It needs a single risk score.** If a model's curves cross (non-proportional hazards),
+        "higher risk" depends on _when_ you ask.
+      - **Competing risks need their own version**, with deaths handled explicitly.
+
+      And like AUROC, small gains (0.74 → 0.76) are often clinically meaningless.
+
+  - type: text
+    title: Time-dependent AUC
+    text: |
+      **Time-dependent AUC** (Heagerty and colleagues, Biometrics 2000) asks a sharper question: at a
+      chosen horizon _t_, how well does the model separate
+
+      - **cases**: patients who had a stroke **by** _t_, from
+      - **controls**: patients still event-free **after** _t_?
+
+      This "cumulative/dynamic" definition matches clinical use: "who will have a stroke within two
+      years?" Censored patients are handled by weighting (IPCW in common implementations such as
+      scikit-survival). You typically plot AUC(t) over a few
+      horizons (1, 2, 3 years) rather than report one number.
+
+      Like any AUC, it's still pure discrimination: it says nothing about whether the risks are right.
+
+  - type: text
+    title: The Brier score over time
+    text: |
+      The **Brier score at time t** is the mean squared error between the predicted risk by _t_ and what
+      happened: `mean[(1{T ≤ t} − F̂(t | x))²]`, with IPCW so censored patients are weighted correctly
+      (Graf et al., Statistics in Medicine 1999).
+
+      It rewards discrimination **and** calibration together. Two useful habits:
+
+      - Plot it over time, or integrate it (the **integrated Brier score**).
+      - Compare it with a **null model**: KM with no covariates. The scaled version,
+        `1 − BS_model / BS_null` (sometimes called IPA), tells you how much the model actually adds.
+
+      A raw Brier of 0.12 means nothing alone; 0.12 vs a null of 0.13 means "barely useful".
+
+  - type: quiz
+    question: |
+      You multiply every patient's predicted 2-year risk by 1.5 (all values stay below 1). Which metric
+      changes?
+    options:
+      - "Harrell's C-index"
+      - Time-dependent AUC at 2 years
+      - None, because the ranking is preserved
+      - Brier score at 2 years
+    answer: 3
+    explanation: |
+      Scaling by a positive constant keeps every patient's rank, so both rank-based metrics (C-index
+      and AUC(t)) stay exactly the same. The Brier score compares predicted probabilities with outcomes,
+      so miscalibration shows up there. That's why you never report discrimination alone.
+
+  - type: text
+    title: Calibration at a fixed horizon
+    text: |
+      As in Module 02's calibration lesson, but with survival data:
+
+      1. Pick a clinically meaningful horizon, say **2 years**.
+      2. Group patients by predicted 2-year risk (deciles, or a smooth curve).
+      3. In each group, compare the **mean predicted risk** with the **observed risk estimated by KM**
+         (or by **Aalen–Johansen** when death competes).
+      4. Report calibration-in-the-large (overall mean predicted vs observed) and a slope.
+
+      The observed risk must come from a censoring-aware estimator. Smoother alternatives use
+      pseudo-observations or flexible regression of the outcome on predicted risk.
+
+  - type: code
+    title: Decile calibration with competing risks
+    language: python
+    code: |
+      import pandas as pd
+      from lifelines import AalenJohansenFitter
+
+      H = 2.0  # horizon, years
+      df["bin"] = pd.qcut(df.pred_risk_2y, q=10, labels=False)
+
+      rows = []
+      for b, g in df.groupby("bin"):
+          aj = AalenJohansenFitter().fit(g.years, g.status, event_of_interest=1)
+          observed = aj.cumulative_density_.loc[:H].iloc[-1, 0]
+          rows.append({"bin": b, "predicted": g.pred_risk_2y.mean(), "observed": observed})
+
+      calib = pd.DataFrame(rows)  # plot observed vs predicted with a 45° line
+
+  - type: quiz
+    question: |
+      A colleague suggests replacing the Aalen–Johansen line with
+      `observed = (g.status == 1).mean()`. What's wrong with that?
+    options:
+      - Nothing; it's the same as the CIF when bins are large
+      - It counts strokes after year 2 and treats patients censored before year 2 as stroke-free
+      - It only fails if there are tied event times
+      - It overcounts deaths as strokes
+    answer: 1
+    explanation: |
+      A raw proportion ignores both the horizon and censoring. Strokes at year 4 inflate it, while
+      patients censored at month 6 count as "no stroke" even though we don't know. The two errors
+      don't cancel in general. Estimate observed risk at _H_ with KM or Aalen–Johansen.
+
+  - type: think
+    interview: true
+    prompt: |
+      "You trained a random survival forest for recurrent stroke. Its C-index is 0.78 versus 0.74 for
+      a Cox model. Is it the better model?"
+    model_answer: |
+      Not necessarily, and I'd want more evidence before saying so. First, which C: Harrell's can be
+      biased with heavy censoring, so I'd report Uno's C with a truncation time, with bootstrap
+      confidence intervals, on the same held-out and ideally temporal test set. Second, the C-index
+      averages over all follow-up and ignores calibration, so I'd evaluate at the horizon the clinic
+      actually uses, say two years: time-dependent AUC, the Brier score against a KM null model, and a
+      calibration plot using KM or Aalen–Johansen observed risks, because forests are often
+      miscalibrated. Third, if non-stroke death is common, both models should handle it as a competing
+      risk, or their risks will be inflated. Finally I'd ask whether the gain changes decisions, for
+      example with decision curve analysis at the treatment threshold, and weigh that against the
+      Cox model's interpretability and easier maintenance. A 0.04 C gain with worse calibration
+      isn't a better model for individual risk communication.
+    key_points:
+      - Questions Harrell's C and prefers Uno's C with confidence intervals on a proper test set
+      - Evaluates at a clinical horizon with time-dependent AUC and Brier score vs a null model
+      - Checks calibration at the horizon with a censoring-aware estimator
+      - Accounts for competing risk of death
+      - Asks whether the gain changes decisions and weighs interpretability
+
+  - type: laptop
+    title: Competing risks on the simulated trial
+    repo_path: 04-clinical-trials-survival/
+    task: |
+      Create `04-clinical-trials-survival/notebooks/05_competing_risks.py`. Simulate a two-arm trial
+      with exponential stroke and death hazards plus administrative censoring (the figure code in
+      `tutor/figures/m04_05_competing_risks_eval.py` is a starting point). Compare 1 − KM with the
+      Aalen–Johansen CIF, fit cause-specific Cox models for stroke and for death, and evaluate a Cox
+      risk model with scikit-survival: `concordance_index_ipcw`, `cumulative_dynamic_auc`, and
+      `brier_score` at 1, 2, and 3 years. Then make the death hazard differ by arm and watch the
+      stroke CIF move while the stroke cause-specific HR stays put.
+
+  - type: recap
+    points:
+      - A **competing event** (death) makes the outcome impossible; it is not censoring
+      - 1 − KM with deaths censored estimates risk in a world without death, so it **overstates** real risk
+      - Use the **Aalen–Johansen CIF** for absolute risk; the CIFs for all causes plus event-free survival sum to 1
+      - "**Cause-specific** HRs for etiology (report both causes); **Fine–Gray** or combined models for prediction"
+      - "Harrell's C only ranks: it ignores calibration, depends on censoring, and averages over all time"
+      - Evaluate at a **horizon**, with time-dependent AUC, a Brier score vs a null model, and calibration
+      - Observed risk in calibration plots should come from KM or CIF, not raw event proportions, once censoring occurs before the horizon

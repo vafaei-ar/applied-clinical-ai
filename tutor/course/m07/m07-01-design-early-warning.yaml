@@ -1,0 +1,489 @@
+id: m07-01-design-early-warning
+title: "System design: a sepsis early-warning system"
+summary: "Walk through a full 45-minute design interview: clarify, requirements, data, labels, model,
+  evaluation, deployment, monitoring, and workflow."
+minutes: 30
+status: authored
+why_it_matters: System design questions are how senior candidates are judged. This one reuses every
+  earlier module, and sepsis is the most common clinical design prompt because it has every hard
+  problem at once.
+objectives:
+  - Structure a clinical ML design answer in the order an interviewer expects
+  - Make and defend choices about labels, onset time, prediction times, and thresholds
+  - Set the threshold from an alert budget and translate it into sensitivity and PPV
+  - Plan silent deployment, prospective impact evaluation, and monitoring
+key_points:
+  - Start from the clinical action and the person who acts
+  - The alert budget per unit per shift sets the threshold
+  - Label definition and onset time are design decisions you must defend
+  - Train on data as it looked in real time, not as it was later corrected
+  - Prospective evaluation with balancing measures, and monitoring that accounts for feedback loops
+tags: [system-design, interview]
+steps:
+  - type: text
+    title: The prompt
+    text: |
+      _"We're a 12-hospital health system. Design a system that warns clinicians early about
+      patients developing sepsis on general wards."_
+
+      You have 45 minutes. The interviewer isn't looking for the best model. They're grading:
+
+      - **Structure**: do you work through the problem in a sensible order?
+      - **Clinical grounding**: do you start from what someone will actually do?
+      - **Judgment**: do you name trade-offs and pick one, with reasons?
+      - **Realism**: do you know where these systems fail (labels, leakage, alert fatigue,
+        evaluation)?
+
+      Sepsis is a favourite prompt because it has every hard problem at once. Remember the Epic
+      Sepsis Model story from the first lesson: this is the system you're being asked not to
+      repeat.
+
+  - type: text
+    title: A 45-minute plan
+    text: |
+      Say the plan out loud at the start. It shows structure and lets the interviewer steer.
+
+      - **Clarify** (~5 min): users, action, scope, current state
+      - **Requirements** (~4 min): functional, non-functional, constraints
+      - **Data** (~5 min): sources and real-time availability
+      - **Label and framing** (~6 min): definition, onset time, prediction times
+      - **Model** (~4 min): baseline first, then something stronger
+      - **Evaluation** (~7 min): metrics that match the decision, and the threshold
+      - **Deployment and workflow** (~7 min): silent mode, integration, alert design
+      - **Monitoring and impact** (~5 min): what you watch and how you prove benefit
+
+      Notice that the model gets one of the smallest slots. That's normal.
+
+  - type: text
+    title: "1. Clarify: start from the action"
+    text: |
+      Before designing anything, ask questions that pin down the decision:
+
+      - **Who acts?** Ward nurse, rapid response team (RRT), covering physician?
+      - **What do they do?** A bedside assessment, cultures and lactate, the sepsis bundle?
+      - **Where?** General wards only, or also ED and ICU? (Different data density and base rates.)
+      - **What exists today?** A SIRS or qSOFA rule, NEWS2, a vendor model? That's your baseline
+        and your change-management reality.
+      - **What does success mean?** Earlier antibiotics? Fewer ICU transfers? Lower mortality?
+      - **What capacity is there?** How many extra assessments can an RRT do per shift?
+
+      Assume answers out loud if the interviewer doesn't give them: "I'll assume adult ward
+      patients, alerts going to the charge nurse and RRT, and a goal of earlier recognition."
+
+  - type: think
+    interview: true
+    prompt: |
+      "Before you design anything, what would you want to know about this sepsis system?"
+    model_answer: |
+      I'd want to pin down the decision first. Who gets the alert and what do they do with it?
+      I'd guess the charge nurse or rapid response team, and the action is a bedside assessment
+      that may trigger cultures, lactate, and antibiotics. Then scope: general wards only, or
+      also ED and ICU, since those have very different data density and base rates. I'd ask what
+      exists today, such as a SIRS rule or a vendor score, because that's the baseline I need to
+      beat, and the workflow I'm changing.
+
+      I'd ask how the organization defines success: time to antibiotics, ICU transfers,
+      mortality. And I'd ask about capacity: how many extra assessments per unit per shift the
+      team can absorb, because that will set my threshold. Finally, the practical constraints:
+      what real-time data feeds we have, and who owns clinical governance for alerts.
+    key_points:
+      - Identifies the user and the concrete action
+      - Clarifies scope (ward vs ED vs ICU) and why it matters
+      - Asks about the existing baseline and workflow
+      - Asks how success is defined clinically
+      - Asks about capacity, which later sets the threshold
+
+  - type: text
+    title: "2. Requirements"
+    text: |
+      Turn the answers into requirements you can design against:
+
+      **Functional**
+
+      - Score every adult ward patient hourly, from admission until discharge or transfer to ICU
+      - Show the top contributing factors with each alert
+      - Suppress alerts for patients already being treated for sepsis
+
+      **Non-functional**
+
+      - Freshness: scores reflect data no more than ~15 minutes old
+      - Availability: if a feed is down, show "score unavailable", never a silently stale score
+      - Every score traceable to the model version and the input values used
+
+      **Constraints**
+
+      - An **alert budget**, such as 3 alerts per 30-bed ward per 12-hour shift
+      - Equity: performance reported by subgroup and site
+      - Regulatory review: some sepsis prediction software is regulated as a medical device, so
+        involve regulatory and clinical governance early (Module 03, lesson 6)
+
+  - type: text
+    title: "3. Data: real time is different"
+    text: |
+      Inputs: vital signs from flowsheets, labs, medication orders and administrations, culture
+      orders, ADT events (admit, transfer, discharge), and demographics. Notes are possible but
+      add NLP complexity. Leave them for version 2.
+
+      The trap: the **retrospective warehouse** doesn't look like the **live feed**.
+
+      - Nurses often chart vitals late or back-date them to when they were taken.
+      - Lab results have a collection time and a result time. Only the result time was
+        available when a score would have been computed.
+      - Warehouse data is corrected and de-duplicated after the fact.
+
+      This is Module 01's "recorded time" rule at hourly resolution. Build training data
+      **as of** each prediction time, using the time each value became available. Otherwise you
+      get training–serving skew: the model trains on data that never exists at the bedside.
+
+  - type: quiz
+    question: |
+      In the warehouse, a lactate has `collected_at = 10:05` and `resulted_at = 11:40`. You're
+      building the training row for the 11:00 prediction. What should that row contain?
+    options:
+      - The lactate, since it was collected before 11:00
+      - It doesn't matter because the difference is under two hours
+      - The lactate, but only if it's normal
+      - No lactate, because it wasn't resulted until 11:40, but maybe a flag that a lactate was pending
+    answer: 3
+    explanation: |
+      At 11:00 nobody knew the value, so a model scoring live at 11:00 couldn't have used it.
+      Using the collection time is look-ahead leakage. A "lactate pending" flag is available,
+      but it's a marker of clinician suspicion (see the failure-modes lesson), so its value
+      needs checking. Two hours matters a lot when the goal is early warning.
+
+  - type: text
+    title: "4. The label is a decision"
+    text: |
+      There's no single "sepsis" in the data. You choose a definition, and each gives different
+      patients and onset times:
+
+      - **Sepsis-3** (Singer et al., JAMA 2016): suspected infection plus an acute increase in
+        SOFA score of 2 or more. Suspected infection is often operationalized as a culture plus
+        antibiotics close together in time (Seymour et al., JAMA 2016).
+      - **CDC Adult Sepsis Event**: a surveillance definition based on blood cultures, several
+        days of antimicrobials, and organ dysfunction.
+      - **Billing codes**: easy to extract, but they depend on documentation and coding, and
+        there's no onset time.
+
+      A reasonable choice: a computable Sepsis-3 definition with one documented onset rule
+      (published implementations differ, such as the time of suspected infection or of the SOFA
+      rise), plus chart review of a random sample to measure how often the label agrees with
+      clinicians. Say the trade-off: criteria-based labels have
+      onset times but depend on clinicians having ordered cultures.
+
+  - type: text
+    title: Framing on the timeline
+    text: |
+      Now turn the label into training examples:
+
+      - **Prediction times**: every hour for each ward patient.
+      - **Positive**: sepsis onset within the next **12 hours** (the horizon; pick one and
+        defend it: long enough to act, short enough to be specific).
+      - **Stop scoring** once onset happens or sepsis treatment starts. After that, the answer is
+        known and those hours would make the model look brilliant for no reason.
+      - **Exclude** patients septic on arrival from a _ward-onset_ model. They belong in an ED
+        model, and including them teaches the model to recognize established sepsis.
+
+      Evaluate at the **encounter level** too (was the patient flagged before onset, and how
+      early?) since hourly metrics are dominated by the many quiet hours.
+
+  - type: quiz
+    question: |
+      A teammate keeps all hourly rows through discharge, including hours after antibiotics
+      started. Retrospective AUROC jumps from 0.80 to 0.91. Why?
+    options:
+      - Post-treatment hours are easy positives, since the model detects sepsis that is already recognized and treated
+      - More training data always improves AUROC
+      - The model is now calibrated better
+      - Longer stays make the classes more balanced
+    answer: 0
+    explanation: |
+      After treatment starts, the patient has abnormal vitals and labs plus antibiotics running.
+      Those rows are trivially recognizable, and nobody needs a warning then. The model's score
+      goes up while its usefulness doesn't. The fix is to stop scoring at onset or treatment,
+      and to report encounter-level lead time.
+
+  - type: text
+    title: "Features, and the suspicion problem"
+    text: |
+      Features come from the last hours and days: latest values, trends (change in heart rate over
+      6 hours), worst values, time since last measurement, and missingness indicators.
+      Missingness is informative: sicker patients get measured more often.
+
+      The hard call is **order-based features** (culture ordered, lactate ordered, antibiotics
+      ordered). They're available in time and very predictive, because they encode clinician
+      suspicion. Options:
+
+      - Exclude them, which gives a "pure physiology" model that can warn before suspicion
+      - Include them and evaluate lead time relative to the first order
+      - Build both and compare, which is what I'd suggest in the interview
+
+      Saying this unprompted is one of the strongest signals in this question.
+
+  - type: text
+    title: "5. Model: boring first"
+    text: |
+      - **Baseline**: the existing rule (qSOFA, NEWS2, or SIRS) evaluated on the same framing.
+        If you can't beat it clearly, stop.
+      - **Main model**: gradient-boosted trees on hourly snapshot features. They handle missing
+        values and mixed types, train fast, and are hard to beat on tabular EHR data.
+      - **Maybe later**: a recurrent or transformer model over the event sequence, if it adds
+        meaningful lift on a temporal holdout. That's worth the extra operational cost only if
+        it does.
+
+      Then **calibrate** (Module 02), so a score of 0.2 means roughly 20% risk in the horizon.
+      Calibrated scores let you explain alerts and adjust thresholds per site.
+
+  - type: quiz
+    question: |
+      Why start with gradient-boosted trees rather than a transformer over the raw event stream?
+    options:
+      - Transformers can't handle time-series data
+      - Trees are usually competitive on tabular EHR features, and they're cheaper to train, serve, explain, and debug
+      - Regulators forbid deep learning for sepsis
+      - Trees are always more accurate
+    answer: 1
+    explanation: |
+      On tabular clinical features, boosted trees are a strong, cheap baseline with native
+      missing-value handling and simple feature attribution. A sequence model might add lift,
+      but you should earn that complexity with evidence on a temporal holdout. D overstates
+      it, and neither A nor C is true.
+
+  - type: text
+    title: "6. Evaluation that matches the decision"
+    text: |
+      Report metrics that a clinical leader can act on:
+
+      - **Encounter-level sensitivity**: share of sepsis cases flagged before onset
+      - **Lead time**: median hours between first alert and onset (and first clinician action)
+      - **PPV per alert** and **alerts per unit per shift**
+      - **AUROC and AUPRC** for comparison with other models, and **calibration**
+      - **Subgroups and sites**: age, sex, race and ethnicity, hospital, unit type
+
+      Validate **temporally** (train on earlier years, test on the latest) and **across
+      hospitals** (hold out whole sites). Also report the whole **alert policy**, since snoozes
+      and suppression rules change how many alerts actually fire.
+
+  - type: image
+    image: m07-01-alert-budget.png
+    caption: |
+      Simulated ward: 30 beds, 12-hour shifts, 2% of patient-shifts followed by sepsis onset (a
+      deliberately high rate, for illustration), and a model with AUROC about 0.84. Each point on
+      the curve is a threshold. The budget line picks one.
+
+  - type: text
+    title: Reading the budget curve
+    text: |
+      In that scenario, a budget of **3 alerts per shift** gives sensitivity of about **53%** and
+      PPV of about **11%**. That's roughly 10 alerts per true case, and about half of cases caught
+      before onset.
+
+      Going to 8 alerts per shift raises sensitivity to about 77% but drops PPV to about 6%.
+      Nurses would evaluate around 17 patients per true case, which invites alert fatigue.
+      Dropping to 1 alert raises PPV to 18% but catches under a third of cases.
+
+      The 2% rate is high for a general ward. At 0.5% the same 3-alert budget would give a PPV
+      of only about 3%, so always recompute the curve with your own units' rates.
+
+      There's no correct point on the curve. The threshold is a **clinical and operational
+      decision** you make with the unit leaders. Your job is to show them this curve in their
+      units (alerts per shift, cases caught, alerts per true case) instead of an AUROC.
+
+  - type: quiz
+    question: |
+      Clinical leaders want to catch more cases and propose a budget of 8 alerts per shift. Using
+      the figure, what's the honest summary of that trade-off?
+    options:
+      - "Sensitivity rises from ~53% to ~77%, but alerts per true case rise from ~10 to ~17"
+      - Both sensitivity and PPV improve
+      - AUROC improves from 0.84
+      - Sensitivity rises to 100% because every patient is eventually flagged
+    answer: 0
+    explanation: |
+      Moving along the curve trades PPV for sensitivity: PPV falls from ~11% to ~6%, so the
+      number of alerts per true case (1/PPV) goes from ~10 to ~17. AUROC is a property of the
+      score, not the threshold, so it doesn't change. Framing it as "alerts per case caught" is
+      what lets leaders make an informed choice.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you choose the alert threshold for this sepsis model?"
+    model_answer: |
+      I wouldn't pick it from the ROC curve alone, like maximizing Youden's J. I'd start from
+      capacity: ask the unit leaders and the rapid response team how many extra assessments they
+      can do per shift. Then on a temporal holdout I'd convert thresholds into their language:
+      alerts per 30-bed unit per shift, share of sepsis cases flagged before onset, median lead
+      time, and alerts per true case.
+
+      I'd simulate the full alert policy, including snoozes and suppression for patients already
+      on antibiotics, because that changes real volume. I'd present two or three candidate
+      thresholds and let clinical leaders choose, then confirm the real alert rate in silent
+      mode, since live volume often differs from retrospective. I'd also check that the chosen
+      threshold doesn't produce very different sensitivity across sites or subgroups, and I'd
+      revisit it after launch as prevalence and workflow change.
+    key_points:
+      - Anchors the threshold on team capacity (the alert budget), not a statistical optimum
+      - Translates thresholds into alerts per shift, sensitivity, lead time, and alerts per true case
+      - Evaluates the full alert policy (snooze, suppression), not just the score
+      - Clinical leaders make the final call, confirmed in silent mode
+      - Checks subgroup and site consistency, and revisits after launch
+
+  - type: image
+    image: m07-01-architecture.png
+    caption: |
+      The whole system. Blue is the data path, green the model, orange the workflow, and purple
+      the feedback loop. Interviewers expect you to draw something like this, and to talk about
+      the orange and purple parts as much as the green.
+
+  - type: text
+    title: "7. Deployment and workflow"
+    text: |
+      **Silent mode first.** Score live patients for several weeks with no alerts shown. Check
+      feed latency, missing-data rates, real alert volume, and performance against outcomes as
+      they arrive. Fix surprises before any clinician sees a score.
+
+      **Integration.** Ingest from the EHR's real-time interfaces (HL7v2 feeds or FHIR APIs,
+      Module 06). Write scores back so they appear where people work: a column on the unit
+      worklist, plus a page to the RRT above the threshold. An interruptive pop-up for every
+      alert is the fastest route to alert fatigue.
+
+      **Alert design.** Each alert says why (top factors and recent trends), what to do (a
+      suggested assessment, linked to the sepsis order set), and lets the user dismiss with a
+      reason. The reasons become labelled feedback.
+
+      **Staged rollout.** Start with a few units, with a named clinical champion and a way to
+      pause the alerts quickly.
+
+  - type: text
+    title: Proving it helps
+    text: |
+      A before-and-after comparison is weak: sepsis care improves over time anyway, from
+      awareness campaigns, new protocols, and changes in coding.
+
+      Stronger designs:
+
+      - **Stepped-wedge cluster rollout**: units or hospitals switch on in a randomized order, so
+        every unit has before and after periods, and calendar time is controlled.
+      - **Cluster-randomized trial**: some units get alerts, others don't.
+
+      Primary outcomes: time to antibiotics, ICU transfer, in-hospital mortality. **Balancing
+      measures** (possible harms): antibiotic use in patients who turn out not to be infected,
+      extra cultures, _C. difficile_ infections, nurse workload.
+
+      A well-known prospective, multi-site evaluation of a sepsis system is TREWS (Adams et al.,
+      Nature Medicine 2022). It was observational, not randomized, which is worth mentioning as
+      a limitation. Module 04 covers the trial designs.
+
+  - type: quiz
+    question: Why is a stepped-wedge design better than a simple before-and-after comparison here?
+    options:
+      - It needs fewer patients than any other design
+      - It controls for secular trends, because units switch on at randomized times and calendar time can be adjusted for
+      - It avoids the need for ethics review
+      - It lets you skip silent deployment
+    answer: 1
+    explanation: |
+      Sepsis outcomes drift for many reasons unrelated to the model. With a randomized
+      stepped-wedge rollout, at any calendar time some units are on and some are off, so you can
+      separate the model's effect from the background trend. It still needs ethics and
+      governance review (C), and it doesn't replace silent mode (D).
+
+  - type: text
+    title: "8. Monitoring, and a trap"
+    text: |
+      Watch three layers, each with an owner and an alert threshold:
+
+      - **Technical**: feed latency, missing-value rates per feature, share of patients scored,
+        score distribution, service errors.
+      - **Model**: calibration and sensitivity as outcomes accumulate (with a lag of days),
+        input drift by site and unit.
+      - **Clinical**: alert rate per unit per shift, dismissal rate and reasons, time from alert
+        to assessment and to antibiotics.
+
+      The trap is the **feedback loop**. Once alerts work, clinicians treat flagged patients
+      earlier, and some never meet the sepsis criteria. The model's measured PPV drops _because
+      it's helping_. Retraining naively on post-deployment data teaches it that high-risk
+      patterns don't lead to sepsis. Mitigations: track treatment as an outcome too, evaluate on
+      units or periods without alerts, and be deliberate about retraining data.
+
+  - type: quiz
+    question: |
+      Three months after launch, the model's measured PPV has dropped from 11% to 7%, while alert
+      volume is unchanged. What's the first explanation you should rule in or out?
+    options:
+      - The model is broken and must be rolled back immediately
+      - Sepsis prevalence must have tripled
+      - The threshold was set wrong in the first place
+      - Alerts lead to earlier treatment that prevents some flagged patients from meeting the sepsis definition
+    answer: 3
+    explanation: |
+      Unchanged alert volume with lower PPV is consistent with the intervention working: treated
+      patients no longer become "positives". You'd also check for a data problem or a label
+      pipeline change, but you can't interpret post-deployment PPV without accounting for the
+      model's effect on care. Tripled prevalence would _raise_ PPV, not lower it.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Six months after launch, the nurses on two units say the alerts are useless and they
+      ignore them. What do you do?"
+    model_answer: |
+      I'd treat it as a real signal and investigate before defending the model. First, data:
+      pull alert logs for those two units. What's the alert rate per shift, the dismissal rate
+      and reasons, and the PPV compared with other units? If the rate is well above budget, the
+      threshold or suppression rules might not suit those units. They may have a different case
+      mix, like oncology patients with chronically abnormal vitals, which would be a subgroup or
+      site calibration problem.
+
+      Second, I'd go and watch the workflow with the clinical champion. When does the alert
+      arrive, who sees it, and is the patient usually already being worked up? If the model
+      mostly flags patients the team already knows about, it has no lead time on those units.
+      Fixes, in order: adjust unit-specific thresholds or suppression, improve the explanation
+      and suggested action, and if needed recalibrate for that population or exclude it. I'd
+      agree on a metric with the nurses, such as dismissals per shift, and follow up with them
+      on the results.
+    key_points:
+      - Takes the complaint seriously and starts from alert logs (rate, dismissals, PPV by unit)
+      - Considers case-mix or subgroup reasons the model underperforms on those units
+      - Observes the workflow directly and checks whether alerts add lead time
+      - Proposes concrete fixes (thresholds, suppression, explanation, recalibration)
+      - Closes the loop with clinicians using an agreed metric
+
+  - type: text
+    title: Closing the interview
+    text: |
+      End with a 30-second summary: "The system scores ward patients hourly with a boosted-tree
+      model on as-of features, labelled with a computable Sepsis-3 definition, with an alert
+      threshold set by each unit's capacity. It goes through silent mode, then a stepped-wedge
+      rollout measured on time to antibiotics and mortality with balancing measures, and it's
+      monitored for data, model, and clinical drift with named owners."
+
+      Common ways candidates lose points:
+
+      - Jumping to the model architecture in minute two
+      - Never defining the label or onset time
+      - Reporting only AUROC, and never alerts per shift
+      - Ignoring the retrospective-versus-live data gap
+      - Treating deployment as "put it in an API", with no workflow or evaluation of impact
+
+  - type: laptop
+    title: Build the alert-budget table for the readmission model
+    repo_path: 02-pytorch-clinical-ml/
+    task: |
+      Once you have readmission predictions on a temporal holdout (Module 02), create
+      `02-pytorch-clinical-ml/src/alert_budget.py`. For a list of candidate thresholds, compute:
+      patients flagged per 100 discharges, sensitivity, PPV, and patients called per readmission
+      prevented if calls prevent 20% of flagged readmissions (state that assumption). Print it as
+      a table. This is the same budget reasoning applied to the course's running project.
+
+  - type: recap
+    points:
+      - "Order: clarify, requirements, data, label, model, evaluation, deployment, monitoring. The model gets little of the time"
+      - Start from **who acts and what they do**, and ask about capacity early
+      - Build training rows **as of** each prediction time using availability times
+      - "The **label and onset time** are choices: pick Sepsis-3-style, measure agreement by chart review"
+      - Stop scoring after onset or treatment, and flag order-based features as clinician suspicion
+      - Set the threshold from the **alert budget**, and speak in alerts per shift and alerts per true case
+      - Silent mode, then a **stepped-wedge** rollout with balancing measures
+      - "Monitor technical, model, and clinical layers, and beware the **feedback loop**"

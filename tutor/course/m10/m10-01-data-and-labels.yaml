@@ -1,0 +1,538 @@
+id: m10-01-data-and-labels
+title: 'Imaging data and labels: DICOM, PACS, scanners, and reader variability'
+summary: How imaging data actually arrives, what varies across scanners and sites, where PHI and label
+  shortcuts hide, and why the reference standard is the hardest part.
+minutes: 28
+status: authored
+why_it_matters: Most imaging AI failures trace to data provenance and labels, not architecture. Knowing
+  DICOM, PACS, de-identification, and inter-reader variability lets you critique any imaging study and
+  ask the questions a senior imaging scientist asks first.
+objectives:
+  - Describe the DICOM Patient-Study-Series-Instance hierarchy and how PACS, VNA, and DICOMweb move studies
+  - Identify scanner, protocol, and site variation and the shortcut it can create
+  - Find PHI and label leaks in DICOM headers and pixels, and describe the DICOM de-identification profile
+  - 'Compare label sources: report mining, single reader, adjudicated consensus, outcome-proven'
+  - Quantify inter-reader variability (kappa, Dice between readers) and use it as a reference point, not a wall
+key_points:
+  - Metadata in DICOM headers can leak PHI and can also leak labels
+  - Models learn scanner and site signatures that correlate with the label
+  - Research archives and production feeds deliver different versions of the same study
+  - Report-derived labels inherit report errors, so a score against them measures agreement with reporters
+  - Inter-reader agreement sets the reference point for performance, and it depends on lesion size and prevalence
+tags: [imaging, dicom, labels, stroke, interview]
+steps:
+  - type: text
+    title: The header predicted the label
+    text: |
+      A team trains an intracranial-hemorrhage detector on 40,000 non-contrast head CTs from one hub
+      hospital and reports AUROC **0.96**. (The numbers in this story are invented for illustration.)
+
+      A skeptical radiologist asks for one more baseline: a logistic regression on three DICOM header
+      fields only, with no pixels. Scanner model, slice thickness, reconstruction kernel. It scores
+      AUROC **0.78**.
+
+      Why? The older scanners sit in the trauma bay, the newest one in the stroke-code room. Different
+      scanners mean different case mix and different bleed prevalence. And the pixels carry the same
+      signature: noise texture, field of view, the head holder in the corner.
+
+      A real version: Zech et al. (PLOS Medicine, 2018) trained chest X-ray pneumonia models across
+      hospitals. CNNs could identify the source hospital of an image for 99.95% of NIH and 99.98% of
+      Mount Sinai radiographs.
+
+      This lesson is the data side of imaging AI: how studies arrive, how they vary, what hides in
+      headers and pixels, and what a "label" really is.
+
+  - type: text
+    title: DICOM in one screen
+    text: |
+      **DICOM** is both a file format and a network protocol. Its information model is a hierarchy:
+
+      - **Patient**: one person.
+      - **Study**: one imaging visit. A stroke code is usually one study.
+      - **Series**: one scan run inside the study.
+      - **Instance**: one object, most often one slice, stored as one file.
+
+      Study, series, and instance each have a globally unique ID (Study Instance UID, Series Instance
+      UID, SOP Instance UID). Every file holds **attributes** (tag, type, value) plus optional pixel data.
+
+      One stroke-code study typically contains a localizer, one or more non-contrast CT (NCCT)
+      reconstructions (for example a thick soft-tissue series and a thin one), a CT angiogram (CTA),
+      perhaps CT perfusion, and often a dose-report screenshot stored as an image. Your model will
+      consume exactly one or two of those series. **Choosing the right series is part of the model.**
+
+      DICOM also stores non-image objects: structured reports (SR), segmentation objects (SEG),
+      presentation states. Labels and AI results can travel as DICOM too.
+
+  - type: image
+    image: m10-01-dicom-hierarchy.png
+    caption: |
+      The hierarchy, with two kinds of leaks marked. Red: places identifiers can hide. Orange: places a
+      label or a shortcut to the label can hide. The second kind is easy to forget.
+
+  - type: text
+    title: Two kinds of leaks
+    text: |
+      Module 06 covers PHI in HIPAA terms. In imaging there is a second, quieter problem: the header
+      can carry the **label**, or a proxy for it.
+
+      Examples from a stroke workflow:
+
+      - `StudyDescription` or `ProtocolName` reads "CODE STROKE" or "r/o bleed". The order reason is
+        now a feature.
+      - A CTA series exists in the study. Someone suspected a large-vessel occlusion (LVO) and
+        ordered it, so its presence says something about the label.
+      - Scanner model and institution encode where the patient came from: a transfer, the trauma bay,
+        an outside hospital. That correlates with prevalence.
+      - The accession number joins the study to its radiology report. Handy for research, and a way
+        to re-identify or to leak the report's conclusion.
+
+      A pixel-only model can still absorb these, because pixels carry the same information indirectly.
+
+  - type: quiz
+    question: |
+      Your hemorrhage classifier takes only pixel arrays as input, and you strip every DICOM header before
+      training. A colleague says header leakage cannot affect it. What is the best response?
+    options:
+      - Correct, because the network never sees the tags
+      - Not quite. Header fields still act through study selection and through pixel patterns (noise texture, field of view, table and head holder) that reflect scanner and protocol
+      - Only if the tags are hashed rather than deleted
+      - Only for MRI, since CT pixel values are standardized in Hounsfield units
+    answer: 1
+    explanation: |
+      Headers act in two ways. First, they shape **which studies and series** enter the dataset (you
+      selected on `SeriesDescription`, or only studies that got a CTA). Second, the scanner and
+      protocol leave fingerprints in the pixels themselves. Deleting tags after selection removes
+      neither. CT numbers are calibrated in Hounsfield units, but noise and texture still depend on
+      kernel, dose, reconstruction, and vendor, so option D is wrong too.
+
+  - type: text
+    title: How studies reach you
+    text: |
+      Clinically, a study flows like this: the **scanner** sends images to the **PACS** (picture
+      archiving and communication system: the archive plus radiologists' viewing software). A
+      **VNA** (vendor-neutral archive) is an enterprise archive behind or beside several PACS. The
+      **RIS** (radiology information system) holds orders, scheduling, and reports, and talks to PACS
+      through HL7 messages and DICOM Modality Worklist.
+
+      Images move by DICOM network services: **C-STORE** pushes, **C-FIND** and **C-MOVE** query and
+      retrieve, and **DICOMweb** (QIDO-RS, WADO-RS, STOW-RS) does the same over HTTPS.
+
+      Here is the part that matters for AI. **Research** usually pulls **finalized** studies from the
+      archive, long after the fact. **Production** AI sits on a router that receives a push
+      _minutes_ after acquisition: series arrive one at a time and in any order, the thin
+      reconstruction may lag the thick one, a motion-corrupted scan may be repeated, and nothing has
+      been corrected yet.
+
+      It is the recorded-time logic from the Module 01 leakage lesson again: your model must work
+      with the study **as it exists when inference runs**, not as the archive looks later.
+
+  - type: quiz
+    question: |
+      Training used the 1 mm series of each NCCT, picked by `SeriesDescription`. In production the gateway
+      triggers inference when the first NCCT series arrives, which is usually the 5 mm series. What is
+      the most likely problem?
+    options:
+      - None, because both are NCCT of the same head
+      - DICOM cannot carry two reconstructions of one acquisition
+      - Training-serving skew in series selection. The model receives a different reconstruction (thickness, kernel, noise) from the one it was trained on, or waits for a series that arrives late
+      - The gateway must switch from C-STORE to DICOMweb
+    answer: 2
+    explanation: |
+      Thick and thin reconstructions differ in noise, partial-volume effects, and how small findings
+      look. Series selection rules, and the order and timing of arrival, are part of the model
+      specification and must be reproduced in the serving path and tested. Same anatomy is not same
+      input. Transport (C-STORE or DICOMweb) is not the issue.
+
+  - type: text
+    title: Scanners, protocols, and what they change
+    text: |
+      Stroke imaging shows the variation clearly:
+
+      - **NCCT.** Kernel, slice thickness, dose, and reconstruction method (filtered back projection,
+        iterative, or deep-learning reconstruction) change noise and gray-white contrast, which is
+        what subtle bleeds and early ischemic change depend on. Portable and mobile-stroke-unit
+        scanners add more variety.
+      - **CTA.** Bolus timing and phase decide how bright the vessels are. A poorly timed or
+        venous-contaminated scan looks different to a model, and to a reader, when judging an
+        occlusion.
+      - **MRI-DWI.** Field strength, b-value, and vendor change appearance. Intensities are in
+        arbitrary units, so they need per-scan normalization.
+      - **CT perfusion.** The maps come from vendor **post-processing software**. In DEFUSE 3
+        (Albers et al., NEJM 2018) the core and hypoperfusion were defined with RAPID software as
+        relative CBF below 30% and a Tmax delay above 6 seconds. The "core" is a **software-defined
+        estimate**, not a measurement of dead tissue.
+
+      Software versions and scanner replacement change all of these silently, which is why
+      Lesson 3 treats them as the top cause of drift in production.
+
+  - type: code
+    title: Audit before you model
+    language: python
+    text: |
+      A header-only audit, run before any training. It reads one file per series without loading
+      pixels, then shows how the label rate varies by scanner and kernel.
+    code: |
+      from pathlib import Path
+      import pandas as pd
+      import pydicom
+
+      TAGS = ["Manufacturer", "ManufacturerModelName", "ConvolutionKernel",
+              "SliceThickness", "SeriesInstanceUID"]
+
+      rows = []
+      for path in Path("dicom_root").rglob("*.dcm"):
+          ds = pydicom.dcmread(path, stop_before_pixels=True, specific_tags=TAGS)
+          rows.append({t: str(ds.get(t, "")) for t in TAGS})
+
+      series = pd.DataFrame(rows).drop_duplicates("SeriesInstanceUID")
+      merged = series.merge(labels, on="SeriesInstanceUID")   # labels: one row per series
+      print(merged.groupby(["Manufacturer", "ConvolutionKernel"])["ich"]
+                  .agg(n="size", ich_rate="mean"))
+    after: |
+      Two API details worth knowing: `stop_before_pixels=True` skips the (large) pixel data, and
+      `ds.get("Keyword", default)` avoids a crash when a vendor omits an optional attribute.
+      `ConvolutionKernel` can be multi-valued and its strings are vendor-specific (for example
+      `STANDARD` or `H31s`), so you will have to map them to families by hand.
+
+  - type: quiz
+    question: |
+      The audit prints the table below. What is the right next step?
+    code: |
+      Manufacturer  ConvolutionKernel     n     ich_rate
+      A             H31s              12400       0.06
+      A             H40s               3100       0.31
+      B             STANDARD           9800       0.05
+    language: text
+    options:
+      - Delete the H40s rows, since they are unusual
+      - Ignore it. Prevalence differences are normal and the network only sees pixels
+      - Normalize pixel intensities per scan, which removes scanner effects
+      - Treat manufacturer and kernel as a possible shortcut. Fit a header-only baseline, report metrics per cell, and hold out whole scanners or sites for testing
+    answer: 3
+    explanation: |
+      A sharp-kernel cell with a 31% bleed rate suggests kernel is a proxy for a clinical pathway
+      (say, trauma). Deleting the rows changes the population and hides the problem (A). Pixels
+      carry the signature, as in the earlier quiz (B). Intensity normalization does not remove
+      texture and noise differences (C). A header-only baseline gives a floor your model must beat,
+      and held-out scanners test whether it did.
+
+  - type: text
+    title: De-identification, the DICOM way
+    text: |
+      DICOM has its own de-identification specification: PS3.15 Annex E, the **Basic Application
+      Level Confidentiality Profile**. By default it removes, blanks, or replaces the attributes
+      that could identify a person, and then defines **options** that clean more or retain more:
+
+      - Cleaning: **Clean Pixel Data**, **Clean Recognizable Visual Features** (faces), **Clean
+        Descriptions**, Clean Graphics, Clean Structured Content.
+      - Retaining: **Retain Longitudinal Temporal Information** (full or modified dates), **Retain
+        Device Identity**, Retain Institution Identity, Retain Patient Characteristics, **Retain
+        UIDs**, Retain Safe Private attributes.
+
+      Which options you may apply is a governance decision (Module 06: IRB, data use agreement,
+      Safe Harbor or Expert Determination). Which you **want** is a science decision. For stroke:
+
+      - Keep time intervals (last known well to scan, CT to CTA) using **modified dates**, a
+        consistent per-patient offset. Deleting dates destroys a key variable.
+      - Keep **device identity**, so you can study scanner shift.
+      - Replace UIDs **consistently**, or series and instances lose their links to each other.
+      - Clean free-text descriptions. They often hold names and dates.
+
+  - type: quiz
+    question: |
+      What is still identifying, or leaking a label, after this de-identification?
+    code: |
+      ds = pydicom.dcmread(path)
+      ds.PatientName = "ANON"
+      ds.PatientID = "S-0417"
+      ds.remove_private_tags()
+      ds.save_as(out_path)
+    language: python
+    options:
+      - Nothing. Name, ID, and private tags were the identifiers
+      - Only the private tags, which remove_private_tags() cannot delete
+      - Study and series dates, accession number, institution and physician names, free-text descriptions, original UIDs, and any text or face in the pixels
+      - Only the pixel data, because pydicom never touches headers
+    answer: 2
+    explanation: |
+      This scrubs three things and leaves dozens of attributes: dates and times, `AccessionNumber`,
+      `InstitutionName`, `ReferringPhysicianName`, `StudyDescription`, `SeriesDescription`, and the
+      UIDs (which can be looked up in the source PACS). Pixels are untouched too. Real pipelines
+      apply a profile (for example PS3.15 Annex E) through a maintained tool, then verify by
+      scanning the output, not by trusting the script.
+
+  - type: text
+    title: Pixels and faces
+    text: |
+      Headers are the easy half. **Pixels** hold identifiers too.
+
+      - **Burned-in text.** Dose-report screenshots, some localizers, ultrasound, and annotated
+        secondary captures can carry names and dates in the image itself. The attribute
+        `BurnedInAnnotation` (0028,0301) only says whether the sender believes the pixels contain
+        identifying annotation. Treat it as a hint. Scan pixels (OCR plus manual samples) before
+        release.
+      - **Faces.** A head CT or MRI is a 3D scan of the face. In Schwarz et al. (NEJM, 2019), face
+        images reconstructed from head MRI were matched to photographs of the same 84 volunteers
+        by off-the-shelf face-recognition software in 83% of cases. HIPAA's Safe Harbor list
+        includes "full face photographic images and any comparable images".
+      - **Defacing** removes or blurs the facial surface. It has a cost: check on a sample that it
+        does not remove anatomy your task uses (scalp, orbits, sinuses, skull base).
+
+      For stroke, this is not exotic. Every head CT in your dataset is in scope.
+
+  - type: text
+    title: Now the harder half, labels
+    text: |
+      A label is not a fact about the patient. It is the output of a **process**. Four common ones,
+      cheapest first:
+
+      - **Report mining.** NLP over the radiology report. Huge scale, noisy. Chilamkurthy et al.
+        (Lancet, 2018) built a head CT hemorrhage detector from 313,318 scans and their clinical
+        reports.
+      - **Single reader.** One radiologist marks or classifies each study. One person's boundary and
+        thresholds.
+      - **Adjudicated consensus.** Two or three independent readers, then a tiebreak or consensus
+        meeting. Expensive, and the standard for **test** sets.
+      - **Outcome- or procedure-proven.** Angiography for occlusions, follow-up MRI for the final
+        infarct, pathology for tumors. Best evidence, but it exists only for the subset of patients
+        who got that test.
+
+      The last point is **verification bias**: if only sicker or treated patients get the definitive
+      test, a model trained or scored on them sees a selected population.
+
+  - type: text
+    title: What the label means for each stroke task
+    text: |
+      - **Hemorrhage on NCCT.** "Is there acute hemorrhage on this scan?" Reports or expert
+        consensus. Readers disagree most on subtle subdural and subarachnoid blood.
+      - **LVO on CTA.** The classical reference is digital subtraction angiography (DSA), but DSA
+        happens mainly to patients who go to thrombectomy. Most studies fall back on expert CTA
+        reads, and should say so.
+      - **Infarct core.** From perfusion software maps (relative CBF below 30%) or from DWI. The
+        follow-up scan gives the _final_ infarct, but that is a different quantity: it depends on
+        timing and on whether the vessel reopened.
+
+      Two model outputs can both be called "infarct volume" and answer different questions.
+      Write down which one your label is before you train.
+
+  - type: quiz
+    question: |
+      You train an infarct-core segmentation network on the core maps produced by one vendor's
+      perfusion software, and it reaches Dice 0.85 against those maps on a test set. What has it
+      learned to predict?
+    options:
+      - The true infarcted tissue
+      - That vendor's software output, including its thresholds and processing artifacts
+      - The final infarct on follow-up imaging
+      - Nothing useful, because Dice 0.85 is too low
+    answer: 1
+    explanation: |
+      A label generated by software teaches the model to imitate the software, quirks included. That
+      can be a legitimate product (a fast, robust reimplementation), but it is not evidence about
+      the tissue. To claim more, score against an independent reference such as follow-up or
+      DWI-based infarct with a timing rule. Dice 0.85 is not low here. It is measuring the wrong
+      thing.
+
+  - type: text
+    title: Report-derived labels inherit the report
+    text: |
+      Chilamkurthy et al. validated their algorithms twice, with **different reference standards**:
+
+      - **Qure25k** (21,095 scans): the original clinical radiology report. ICH AUC **0.92**.
+      - **CQ500** (491 scans, three-radiologist consensus): ICH AUC **0.94**.
+
+      Those two numbers answer different questions. A score against reports measures agreement with
+      whoever wrote the reports. The reporting radiologist also had the clinical history and prior
+      scans, which the model never sees, and wrote in hedged, templated language ("cannot exclude",
+      "likely chronic", "no acute hemorrhage") that NLP labelers must interpret. Preliminary reads
+      by residents can differ from final ones.
+
+      Report mining is still a fine way to get **training** labels at scale. Just do not evaluate
+      against it and call the result accuracy. (Module 11 covers extracting labels from notes.)
+
+  - type: quiz
+    question: |
+      You train on report-derived labels and test on a held-out set with the same kind of labels. AUROC is
+      0.92. What does that number measure?
+    options:
+      - How often the model agrees with the reporting radiologists (as parsed by your labeler), not necessarily the truth
+      - The model's true sensitivity and specificity for hemorrhage
+      - An upper bound on the model's clinical performance
+      - Nothing, because AUROC cannot be computed with noisy labels
+    answer: 0
+    explanation: |
+      AUROC with noisy labels is computable but is measured against the noisy reference. Report
+      errors, hedged language, and the labeler's own mistakes are all inside the "truth". The
+      number is neither the true performance (B) nor an upper bound on it (C): against a better
+      reference, a model can score higher or lower.
+
+  - type: text
+    title: Reference standards and their traps
+    text: |
+      A defensible adjudicated reference standard has these properties:
+
+      - **Independent, blinded reads** by two or three readers, blind to each other, to the report,
+        and to the model's output.
+      - **A written definition of positive** before anyone reads. Does a chronic subdural count?
+        Hemorrhagic transformation of an infarct? A tiny subarachnoid focus?
+      - **Disagreements reported, not dropped.** Disagreeing cases are the hard ones, and removing
+        them inflates every metric.
+      - **No incorporation bias.** If readers correct pre-filled AI contours or see the model's
+        alert, the reference is anchored to the model. Model-in-the-loop labeling is common and
+        fine for building training data, but it contaminates a test set.
+
+      It also has a price: the more readers and adjudication, the fewer cases you can afford.
+      Test sets are usually small and precisely labeled, training sets large and noisy.
+
+  - type: text
+    title: Inter-reader variability as a reference point
+    text: |
+      Readers disagree, so any reference has noise. Some anchors from the literature:
+
+      - On CQ500, three radiologists had Fleiss' kappa of about **0.78** for any hemorrhage and
+        about **0.54** for subdural hemorrhage.
+      - Manual ASPECTS scoring on CT has been reported with agreement from slight to excellent
+        depending on the study, so treat any single number with care.
+      - For expert DWI infarct outlines, published inter-rater Dice values are often in the range of
+        roughly 0.8 to 0.9 (my reading of several studies, not a benchmark).
+
+      "Performance cannot exceed inter-reader agreement" is a useful slogan with a catch. Against
+      **one reader's** labels, a model's agreement is limited by that reader's noise. Against a
+      better reference (consensus), a model can beat individual readers. So the fair comparison
+      puts the model **inside** the reader distribution: score the model and each reader against
+      the same consensus, and see where the model falls.
+
+  - type: image
+    image: m10-01-reader-ceiling.png
+    caption: |
+      A simulation on synthetic blobs. Two "readers" each draw the boundary with random error of
+      0.5 or 1 pixel. Their Dice depends heavily on lesion size, so a small lesion cannot reach
+      the agreement a large one does, even between perfect experts. Drawn contours on the right show
+      the same error on a 6-pixel and a 36-pixel lesion.
+
+  - type: quiz
+    question: |
+      Two readers label 200 exams. In dataset A, both call 40 positive, they split on 20, and both call 140
+      negative (90% agreement, kappa 0.73). Dataset B has the same 90% agreement, but both call only 10
+      positive, they split on 20, and both call 170 negative. What is kappa in B, roughly?
+    options:
+      - About 0.90
+      - About 0.73
+      - About 0.44
+      - About 0.10
+    answer: 2
+    explanation: |
+      Raw agreement is 180/200 = 0.90 in both. In B, chance agreement is much higher because negatives
+      dominate: (30/200)(30/200) + (170/200)(170/200) = 0.82, so kappa = (0.90 - 0.82) / (1 - 0.82) =
+      0.44. Kappa depends on prevalence. For rare findings like small bleeds, also report **positive
+      agreement** (here 0.50 in B versus 0.80 in A) so the reader sees how well the readers agree on
+      the cases that matter.
+
+  - type: text
+    title: Where people go wrong, the site signature
+    text: |
+      A realistic failure. A team pools head CTs from a comprehensive stroke center and two community
+      hospitals. The center receives transfers, so it has more bleeds and LVOs, and a different
+      scanner fleet. They split by patient, train, and report an excellent cross-validated AUROC.
+      At a fourth hospital, performance falls. The patient-level split did nothing about the
+      **site**.
+
+      The evidence that this is common: in Zech et al., a model pooled from two hospitals scored an
+      internal AUC of 0.931, and 0.815 on a third hospital's data. A trivial predictor that used only
+      each hospital's pneumonia prevalence reached 0.861 on the pooled set.
+
+      Habits that catch it:
+
+      - Fit a **site-only and header-only baseline** first. Your model must beat it.
+      - Report metrics **per site, scanner, and kernel**, not only pooled.
+      - Hold out **whole sites or vendors** for testing (Lesson 2 goes deeper).
+      - Check whether a small classifier can predict the site from your model's embeddings.
+
+  - type: quiz
+    question: |
+      Site A has 112,000 radiographs with 1.2% pneumonia. Site B has 42,000 with 34% pneumonia. You pool
+      them and score every image with just its site's prevalence (no image information at all). Roughly
+      what AUC do you get on the pooled data?
+    options:
+      - About 0.50, since the score carries no image information
+      - About 0.65
+      - About 0.86
+      - About 0.99
+    answer: 2
+    explanation: |
+      Most positives come from site B and most negatives from site A, so a "score" that is just the
+      site already ranks a typical positive above a typical negative most of the time. Recomputing
+      with these figures gives about 0.86 (Zech et al. report 0.861 for their joint dataset). Any pooled
+      AUC near that level says nothing about the images until you show it is not just the site.
+
+  - type: think
+    interview: true
+    prompt: |
+      "You're given 200,000 head CTs and their radiology reports from PACS and asked to build a
+      hemorrhage detector. Walk me through the data work before any modeling."
+    model_answer: |
+      I'd start with the question and the population: adult ED non-contrast head CTs, what exactly
+      counts as hemorrhage, and what the deployed system will see. Then a header-only DICOM audit:
+      how to pick the right NCCT series per study, and the scanner, kernel, and slice-thickness
+      mix by site with label rates per cell, so I know where shortcuts could hide. Next
+      de-identification with a DICOM profile: consistent per-patient date shifting so I keep
+      time intervals, consistent UID remapping, cleaned descriptions, and pixel checks with OCR and
+      defacing on a manual sample. For labels, reports are fine for training through an NLP
+      labeler, but I wouldn't evaluate against them. I'd have two or three neuroradiologists read a
+      stratified test set blind to the report and the model, with a written definition of positive,
+      adjudicate disagreements, and report the disagreement rate. I'd split by patient and hold out
+      whole sites or scanner vendors. Finally I'd ask how studies arrive in production, since
+      series come in out of order and that decides which series the model actually gets.
+    key_points:
+      - Defines the population, the positive class, and the deployment context first
+      - Audits DICOM headers and label rates by scanner, kernel, and site before modeling
+      - Handles de-identification for headers, dates, UIDs, and pixels (OCR, defacing)
+      - Uses reports for training labels but an adjudicated blinded reference for testing
+      - Splits by patient, holds out sites or vendors, and considers production arrival order
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your infarct segmentation model reaches Dice 0.78 against the reference outlines. The
+      radiologists' inter-reader Dice on the same cases is 0.82. Is the model good enough?"
+    model_answer: |
+      It's close, but that comparison alone isn't enough. First I'd check how both numbers were
+      measured. The clean design is leave-one-out: score the model and each reader against a
+      consensus of the others, and see whether the model falls within the spread of readers. Second,
+      Dice is dominated by large lesions and a fixed boundary error costs small ones a lot, so I'd
+      stratify by lesion volume and look at volume error near clinical thresholds, not just the
+      mean Dice. Third, the error type matters: a missed small lesion, a boundary that is a
+      little off, and a false-positive blob somewhere else have different clinical consequences.
+      Fourth, I'd check that the readers' 0.82 comes from the same difficult cases. So "within
+      reader variability, in every size stratum, with no dangerous failure mode" is a defensible
+      claim. "0.78 versus 0.82" alone isn't.
+    key_points:
+      - Compares model and readers against the same consensus rather than mixing references
+      - Notes Dice depends on lesion size and stratifies the analysis
+      - Looks at volume error near clinical thresholds, not only mean Dice
+      - Separates error types with different clinical consequences
+      - Treats reader agreement as a reference point, not a hard ceiling
+
+  - type: laptop
+    title: Header audit and a de-identification check
+    repo_path: 10-medical-imaging/src/dicom_audit.py
+    task: |
+      Create `10-medical-imaging/src/dicom_audit.py` (a future module folder). In your own
+      environment run `pip install pydicom`. Use `pydicom.data.get_testdata_file("CT_small.dcm")`,
+      which ships with pydicom. Write a function that reads only headers
+      (`stop_before_pixels=True`) and returns a dict of the attributes an audit needs
+      (`Manufacturer`, `ConvolutionKernel`, `SliceThickness`, `StudyDescription`). Then
+      write `find_phi_candidates(ds)` that lists every top-level attribute whose value looks
+      like a name, date, or ID, and run it on the file. Compare your list with the attributes named
+      in the PS3.15 Annex E profile.
+
+  - type: recap
+    points:
+      - DICOM is a **Patient > Study > Series > Instance** hierarchy, and series selection is part of the model
+      - Headers and pixels can hold **PHI** and also **labels or shortcuts**
+      - Research archives and production feeds deliver different versions of a study, so reproduce arrival order in testing
+      - Scanner, kernel, phase, and software-defined maps (perfusion core) change what images and labels mean
+      - Audit headers, fit a **header-only baseline**, and hold out whole sites or vendors
+      - De-identify with a DICOM profile, keep time intervals through modified dates, and check pixels and faces
+      - A label is a process. Reports are good for training, adjudicated blinded reads for testing
+      - Inter-reader agreement depends on prevalence (kappa) and lesion size (Dice), so compare the model with readers against the same consensus

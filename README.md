@@ -29,6 +29,13 @@ Each substantive project should include:
 - documentation of technical decisions and limitations
 - one concise resume-ready evidence statement after completion
 
+## Learn on your phone
+
+[`tutor/`](tutor/) is a Telegram tutor that teaches the concepts behind every module as one
+continuous, phone-sized path of lessons, quizzes, figures, code-reading exercises, and interview
+questions, with spaced review. Hands-on tasks are queued for laptop time. Clone the repo, add a
+Telegram bot token, and run it on your own computer. See [`tutor/README.md`](tutor/README.md).
+
 ## Current focus
 
 **Module 01: Clinical Data Engineering**

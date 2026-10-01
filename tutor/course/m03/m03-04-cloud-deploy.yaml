@@ -1,0 +1,466 @@
+id: m03-04-cloud-deploy
+title: 'Deploying to the cloud: Azure, secrets, and identity'
+summary: Container registries, managed container hosting, Key Vault, managed identity, least privilege, private networking, and HIPAA-aware deployment.
+minutes: 25
+status: authored
+why_it_matters: Many health systems run on Azure, and every deployment passes a security review. Knowing
+  the pieces and the security posture, and explaining them to an information security team, matters far more
+  than memorizing console clicks.
+objectives:
+  - "Map the deployment pieces: registry, compute, secrets, identity, network, logs"
+  - Choose between Azure Container Apps, App Service, and AKS for a model service
+  - Use managed identity and Key Vault instead of keys in environment files
+  - Apply least privilege with scoped RBAC role assignments
+  - Explain private endpoints and why PHI services should not be on the public internet
+  - List the HIPAA technical safeguards relevant to an ML service and what a BAA does and doesn't cover
+  - Translate the architecture between Azure, AWS, and GCP
+key_points:
+  - ACR stores images; Container Apps, App Service, or AKS runs them
+  - The best secret is no secret; managed identity gets tokens without stored credentials
+  - Role assignments should be the narrowest role at the narrowest scope
+  - Private endpoints keep PHI traffic off the public internet
+  - A BAA is necessary but not sufficient; configuration is your responsibility
+  - The same architecture maps cleanly to AWS and GCP
+tags: [azure, security, hipaa, cloud, interview]
+steps:
+  - type: text
+    title: The security review
+    text: |
+      Your readmission image is in a registry and the clinical sponsor wants it live next month.
+      First, the health system's information security team sends a questionnaire:
+
+      - Where does the service run, and who can reach it?
+      - How does it authenticate to the database and the model store?
+      - Where are credentials stored, and who can read them?
+      - Is PHI encrypted in transit and at rest?
+      - What's logged, where, and for how long?
+      - Is every cloud service you use covered by the Business Associate Agreement?
+
+      This lesson gives you the vocabulary and the architecture to answer each one. We use
+      Azure because it's common in US health systems, and map everything to AWS and GCP at the
+      end. The concepts transfer; only the product names change.
+
+  - type: text
+    title: Six pieces of every deployment
+    text: |
+      - **Registry**: stores your images. On Azure, **Azure Container Registry (ACR)**.
+      - **Compute**: runs the container. **Container Apps**, **App Service**, or **AKS**.
+      - **Secrets**: anything sensitive that isn't avoidable. **Key Vault**.
+      - **Identity**: who (or what) is allowed to do what. **Microsoft Entra ID**, **managed
+        identities**, and **Azure RBAC**.
+      - **Network**: who can reach the service and what it can reach. **Virtual networks
+        (VNets)**, **private endpoints**, and private ingress.
+      - **Logs and metrics**: **Azure Monitor**, **Log Analytics**, **Application Insights**.
+
+      A good answer to "how would you deploy this?" walks through all six, in roughly that
+      order.
+
+  - type: image
+    image: m03-04-azure-architecture.png
+    caption: |
+      The readmission service on Azure. CI pushes images with a federated (OIDC) identity. The
+      container app has its own managed identity with narrow roles: pull images, read one
+      vault's secrets, read the model container. Data services are reached through private
+      endpoints inside the VNet, and the EHR connects over VPN or ExpressRoute, not the public
+      internet.
+
+  - type: text
+    title: Three ways to run a container
+    text: |
+      **Azure Container Apps**: serverless containers. You give it an image; it handles
+      scaling (including to zero), HTTPS ingress, revisions with traffic splitting, and
+      managed identity. It runs on Kubernetes underneath, but you don't operate the cluster.
+      A strong default for one or a few model services.
+
+      **Azure App Service** (Web App for Containers): a mature web-app platform with deployment
+      slots (swap staging into production; Standard tier and up), VNet integration (for
+      outbound calls; inbound private access uses a private endpoint), and a long compliance
+      track record. Common in hospitals that already host web apps there.
+
+      **Azure Kubernetes Service (AKS)**: managed Kubernetes. Full control over networking,
+      node pools (including GPUs), sidecars, and scheduling. You also carry much of the work of
+      upgrades, node patching, and cluster security (auto-upgrade options help, but the
+      responsibility is yours). Worth it when there's a platform team and many services;
+      overkill for one API. Module 06 returns to Kubernetes.
+
+      Rule of thumb: pick the **least operational burden** that meets your network and
+      compliance requirements.
+
+  - type: quiz
+    question: |
+      A small analytics team at a hospital needs to deploy the readmission API, called a few
+      thousand times a day, with private networking and no dedicated platform engineers. Which
+      is the most sensible first choice?
+    options:
+      - AKS, because it's what large companies use
+      - Azure Container Apps (or App Service) inside the hospital's VNet
+      - A VM with Docker installed, managed by the team
+      - Azure Functions with the model loaded on every call
+    answer: 1
+    explanation: |
+      Container Apps or App Service give managed scaling, TLS, revisions, identity, and VNet
+      integration without operating a cluster. AKS is capable but brings cluster upgrades and
+      security hardening that nobody on this team owns. A hand-managed VM means patching the OS
+      yourself. Functions can work for light models, but loading the model per call (D) is the
+      anti-pattern from Lesson 2, and cold starts can hurt.
+
+  - type: text
+    title: The best secret is no secret
+    text: |
+      The traditional pattern is a `.env` file or environment variables with a database
+      password and a storage key. Problems: they get committed, copied into images, printed in
+      logs, shared in chat, and they never expire.
+
+      Azure's answer has two parts:
+
+      - **Managed identity**: Azure gives your container app an identity in Entra ID. Code asks
+        the platform for a short-lived access token, and Azure handles the credential behind
+        the scenes and rotates it. There's nothing to store or leak. **System-assigned**
+        identities live and die with the resource; **user-assigned** identities are standalone
+        and can be shared or pre-created (useful when roles must exist before deployment).
+      - **Key Vault**: for secrets you can't avoid (a third-party API key, a legacy database
+        password), store them in a vault, access-controlled and audit-logged, and fetch them
+        with the managed identity.
+
+      Where the target service supports Entra authentication (Azure Storage, Azure SQL, Azure
+      Database for PostgreSQL, Key Vault itself), skip the secret entirely and authenticate
+      with the identity's token.
+
+  - type: code
+    title: Code with no credentials in it
+    language: python
+    code: |
+      from azure.identity import DefaultAzureCredential
+      from azure.keyvault.secrets import SecretClient
+      from azure.storage.blob import BlobClient
+
+      credential = DefaultAzureCredential()
+
+      # Model artifact: Entra auth to Blob Storage, no storage key
+      blob = BlobClient(
+          account_url="https://readmitmodels.blob.core.windows.net",
+          container_name="models",
+          blob_name="readmit-2026.09.1.joblib",
+          credential=credential,
+      )
+      model_bytes = blob.download_blob().readall()
+
+      # A secret we can't avoid (third-party API key)
+      vault = SecretClient(vault_url="https://readmit-kv.vault.azure.net", credential=credential)
+      notify_key = vault.get_secret("notification-api-key").value
+    after: |
+      `DefaultAzureCredential` tries a chain of sources: environment variables, workload
+      identity, managed identity, then your developer login (`az login`) on a laptop. The same
+      code runs locally with your identity and in Azure with the app's managed identity. (In
+      Lesson 3 the model was baked into the image; fetching it by exact name at startup, as
+      here, is the alternative. Either way the version is explicit.)
+
+  - type: quiz
+    question: |
+      A colleague asks where the storage account key is configured for the code above, since
+      "it must be in an env var somewhere". What's the accurate answer?
+    options:
+      - It's stored in Key Vault and fetched by DefaultAzureCredential
+      - DefaultAzureCredential uses the subscription owner's credentials
+      - It's embedded in the image at build time
+      - There is no storage key; the app's managed identity gets a short-lived Entra token, and a role assignment on the storage account authorizes it
+    answer: 3
+    explanation: |
+      Blob Storage accepts Entra tokens. The managed identity obtains a token from the platform,
+      and access is decided by an RBAC role on the storage account (for example, Storage Blob
+      Data Reader). The tempting option A describes the secret you fetch _only_ when Entra auth
+      isn't available. Better still, storage accounts can have shared-key access disabled
+      entirely, so no key can leak.
+
+  - type: text
+    title: RBAC and least privilege
+    text: |
+      A role assignment has three parts: **who** (a user, group, or managed identity), **what
+      role** (a named set of permissions), and **scope** (management group, subscription,
+      resource group, or a single resource). Permissions inherit downward.
+
+      Least privilege means the **narrowest role at the narrowest scope**. For our app's managed
+      identity:
+
+      - `AcrPull` on the one registry (pull, not push)
+      - `Key Vault Secrets User` on the one vault (read secret values, not manage them)
+      - `Storage Blob Data Reader` on the `models` container (read, not write or delete)
+
+      And for CI's identity: `AcrPush` on the registry, plus only what the deploy step needs.
+
+      The classic shortcut, **Contributor** on the subscription "to make it work", lets a
+      compromised app delete resources, read other teams' data, and change network rules. It
+      will also fail any serious security review.
+
+  - type: code
+    title: A scoped role assignment
+    language: bash
+    code: |
+      APP_ID=$(az containerapp show -g rg-readmit -n readmit-api \
+        --query identity.principalId -o tsv)
+      KV_ID=$(az keyvault show -g rg-readmit -n readmit-kv --query id -o tsv)
+
+      az role assignment create \
+        --assignee-object-id "$APP_ID" \
+        --assignee-principal-type ServicePrincipal \
+        --role "Key Vault Secrets User" \
+        --scope "$KV_ID"
+    after: |
+      The scope is the vault's full resource ID, not the resource group or subscription. This
+      assumes the vault uses the **Azure RBAC** permission model (the default for vaults created
+      with API version 2026-02-01 and later); on an older vault that still uses access
+      policies, these roles have no effect. In practice these assignments live in
+      infrastructure-as-code (Bicep or Terraform, Module 06) so they're reviewed and
+      reproducible rather than clicked.
+
+  - type: quiz
+    question: |
+      The app needs to read two secrets from Key Vault. Which assignment follows least
+      privilege?
+    options:
+      - Key Vault Administrator on the resource group
+      - Contributor on the key vault
+      - Key Vault Secrets User on the key vault
+      - Key Vault Secrets Officer on the subscription
+    answer: 2
+    explanation: |
+      Secrets User grants read access to secret values, which is all the app needs, scoped to
+      one vault. Contributor (B) is tempting because it sounds broad enough, but it's a
+      management-plane role. Under the RBAC permission model it doesn't grant reading secret
+      values at all, and under the older access-policy model it can edit policies to grant
+      itself access. It's wrong either way. Officer (D) can create and delete secrets, and the
+      subscription scope covers every vault.
+
+  - type: text
+    title: Private endpoints
+    text: |
+      By default, many Azure PaaS services (Storage, Key Vault, databases, ACR) have **public
+      endpoints**: reachable from the internet, protected by authentication.
+
+      A **private endpoint** gives the service a private IP inside your VNet via Azure Private
+      Link (for ACR this needs the Premium tier). Combined with **disabling public network
+      access** on the service, it means:
+
+      - traffic between your app and the data stays on Microsoft's backbone and your private
+        network, not the internet;
+      - a stolen token alone isn't enough; the attacker also needs network access to the VNet;
+      - DNS inside the VNet resolves `readmit-kv.vault.azure.net` to the private IP (via a
+        private DNS zone, which is a common source of "it works in the portal but not in the
+        app" bugs).
+
+      For the service itself on Container Apps: create an **internal environment** in your VNet
+      (it has no public endpoint), so the app is reachable only from the network, with the
+      hospital's EHR connecting over ExpressRoute or a site-to-site VPN. Watch the wording: an
+      app's "internal" ingress setting means reachable only from other apps in the same
+      environment, so on an internal environment you publish the app with "external" ingress,
+      which there means reachable from the VNet. If it must be public, put a WAF (Application
+      Gateway or Front Door) in front and require authentication.
+
+  - type: quiz
+    question: |
+      You add a private endpoint for the Key Vault, but the vault still accepts connections
+      from any IP address with a valid token. What did you forget?
+    options:
+      - To disable public network access (or restrict the firewall) on the vault
+      - Private endpoints automatically block public access, so nothing
+      - To give the app Key Vault Administrator
+      - To rotate the secrets
+    answer: 0
+    explanation: |
+      A private endpoint **adds** a private path; it doesn't remove the public one. You must
+      also set public network access to disabled (or restrict the firewall to selected
+      networks). This is one of the most common gaps found in cloud security reviews.
+
+  - type: text
+    title: HIPAA technical safeguards
+    text: |
+      The HIPAA Security Rule (45 CFR 164.312) lists five **technical safeguard** standards.
+      For our service:
+
+      - **Access control**: unique identities for every user and workload (managed identity,
+        no shared accounts), least-privilege RBAC, emergency access procedure, and encryption
+        of ePHI.
+      - **Audit controls**: record who accessed what. Azure Activity Log and resource
+        diagnostic logs to Log Analytics, plus your application's prediction audit records
+        (Lesson 2).
+      - **Integrity**: protect ePHI from improper alteration. Immutable images by digest,
+        restricted write access, versioned model artifacts.
+      - **Person or entity authentication**: verify identity, with Entra ID, MFA for humans, and
+        tokens for workloads.
+      - **Transmission security**: TLS for everything, private networking for PHI paths.
+
+      Some implementation specifications (including encryption) are **addressable**, which
+      does **not** mean optional: you implement them or document why an equivalent measure is
+      reasonable. In practice, encrypt everything. HHS proposed updates to the Security Rule in
+      January 2025 that would drop the addressable category and make encryption and
+      multi-factor authentication explicit requirements. As of September 2026 the proposal was
+      not final, so check the current status. The administrative and physical safeguards also
+      apply, largely through your organization and the cloud provider.
+
+  - type: text
+    title: The BAA and shared responsibility
+    text: |
+      A cloud provider that stores or processes PHI for a covered entity is a **business
+      associate**, and a **Business Associate Agreement (BAA)** is required. Microsoft, AWS, and
+      Google all offer one, and it covers a listed set of **in-scope** services.
+
+      Three misconceptions to avoid:
+
+      - "**The cloud is HIPAA-certified.**" There is no official HIPAA certification. The
+        provider secures the infrastructure; you're responsible for how you configure and use
+        it (shared responsibility).
+      - "**We have a BAA, so any service is fine.**" Only in-scope services are covered. A
+        preview feature or a third-party marketplace tool may not be.
+      - "**PHI in dev is fine because it's our subscription.**" Keep PHI in production only
+        where possible. Use synthetic data like the Module 01 generator for development and
+        CI. Minimum necessary applies to engineers, too.
+
+      Module 06 goes deeper into HIPAA, de-identification, and governance.
+
+  - type: quiz
+    question: |
+      Your hospital has a BAA with its cloud provider. A teammate wants to send discharge
+      summaries to a new preview AI service in the same cloud for a quick experiment. What's
+      the right first step?
+    options:
+      - Go ahead; the BAA covers the whole cloud account
+      - Check whether the service is listed as in scope for the BAA and get privacy/security approval before sending any PHI
+      - Remove patient names, which makes the data de-identified
+      - Encrypt the data first, which makes the BAA unnecessary
+    answer: 1
+    explanation: |
+      BAAs cover specific services, and previews are often excluded. Removing names (C) does
+      not meet HIPAA de-identification, which requires Safe Harbor (removing 18 identifier
+      types, many of which appear in free text) or Expert Determination. Encryption (D) is a
+      safeguard, not a substitute for a BAA when the service processes the data.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how you'd deploy our readmission model on Azure so that it would pass our
+      security review."
+    model_answer: |
+      I'd go piece by piece. The image goes to a private ACR, built and pushed by CI using
+      OIDC federation, so there's no stored cloud secret, and scanned before deploy. I'd run it
+      on Container Apps in an internal environment in the hospital's VNet, with no public
+      endpoint (App Service would need a private endpoint for inbound); the EHR reaches it
+      over the existing ExpressRoute or VPN. The app gets a managed identity
+      with three narrow role assignments: AcrPull on the registry, Storage Blob Data Reader on
+      the model container, and Key Vault Secrets User on one vault, only if there's a secret
+      we can't eliminate. Storage, Key Vault, and any database get private endpoints with
+      public network access disabled. Everything uses TLS, and storage is encrypted at rest,
+      with customer-managed keys if policy requires. Logs go to Log Analytics with the
+      prediction audit records in an access-controlled store with defined retention and no
+      PHI in general application logs. I'd confirm each service is in scope for the BAA, keep
+      dev and CI on synthetic data, and put all of it in Bicep or Terraform so the security
+      team reviews code, not screenshots.
+    key_points:
+      - Private registry with CI pushing via OIDC and image scanning
+      - Managed hosting with no public endpoint (internal environment in a VNet) and private connectivity to the EHR
+      - Managed identity with narrowly scoped RBAC roles; Key Vault only for unavoidable secrets
+      - Private endpoints with public access disabled; TLS and encryption at rest
+      - Audit logging without PHI in general logs, BAA scope confirmed, synthetic data outside prod, infrastructure as code
+
+  - type: text
+    title: Logs, metrics, and PHI
+    text: |
+      Send container logs, platform metrics, and request traces to **Log Analytics** and
+      **Application Insights**. Track request rate, error rate (4xx vs 5xx), latency
+      percentiles, restarts, and readiness failures. Lesson 5 adds model-level monitoring on
+      top.
+
+      Two rules that security reviews check:
+
+      - **No PHI in general logs.** Log request IDs, model version, status codes, and timings.
+        Keep inputs and outputs in the dedicated audit store with its own access controls.
+        Watch out for exception messages and validation errors that echo request bodies.
+      - **Retention is a decision.** Audit logs must be kept as long as policy requires; debug
+        logs should expire quickly. Both are configured, not defaults you discover later.
+
+  - type: text
+    title: Azure, AWS, GCP
+    text: |
+      The same architecture in three clouds (Azure / AWS / GCP):
+
+      - **Registry**: ACR / ECR / Artifact Registry
+      - **Serverless containers**: Container Apps / ECS on Fargate / Cloud Run
+      - **Web app platform**: App Service / Elastic Beanstalk / App Engine
+      - **Kubernetes**: AKS / EKS / GKE
+      - **Secrets**: Key Vault / Secrets Manager (keys in KMS) / Secret Manager (keys in Cloud KMS)
+      - **Workload identity**: managed identity / IAM role for the task or pod / service account
+        with Workload Identity
+      - **Directory**: Entra ID / IAM Identity Center / Cloud Identity
+      - **Private access to services**: Private Endpoint (Private Link) / VPC endpoints
+        (PrivateLink) / Private Service Connect
+      - **Logs and metrics**: Azure Monitor and Log Analytics / CloudWatch / Cloud Logging and
+        Cloud Monitoring
+      - **ML platform**: Azure Machine Learning / SageMaker / Vertex AI
+
+      The mapping is approximate; the services differ in detail. But if you can explain the
+      six pieces on one cloud, you can learn another in days.
+
+  - type: quiz
+    question: |
+      An interviewer at an AWS shop asks how your service authenticates to S3 without an
+      access key. What's the AWS equivalent of an Azure managed identity here?
+    options:
+      - An IAM user with an access key in Secrets Manager
+      - A KMS key attached to the container
+      - An IAM role assumed by the ECS task (task role), with a policy granting read on the model bucket
+      - A security group allowing the container to reach S3
+    answer: 2
+    explanation: |
+      An ECS task role (or IRSA / EKS Pod Identity on Kubernetes) gives the workload temporary
+      credentials automatically, which is the same idea as a managed identity. An IAM user
+      with a stored key (A) is exactly the long-lived secret you're trying to avoid. KMS (B)
+      manages encryption keys, and security groups (D) control network reachability, not
+      authorization.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why not just put the database password in an environment variable in the container
+      app? It's not in the image, and only our team can see the app's configuration."
+    model_answer: |
+      It's better than baking it into the image, but it still has real weaknesses. The password
+      is long-lived, so if it leaks through a log line, a crash dump, a screenshot, or someone's
+      shell history, it stays valid until someone remembers to rotate it, and rotation means
+      redeploying everything that uses it. Anyone with read access to the app configuration can
+      see it, and there's no per-access audit trail. It also tends to get copied into local
+      .env files. With a managed identity, there's nothing to leak: tokens are short-lived and
+      issued by the platform, access is governed by an RBAC role I can audit and revoke, and
+      the database can require Entra authentication. If a password is truly unavoidable, I'd
+      keep it in Key Vault, reference it from the app via the managed identity, and enable
+      rotation, so access is logged and centrally controlled.
+    key_points:
+      - Environment variables hold long-lived secrets that leak via logs, dumps, and copies
+      - Configuration readers can see them and there is no per-access audit
+      - Managed identity issues short-lived tokens, with nothing stored
+      - RBAC makes access auditable and revocable
+      - If unavoidable, Key Vault references plus rotation
+
+  - type: laptop
+    title: Write the deployment plan (and deploy if you have a subscription)
+    repo_path: 03-production-ml/docs/deployment.md
+    task: |
+      Create `03-production-ml/docs/deployment.md` answering the six security-review questions
+      from the first step for your service: hosting choice and why, network path, identity and
+      each role assignment with its scope, secrets (ideally none), encryption, logging and
+      retention, and BAA scope. Add an Azure/AWS/GCP column for each component. If you have an
+      Azure subscription (a free account works), push your image to ACR and deploy it with
+      `az containerapp create` using a user-assigned identity that has `AcrPull` (the CLI
+      can assign the role for you), then call `/readyz`. A system-assigned identity also works,
+      but it only exists once the app does, so create the app with a quickstart image first and
+      then switch it with `az containerapp registry set --identity system`. Use synthetic data
+      only.
+
+  - type: recap
+    points:
+      - "Six pieces: registry, compute, secrets, identity, network, logs"
+      - Pick the hosting with the **least operational burden**; Container Apps or App Service before AKS
+      - "**Managed identity** replaces stored credentials; Key Vault holds only unavoidable secrets"
+      - Least privilege is the **narrowest role at the narrowest scope**, never Contributor on the subscription
+      - Private endpoints **add** a private path; you must also disable public access
+      - "HIPAA technical safeguards: access control, audit, integrity, authentication, transmission security"
+      - A BAA covers listed services only; configuration is your responsibility, and PHI stays out of dev and general logs
+      - The architecture maps directly to AWS and GCP

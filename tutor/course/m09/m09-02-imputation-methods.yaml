@@ -1,0 +1,473 @@
+id: m09-02-imputation-methods
+title: Imputation methods and how to evaluate them
+summary: Single vs multiple imputation, MICE and Rubin's rules, ML and deep imputers, and why RMSE on
+  masked values is a weak way to choose between them.
+minutes: 28
+status: authored
+why_it_matters: Choosing and justifying an imputation method, and proving it did not distort the
+  downstream results, is a core clinical data science skill. The most common mistake is picking the
+  imputer with the best reconstruction error, which can be the one that ruins the study.
+objectives:
+  - Contrast mean, regression, MICE, and ML/deep imputation by what each returns
+  - Apply Rubin's rules to combine estimates across imputed datasets
+  - Explain why single imputation understates uncertainty
+  - Fit imputers inside cross-validation folds, and know when the outcome belongs in the imputation model
+  - Evaluate imputation by downstream estimates, distributional fidelity, and calibration, not only masked-value error
+key_points:
+  - Include the outcome in the imputation model for inference, and think twice before doing so for prediction
+  - Imputation is part of the model pipeline and must be refit per fold
+  - Masked-value RMSE rewards regression to the mean
+  - Single imputation treats guesses as data, so intervals are too narrow
+  - Compare against complete-case and missingness-aware baselines
+tags: [missing-data, imputation, interview]
+steps:
+  - type: text
+    title: The leaderboard that picked the wrong winner
+    text: |
+      A team benchmarks imputers the standard way. They hide some observed LDL values, impute
+      them, compute RMSE against the truth, and rank. The winner is a regression imputer that
+      uses every column, including the outcome. They adopt it, fit the study model, and report an
+      association with a tight confidence interval.
+
+      In the simulation in this lesson, that exact winner gives a slope **26% too high**, and its
+      95% interval contains the truth in **0%** of runs.
+
+      Nothing was buggy. The metric answered a different question from the one the study asked.
+      Lesson 1 was about _why_ values are missing. This one is about what to do and how to prove
+      that what you did did not distort the answer.
+
+  - type: text
+    title: Methods, sorted by what they return
+    text: |
+      - **Single, deterministic**: mean or median, and regression (the conditional mean). One
+        value per hole, no noise.
+      - **Single, stochastic or donor-based**: regression plus a random residual, hot-deck, kNN,
+        and **predictive mean matching (PMM)**, which fills a hole with an observed value from a
+        donor whose predicted mean is close. Imputed values stay plausible and keep the skew.
+      - **Multiple imputation (MI)**: m completed datasets from **proper** draws, analysed
+        separately and pooled. Chained equations (MICE, also called FCS) model each incomplete
+        variable given the others in turn. Joint-model MI draws from one multivariate model.
+      - **ML and deep imputers**: random-forest imputation (missForest style), forests inside
+        chained equations, and generative models such as GAIN or MIWAE. Most off-the-shelf
+        versions return **one** completed dataset, tuned to reconstruct values.
+
+      Three properties decide suitability more than the algorithm's fame: does it preserve the
+      **distribution**, does it carry **uncertainty** (several draws), and does it use the
+      **outcome** appropriately for your goal.
+
+  - type: text
+    title: Rubin's rules
+    text: |
+      With m imputed datasets you get m estimates Q_1 ... Q_m and their within-imputation
+      variances U_1 ... U_m. Rubin's rules pool them:
+
+      - pooled estimate: **Q-bar** = mean of the Q_i
+      - within-imputation variance: **U-bar** = mean of the U_i
+      - between-imputation variance: **B** = sample variance of the Q_i (divisor m - 1)
+      - total variance: **T = U-bar + (1 + 1/m) B**
+
+      The interval is Q-bar ± t_v × sqrt(T), with v = (m - 1) × [1 + U-bar / ((1 + 1/m) B)]^2 in
+      Rubin's original form. Most software uses the Barnard–Rubin small-sample refinement.
+
+      B is the price of not knowing the missing values. Roughly, (1 + 1/m) B / T estimates the
+      **fraction of missing information**, which can be far larger than the fraction of missing
+      rows when the incomplete variable matters a lot.
+
+  - type: quiz
+    question: |
+      Five imputed datasets give these slope estimates: 2.0, 2.4, 1.6, 2.3, 1.7. Each analysis
+      reported a variance of 0.04 (SE 0.20). What is the pooled standard error from Rubin's rules?
+    options:
+      - "0.35"
+      - "0.44"
+      - "0.20"
+      - "0.41"
+    answer: 1
+    explanation: |
+      U-bar = 0.04. The estimates have mean 2.0 and sample variance B = 0.125 (divisor 4). So
+      T = 0.04 + (1 + 1/5) × 0.125 = 0.19 and SE = sqrt(0.19) = **0.44**. The other values come
+      from dropping a piece: 0.20 ignores the between-imputation spread (what naive analysis of
+      one dataset reports), 0.35 is sqrt(B) alone, and 0.41 is sqrt(U-bar + B), which forgets
+      the (1 + 1/m) factor.
+
+  - type: code
+    title: Rubin's rules in a few lines
+    language: python
+    text: "Pure numpy, so you can check any package against it:"
+    code: |
+      import numpy as np
+
+      def rubin(estimates, variances):
+          """Pool one scalar parameter across m imputed datasets."""
+          m = len(estimates)
+          q_bar = np.mean(estimates)
+          u_bar = np.mean(variances)          # within-imputation variance
+          b = np.var(estimates, ddof=1)       # between-imputation variance
+          t = u_bar + (1 + 1 / m) * b         # total variance
+          fmi = (1 + 1 / m) * b / t           # approximate fraction of missing information
+          return q_bar, np.sqrt(t), fmi
+
+      est = [2.0, 2.4, 1.6, 2.3, 1.7]         # slope from each imputed dataset
+      var = [0.04] * 5                        # squared SE from each analysis
+      print(rubin(est, var))                  # about (2.0, 0.436, 0.79)
+    after: |
+      `ddof=1` matters: `np.var` defaults to divisor m, which understates B. The fraction of
+      missing information of 0.79 says the imputed datasets disagree a lot, so the answer hinges
+      on the missing values. `statsmodels.imputation.mice` does the pooling for you and reports
+      this as FMI in its summary. scikit-learn's imputers do **not** pool anything.
+
+  - type: text
+    title: Why one imputation understates uncertainty
+    text: |
+      A completed dataset looks like n complete observations, so the analysis software computes
+      standard errors as if 40% of X had not been guessed. Adding random noise fixes the _spread_
+      of the imputed values, but not this.
+
+      In the simulation (next figure), a single stochastic draw gave a 95% interval that covered
+      the true slope in **90%** of runs. Multiple imputation with 20 draws and Rubin's rules
+      covered it in about **95%** (95.5% with 400 runs, so give or take a point).
+
+      Two more points. **Proper** imputation also draws the imputation model's parameters, not
+      only new residuals around fixed coefficients. That is the idea behind
+      `sample_posterior=True` in scikit-learn. And the shortfall of a single imputation grows
+      with the fraction of missing information.
+
+  - type: image
+    image: m09-02-coverage.png
+    caption: |
+      How often the 95% interval contained the true slope (simulation, 400 runs). Complete-case
+      suffers from selection on the outcome, mean imputation and MI without the outcome from
+      bias, and a single draw from treating guesses as data.
+
+  - type: quiz
+    question: |
+      In the simulation, 40% of X is missing at random given the outcome Y and covariates. Which
+      method has the **lowest** error (RMSE) on the masked values?
+    options:
+      - Mean imputation
+      - Multiple imputation with the outcome, m = 20
+      - Regression imputation without the outcome
+      - Deterministic regression imputation with the outcome
+    answer: 3
+    explanation: |
+      RMSE is minimised by the conditional mean given _everything you know_, and that includes
+      the outcome. Deterministic regression with Y is exactly that, so it wins (0.66 against 0.93
+      for MI with Y). Mean imputation ignores the covariates, and regression without Y throws
+      away the strongest predictor. The next steps show why winning this contest does not make
+      it the right imputer.
+
+  - type: text
+    title: RMSE rewards regression to the mean
+    text: |
+      Masked-value RMSE is minimised by the **conditional mean**. Anything that adds random
+      noise to keep the spread realistic pays for it: a random draw is wrong by the noise too,
+      so its RMSE is roughly sqrt(2) times the conditional SD. Here that is 0.66 for the
+      deterministic fill against 0.93 for an MI draw, a ratio of 1.41.
+
+      So RMSE answers "how close is each filled value to its true value", and it rewards
+      collapsing toward the center. Analyses ask something else: is the completed dataset
+      distributed like real data, and do coefficients, prevalences, and intervals come out right?
+
+      Three things to measure instead:
+
+      - the **distribution** (spread, tails, share above a clinical threshold)
+      - **downstream estimates** against a full-data reference
+      - for prediction, **calibration** of the final model
+
+  - type: image
+    image: m09-02-rmse-vs-inference.png
+    caption: |
+      Seven ways of handling the same missing X. Orange has the best masked RMSE, blue is
+      multiple imputation with the outcome. The best reconstruction is not the best inference.
+
+  - type: text
+    title: Reading the three panels
+    text: |
+      - **Mean**: no spread at all (0.00) and a slope pulled toward zero.
+      - **Regression + Y** (orange): best RMSE (0.66), but spread only 0.72 of the truth and a
+        slope **+0.26** too high. Each imputed X is built from Y, so the X–Y link in the imputed
+        rows is manufactured. Its interval covers the truth 0% of the time.
+      - **MI without Y**: the spread is right (1.01) but the slope is **-0.38**. The imputed
+        values carry noise unrelated to Y and dilute the association. Good distribution, wrong
+        inference.
+      - **MI + Y** (blue): RMSE 0.93, 41% worse than the winner, but spread 1.00, no slope bias,
+        and about 95% coverage.
+      - **Regression without Y** is the subtle one. Its slope is nearly fine (-0.04) because a
+        conditional-mean fill behaves like Berkson error, which does not bias a linear slope. But
+        its spread is 0.44 of the truth and the share of patients above X = 1 is off by about
+        **-10 percentage points** (the true share is 15.9%). Anything non-linear or thresholded,
+        such as "LDL above goal", breaks.
+
+  - type: quiz
+    question: |
+      You use multiple imputation, but the imputation model leaves the outcome out. You then
+      regress the outcome on the imputed variable. What happens to the estimated association?
+    options:
+      - No bias, because the data are MAR and MI is valid under MAR
+      - It is biased away from zero, like deterministic regression with the outcome
+      - It is biased toward zero
+      - It depends on m, and with enough imputations the bias disappears
+    answer: 2
+    explanation: |
+      The imputed values are drawn without any knowledge of Y, so in the imputed rows X is
+      unrelated to Y's residual variation. That dilutes the X–Y association toward zero (-0.38
+      in the figure). "MI is valid under MAR" holds only when the imputation model is compatible
+      with the analysis, and dropping the outcome makes it incompatible. More imputations reduce
+      Monte Carlo noise, not this bias.
+
+  - type: text
+    title: The outcome, for inference versus for prediction
+    text: |
+      - **Inference** (estimate an association): the imputation model must contain every
+        variable in the analysis model, **including the outcome**, or the link is diluted as
+        above. For survival outcomes include the event indicator and the Nelson–Aalen cumulative
+        hazard, not log time (White and Royston, Stat Med 2009). Module 04 returns to this.
+      - **Prediction**: at deployment the outcome is unknown, so an imputation model that uses
+        it cannot be applied to a new patient. Worse, imputing training features with the label
+        and then training a classifier on them leaks the label into the features (m01-05).
+        Sperrin et al. (J Clin Epidemiol 2020) argue that missing data should be handled
+        differently for prediction than for description or causal explanation. A simulation
+        study by Sisk et al. (arXiv, 2022) found that when imputation is applied at deployment,
+        omitting the outcome from the imputation model at development was preferred.
+      - **Congeniality**: the imputation model must be at least as rich as the analysis model
+        (interactions, splines), or you impute as if those terms did not exist.
+
+  - type: quiz
+    question: |
+      A team imputes LDL with chained equations that **include the readmission label**, then
+      cross-validates a readmission classifier on the completed data. AUROC rises from 0.66 to
+      0.71 (hypothetical numbers). What is the best explanation?
+    options:
+      - The imputed values encode label information that will not exist at prediction time, so the gain is leakage
+      - Using more information gives better imputations, so the gain is legitimate
+      - AUROC differences below 0.05 are within noise
+      - Multiple imputation always improves discrimination
+    answer: 0
+    explanation: |
+      For a prediction model the label is not available at deployment, so imputations built
+      from it give a feature that looks better in validation than anything you can compute
+      for a new patient. It is the same pattern as any leakage: a great validation score and a
+      deployment disappointment. The gain is real in the retrospective table and absent in
+      production.
+
+  - type: text
+    title: Fit the imputer inside the fold
+    text: |
+      For prediction, imputation is **part of the model**. Fit it on the training fold only, then
+      apply that frozen imputer to the validation fold and to live data. "Fit" includes the
+      means, regression coefficients, and kNN donor pool.
+
+      - Fit on the full dataset and test information leaks in (m01-05).
+      - Fit separately on the test set and you have an imputation rule that will not exist for a
+        single patient at deployment.
+      - Version the fitted imputer with the model, since scores depend on it (m02-03, m03).
+
+      For an MI analysis of an association there is no test set, so the whole procedure is one
+      analysis. The fold rule is for prediction.
+
+  - type: code
+    title: A pipeline, and a multiple-imputation loop
+    language: python
+    text: "scikit-learn (IterativeImputer is still marked experimental, hence the extra import):"
+    code: |
+      from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+      from sklearn.impute import IterativeImputer
+      from sklearn.linear_model import LogisticRegression
+      from sklearn.model_selection import cross_val_score
+      from sklearn.pipeline import make_pipeline
+      from sklearn.preprocessing import StandardScaler
+
+      # Prediction: the imputer is refit on each training fold.
+      model = make_pipeline(
+          IterativeImputer(add_indicator=True, random_state=0),
+          StandardScaler(),
+          LogisticRegression(max_iter=1000),
+      )
+      scores = cross_val_score(model, X, y, cv=5, scoring="roc_auc")
+
+      # Inference: m proper draws, then analyse each and pool with rubin().
+      imputed = [
+          IterativeImputer(sample_posterior=True, random_state=seed)
+          .fit_transform(X_with_outcome)       # outcome included, for inference only
+          for seed in range(20)
+      ]
+    after: |
+      By default `IterativeImputer` returns one completed dataset (`sample_posterior=False`). For
+      multiple imputation you set `sample_posterior=True` and run it repeatedly with different
+      seeds, because one call to `transform` cannot change the number of rows. The default
+      estimator is `BayesianRidge`. `add_indicator=True` appends missing-indicator columns. Check
+      the current scikit-learn docs, since the class is experimental and its API may change.
+
+  - type: quiz
+    question: |
+      A teammate says this code is multiple imputation with valid standard errors. What is wrong?
+    code: |
+      imp = IterativeImputer(sample_posterior=True, random_state=0)
+      X_done = imp.fit_transform(np.column_stack([X, y]))
+      fit = sm.OLS(y, sm.add_constant(X_done[:, :-1])).fit()
+      print(fit.bse)
+    language: python
+    options:
+      - Nothing, sample_posterior=True makes it multiple imputation
+      - It is one completed dataset and the standard errors treat imputed values as real. You need several fits with different seeds, pooled by Rubin's rules
+      - The outcome must never be in the imputation matrix
+      - BayesianRidge cannot impute, so a random forest estimator is required
+    answer: 1
+    explanation: |
+      `sample_posterior=True` makes each imputation a proper draw, but one draw is still one
+      dataset. The OLS standard errors ignore the imputation uncertainty. Loop over seeds and
+      pool with Rubin's rules. The outcome belongs in the matrix here because this is an
+      inference analysis. The third option is the prediction rule wrongly applied.
+
+  - type: text
+    title: ML and deep imputers, what to demand
+    text: |
+      Forests, PMM, and generative imputers can capture non-linearities and interactions without
+      you specifying them, and they can be strong at reconstruction. Before trusting one:
+
+      - **Several draws**, if you want intervals. A single forest or autoencoder completion has
+        the deterministic-regression problem, too little spread. Some generative imputers can
+        draw multiple completions, but most off-the-shelf ones return one, so check.
+      - **Evidence on your estimand**, not RMSE.
+      - **Train-only fitting**, and the same code path at deployment.
+
+      For prediction, a benchmark on health databases (Perez-Lebel et al., GigaScience 2022)
+      concluded that native support for missing values in supervised learners predicted better
+      than state-of-the-art imputation, at much lower computational cost, and that when you do
+      impute you should add indicator columns. Lesson 3 covers native handling.
+
+  - type: quiz
+    question: |
+      A deep imputer tops the masked-RMSE leaderboard. You need a confidence interval for the
+      LDL–readmission association. What should you ask first?
+    options:
+      - What is its RMSE on the held-out fold?
+      - Does it beat mean imputation on AUROC?
+      - Can it be trained longer to lower the RMSE further?
+      - Does it produce several proper draws, and are the pooled estimate and interval right in a simulation of my setting?
+    answer: 3
+    explanation: |
+      For an interval you need uncertainty propagation (several proper draws) and evidence that
+      the pooled estimate is unbiased with correct coverage for _your_ estimand. The other
+      questions are all variations on reconstruction error or predictive score, which the
+      simulation showed can be best for exactly the method that fails at inference.
+
+  - type: text
+    title: How to evaluate an imputation method
+    text: |
+      1. **Simulate your own problem.** Start from complete data, delete values with a mechanism
+         as realistic as you can (not only MCAR), impute, and compare the quantities you will
+         report against the full-data values: bias, interval coverage, share above thresholds.
+      2. **Distribution, conditionally.** Compare imputed and observed values _given
+         covariates_. Under MAR they are supposed to differ, because tested and untested patients
+         differ. A mismatch in raw histograms is not a failure and a perfect match is not proof.
+      3. **Prediction:** compare discrimination and **calibration** (m02-05) separately for
+         patients with and without each input, since imputation can shift the scores of the
+         imputed group.
+      4. **Baselines:** complete-case, missing indicator, and native handling in tree models. If
+         the fancy imputer does not beat them, do not use it.
+      5. **Stability:** vary m, the method, and the mechanism. Report what moves.
+
+  - type: quiz
+    question: |
+      You score imputers by randomly masking 20% of the **observed** LDL values (MCAR) and
+      computing RMSE. Real missingness comes from clinicians choosing whom to test. What is the
+      main flaw?
+    options:
+      - Random masking produces too few masked values to score
+      - RMSE cannot be computed under an MCAR mask
+      - The observed values come from tested patients. Masking them at random says nothing about never-tested patients, whose values you cannot score
+      - Masked values must first be imputed by MI before they can be scored
+    answer: 2
+    explanation: |
+      You can only score against values that were measured, and those come from patients who
+      were tested, so the evaluation set is selected by the same process that created the
+      problem. Performance there need not transfer to never-tested patients. That is why
+      downstream checks, simulations with realistic mechanisms, and sensitivity analyses
+      (lesson 3) matter more than a single leaderboard.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A realistic failure chain, each link common in real pipelines:
+
+      - The table is imputed **before** the split, with the label included.
+      - "MICE" is run with m = 1 because the library returns one matrix, then intervals are
+        reported as usual.
+      - A square or an interaction of LDL is computed **after** imputing LDL linearly, so the
+        imputation model cannot represent what the analysis model uses.
+      - The most complex imputer wins on RMSE, and the production system uses a different,
+        simpler imputer than the one validated (lesson 3).
+
+      The fix is procedural. Put imputation inside the pipeline, let the estimand decide the
+      imputation model, evaluate by the quantities the project reports, and give production the
+      same fitted object that training used.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why is RMSE on masked values a poor way to choose an imputation method?"
+    model_answer: |
+      Short version: RMSE is minimised by the conditional mean, so it rewards imputers that
+      collapse toward the center, and downstream analyses need the opposite. They need
+      the right spread and the right relationships.
+
+      In more detail: a method that adds realistic noise is wrong by the noise on top of the
+      prediction, so it loses on RMSE by roughly a factor of root two even when it is the one
+      that gives correct variances, prevalences, and intervals. I've seen deterministic
+      regression with the outcome win on RMSE and still bias a coefficient by a quarter, because
+      it manufactures the relationship. Also, you can only mask values that were observed,
+      which come from tested patients, so the score says little about the never-tested. I'd
+      choose by simulating the real estimand with a realistic missingness mechanism and
+      comparing bias, coverage, and calibration against complete-case and missing-indicator
+      baselines.
+    key_points:
+      - RMSE is minimised by the conditional mean and rewards shrinkage to the center
+      - Noise-adding methods lose on RMSE yet give correct spread and intervals
+      - A best-RMSE imputer can bias coefficients by manufacturing relationships
+      - Masked values come from tested patients, so the score does not cover the never-tested
+      - Evaluate on the downstream estimand, coverage, and calibration against simple baselines
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how you would handle missing labs in a 30-day readmission model, and defend
+      your choices."
+    model_answer: |
+      First I'd find out why the labs are missing, whether they were not ordered, done elsewhere,
+      or not resulted by prediction time, because that decides what imputation can and can't do.
+      For the model itself I'd start with simple, deployable baselines: a gradient-boosted model
+      with native missing-value handling, and a regularized logistic regression with median
+      imputation plus missing indicators. If I use a fancier imputer, it lives inside the
+      pipeline and is fit on training folds only, and it doesn't use the label. I'd evaluate not
+      just AUROC but calibration, overall and separately for patients with and without each lab.
+      Then I'd check deployment parity, meaning the production system must apply the same fitted
+      imputer and expect the same missingness. Finally I'd document the handling, run a
+      sensitivity analysis on the missingness assumption, and report it as TRIPOD+AI asks.
+    key_points:
+      - Investigate the missingness mechanism first
+      - Start from simple baselines, native handling and median plus indicator
+      - Imputer fitted inside the pipeline on training folds only, without the label
+      - Evaluate discrimination and calibration, including by missingness pattern
+      - Ensure deployment uses the same fitted imputer, then document and run sensitivity analysis
+
+  - type: laptop
+    title: Break the benchmark yourself
+    repo_path: 02-pytorch-clinical-ml/notebooks/m09_imputation_benchmark.py
+    task: |
+      Create this file. Re-implement the lesson's simulation (the `simulate_methods` function in
+      `tutor/figures/m09_02_imputation_methods.py` is a reference), then switch the missingness to
+      MCAR and to MNAR on X, and tabulate slope bias and 95% coverage for every method. Write three
+      sentences on which rankings change. Then build a pipeline with `SimpleImputer` and run it with
+      `cross_validate(..., return_estimator=True)` on `01-clinical-data-engineering/results/stroke_features.csv`,
+      printing each fold's imputer `statistics_` to confirm they differ per fold.
+
+  - type: recap
+    points:
+      - "**Method choice** is about what is returned: one deterministic fill, one stochastic fill, or m proper draws"
+      - "**Rubin's rules**: T = U-bar + (1 + 1/m) B. Use ddof=1, and expect scikit-learn not to pool for you"
+      - Single imputation treats guesses as data, so intervals are too narrow (90% coverage where MI gave about 95%)
+      - Masked-value RMSE rewards regression to the mean. The best-RMSE imputer biased the slope by 26% in the simulation
+      - For inference, the imputation model includes the outcome and is congenial with the analysis. For prediction the outcome is unavailable at deployment and must not leak into features
+      - Fit the imputer inside the training fold and version it with the model
+      - Evaluate by simulating the real estimand with a realistic mechanism, and compare against complete-case, indicator, and native baselines

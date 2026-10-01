@@ -1,0 +1,438 @@
+id: m04-03-censoring-km
+title: Censoring and Kaplan-Meier curves
+summary: Why time-to-event data needs its own methods, censoring and its key assumption, the KM estimator
+  by hand and in lifelines, reading KM plots, median survival, the log-rank test, and RMST.
+minutes: 25
+status: authored
+why_it_matters: Survival analysis is a core clinical statistics skill in pharma, health-system research,
+  and ML survival modelling. Almost every interview for these roles includes a question about censoring
+  or a KM plot.
+objectives:
+  - Explain right censoring and the non-informative censoring assumption
+  - Compute a Kaplan-Meier estimate by hand on a tiny example
+  - Fit and plot KM curves with lifelines, and read a KM plot with numbers at risk and CIs
+  - Estimate median survival, and know what to report when it isn't reached
+  - Explain what the log-rank test does and does not tell you, especially when curves cross
+  - Use restricted mean survival time (RMST) as an interpretable alternative
+key_points:
+  - Dropping censored patients, or counting them as event-free, biases the result
+  - KM multiplies conditional survival probabilities over the risk set at each event time
+  - Non-informative censoring is an assumption, not something the data can confirm
+  - Median survival is the first time the KM curve reaches 0.5, and it may not be reached
+  - The log-rank test compares whole curves and is most powerful under proportional hazards
+  - Crossing curves weaken the log-rank test; RMST differences remain interpretable
+tags: [survival, kaplan-meier, interview]
+steps:
+  - type: text
+    title: The 12-month recurrence rate that was wrong twice
+    text: |
+      Halfway through SYN-STROKE, a colleague reports the 12-month recurrent stroke rate in the
+      aspirin arm: **strokes divided by patients randomized**. It looks reassuringly low.
+
+      The problem: many patients were randomized only a few months ago. They're counted as
+      stroke-free for 12 months that haven't happened yet. The rate is biased **down**.
+
+      A second colleague "fixes" it by dropping everyone without 12 months of follow-up. Now
+      only early enrollees count, plus every recent enrollee who already had a
+      stroke. The rate is biased **up**.
+
+      Both are errors in handling **censoring**. The Kaplan–Meier estimator was built for
+      exactly this problem.
+
+  - type: text
+    title: Time plus a flag
+    text: |
+      Each patient contributes two numbers:
+
+      - `time`: months from randomization (time zero) to the event **or** to the end of
+        observation
+      - `event`: 1 if the stroke was observed, 0 if observation ended first (**censored**)
+
+      **Right censoring** means we know the event hadn't happened by the censoring time, but
+      not whether or when it happened afterwards. In SYN-STROKE, censoring comes from:
+
+      - **Administrative** end of study. With staggered entry, a patient enrolled late is
+        followed for 12 months and one enrolled early for 30.
+      - **Loss to follow-up** or withdrawal
+      - Depending on the estimand (lesson 2), **death** or an intercurrent event such as
+        starting an anticoagulant
+
+      Censoring is information. "Stroke-free for at least 7 months" is real data. Throwing it
+      away is the mistake.
+
+  - type: text
+    title: The assumption behind every KM curve
+    text: |
+      KM (and the log-rank test and Cox model) assume **non-informative censoring**: patients
+      censored at time t have the same future event risk as patients still under observation
+      at t. Censoring must be unrelated to prognosis.
+
+      - **Administrative censoring** is usually fine, because the date a patient
+        enrolled is unrelated to their risk (apart from calendar-time trends in care).
+      - **Dropout** is the worry. Patients who stop attending because they feel worse, move to
+        a nursing home, or are too disabled to travel are probably at higher risk.
+      - **Censoring at an intercurrent event** (anticoagulant start, discontinuation after a
+        bleed) is often informative by construction.
+
+      You can't test this assumption from the observed data, because the future of censored
+      patients is exactly what's unobserved. You can compare baseline features of censored and
+      uncensored patients, weight by predictors of censoring (IPCW), and run sensitivity
+      analyses.
+
+  - type: quiz
+    question: Which censoring mechanism is most likely to violate non-informative censoring?
+    options:
+      - Follow-up ending on the study's fixed closing date
+      - Patients withdrawing because post-stroke disability makes clinic visits impossible
+      - A site closing because its principal investigator retired
+      - Censoring at 12 months because the endpoint is defined over 12 months
+    answer: 1
+    explanation: |
+      Disability after stroke predicts recurrent stroke and death, so the patients who leave are
+      systematically higher-risk than those who stay. KM will then underestimate risk. The other
+      three are driven by the calendar or the study's logistics, not by the patient's prognosis.
+      A site closure could be informative if sites differ a lot in case mix, but that's a
+      weaker effect.
+
+  - type: text
+    title: The Kaplan-Meier idea
+    text: |
+      You can't estimate "P(stroke-free at 12 months)" directly when some patients were
+      observed for only 4 months. You **can** estimate a chain of conditional probabilities.
+
+      At each time an event occurs:
+
+      - **n** = patients still at risk just before that time (not yet had an event, not yet
+        censored)
+      - **d** = events at that time
+      - the probability of getting past this time, given you reached it, is **1 − d/n**
+
+      The KM estimate is the product of these terms up to t:
+
+      `S(t) = Π over event times tᵢ ≤ t of (1 − dᵢ / nᵢ)`
+
+      Censored patients count in the risk set until their censoring time, then leave it. They
+      contribute exactly what we know about them. By convention, a patient censored at the same
+      time as an event is still counted at risk for that event.
+
+  - type: code
+    title: A tiny example to do by hand
+    language: text
+    text: Eight SYN-STROKE patients, time in months, with a 12-month horizon.
+    code: |
+      id   time   status
+       1     2    stroke
+       2     3    censored (moved away)
+       3     5    stroke
+       4     5    stroke
+       5     6    censored (withdrew)
+       6     8    stroke
+       7    10    censored (study closed)
+       8    12    completed 12 months stroke-free
+
+      Event time 2:  n = 8, d = 1 -> S = 1 x (1 - 1/8) = 0.875
+      Event time 5:  n = ?, d = 2 -> S = ?
+    after: Work out the risk set at 5 months before you look at the options below.
+
+  - type: quiz
+    question: What is the KM estimate S(5) for the table above?
+    options:
+      - "0.625 (5 of 8 patients are stroke-free after month 5)"
+      - "0.250 (drop the four censored patients first, then recompute)"
+      - "0.656 (0.875 × 6/8)"
+      - "0.583 (0.875 × 4/6)"
+    answer: 3
+    explanation: |
+      Just before month 5, patient 1 has had a stroke and patient 2 was censored at month 3, so
+      **6** patients are at risk (3–8). Two strokes give 1 − 2/6 = 4/6, and 0.875 × 4/6 = 0.583.
+      The 0.625 answer counts the censored patient as stroke-free forever (equivalently, it
+      keeps them in the risk set after they've left: 0.875 × 5/7). The 0.250 answer is the
+      "drop the censored" error from the start of the lesson (0.75 × 1/3). The 0.656 answer
+      never shrinks the risk set (n = 8).
+
+  - type: quiz
+    question: |
+      Continue the table: at month 8, patient 6 has a stroke. What are S(8) and the median time
+      to stroke?
+    options:
+      - S(8) = 0.389; median = 8 months
+      - S(8) = 0.389; median = 5 months
+      - S(8) = 0.500; median = 8 months
+      - S(8) = 0.292; median not reached
+    answer: 0
+    explanation: |
+      At month 8 the risk set is patients 6, 7 and 8 (patient 5 was censored at month 6), so
+      S(8) = 0.583 × 2/3 = 0.389. The median is the **first** time S(t) ≤ 0.5. S(5) = 0.583 is
+      still above 0.5, and the curve first drops below it at 8. So S(12) = 0.389, meaning the
+      12-month stroke risk is about **61%**. Compare the naive answers: counting censored
+      patients as stroke-free gives 4/8 = 50%, and dropping those censored before 12 months
+      gives 4/5 = 80%. KM falls between them for a principled reason.
+
+  - type: code
+    title: The same thing in lifelines
+    language: python
+    code: |
+      import pandas as pd
+      import matplotlib.pyplot as plt
+      from lifelines import KaplanMeierFitter
+      from lifelines.plotting import add_at_risk_counts
+
+      tiny = KaplanMeierFitter().fit([2, 3, 5, 5, 6, 8, 10, 12],
+                                     event_observed=[1, 0, 1, 1, 0, 1, 0, 0])
+      print(tiny.survival_function_)      # 0.875, 0.583, 0.389 as by hand
+      print(tiny.median_survival_time_)   # 8.0
+
+      df = pd.read_parquet("04-clinical-trials-survival/data/adtte.parquet")
+      fig, ax = plt.subplots(figsize=(8, 5))
+      fits = {}
+      for arm, g in df.groupby("arm"):
+          kmf = KaplanMeierFitter(label=arm)
+          kmf.fit(g["time_months"], event_observed=g["stroke"])
+          kmf.plot_survival_function(ax=ax, show_censors=True)
+          fits[arm] = kmf
+      add_at_risk_counts(*fits.values(), ax=ax)
+    after: |
+      `fit(durations, event_observed=...)` takes the time and the flag. A missing
+      `event_observed` means "every row is an event", which is a silent bug if you forget it.
+      The shaded band is a pointwise 95% CI based on Greenwood's variance.
+
+  - type: image
+    image: m04-03-km-two-arms.png
+    caption: |
+      Simulated SYN-STROKE data, 1,500 per arm. Shaded bands are 95% CIs, and ticks mark
+      censored patients. The y-axis starts at 0.80. The large drop in numbers at risk after
+      month 12 comes from staggered enrollment (administrative censoring), not from dropout.
+
+  - type: text
+    title: How to read a KM plot
+    text: |
+      A checklist for any KM figure, in a paper or your own notebook:
+
+      - **Axis range.** Truncated y-axes (like the one above) make small differences look big.
+        That's fine if it's labelled.
+      - **Steps and ticks.** Each drop is an event time. Each tick is a censored patient.
+      - **Numbers at risk.** This is the most important part. Where few patients remain, the
+        curve rests on a handful of people, the CI is wide, and single events cause big
+        drops. Here both arms fall to a few hundred after month 24, so don't over-read the
+        tail.
+      - **CIs.** Pointwise bands aren't a test of the difference between curves. Overlapping
+        bands at one time point don't mean "no difference".
+      - **Fixed-time readings.** At 12 months, stroke-free probability is about 0.91 on
+        aspirin and 0.93 on zetagrel, so risk is roughly 9% vs 7%. Absolute differences like
+        this are what patients and payers care about.
+
+  - type: quiz
+    question: Using the KM figure, what is the median time to recurrent stroke in the aspirin arm?
+    options:
+      - About 12 months
+      - About 28 months, where the curve ends
+      - Not reached, because the curve never falls to 0.5
+      - 0.81, the lowest point of the curve
+    answer: 2
+    explanation: |
+      The median is the time at which S(t) = 0.5. The aspirin curve stays above 0.80 for the
+      whole follow-up, so the median isn't estimable. lifelines returns `inf` for
+      `median_survival_time_`. That's normal in prevention trials where most patients never
+      have the event. "Where the curve ends" is the last follow-up time, not a median.
+
+  - type: text
+    title: Median survival and what to report instead
+    text: |
+      **Median survival** is the smallest t with S(t) ≤ 0.5. It's the standard summary in
+      oncology, where most patients have the event. Its CI comes from where the CI band crosses
+      0.5.
+
+      In secondary stroke prevention, cardiology, and most health-system outcomes, the median
+      is usually **not reached**. Report instead:
+
+      - **KM event probability at fixed times** (1 − S(12), with a CI)
+      - A **hazard ratio** (lesson 4)
+      - An **RMST** difference over a pre-specified horizon (below)
+
+      For risk models (Module 02 style), "12-month risk" should come from a survival method,
+      not from a logistic model that silently treats censored patients as event-free.
+
+  - type: text
+    title: The log-rank test
+    text: |
+      The log-rank test asks whether the two survival curves are the same across follow-up.
+
+      At every event time, it takes the risk set and asks: _given d events among n patients,
+      of whom n₁ are in the aspirin arm, how many aspirin events would we expect if the arms
+      were identical?_ The expected count is d × n₁/n. It sums **observed − expected** over all
+      event times, standardizes the total, and compares it with a chi-square distribution on
+      1 df.
+
+      What it gives you:
+
+      - A p-value for H0: identical survival functions. It's valid under any shape of curve.
+      - The **most power** when hazards are proportional, because every event time pushes the
+        sum the same way.
+
+      What it doesn't give you:
+
+      - **No effect size.** Pair it with an HR, a risk difference, or RMST.
+      - It weights all event times equally. Weighted versions (Fleming–Harrington) emphasize
+        early or late differences, but the weights must be pre-specified.
+
+  - type: code
+    title: Log-rank in lifelines
+    language: python
+    code: |
+      from lifelines.statistics import logrank_test
+
+      a = df[df["arm"] == "aspirin"]
+      z = df[df["arm"] == "zetagrel"]
+      res = logrank_test(
+          a["time_months"], z["time_months"],
+          event_observed_A=a["stroke"], event_observed_B=z["stroke"],
+      )
+      print(res.test_statistic, res.p_value)   # about 6.4, 0.012 on the simulated data
+    after: The p-value matches the one printed on the KM figure.
+
+  - type: quiz
+    question: The log-rank test above gives p = 0.012. Which statement is correct?
+    options:
+      - If the arms truly had identical survival curves, differences this large would be unusual
+      - Zetagrel reduces the risk of stroke by 1.2%
+      - There is a 98.8% probability that zetagrel works
+      - Proportional hazards has been confirmed
+    answer: 0
+    explanation: |
+      A p-value measures how surprising the data are **under the null** of identical curves.
+      It's not an effect size (the "1.2%" option), not the probability that the hypothesis
+      is true (the "98.8%" option), and it doesn't test proportional hazards. For the size of the effect, read
+      the curves (about 2 percentage points lower risk at 12 months) or fit a Cox model.
+
+  - type: text
+    title: When curves cross
+    text: |
+      Suppose a treatment has **early harm and later benefit**, like surgery (procedural risk
+      now, fewer strokes later) or a potent antithrombotic that causes early bleeding.
+
+      Before the crossing, the treatment arm has more events than expected. After the crossing,
+      it has fewer. The log-rank sum of observed − expected **cancels**, and the test can
+      return p = 0.4 when the curves are clearly different.
+
+      The same problem hits the Cox HR, which is a weighted average of a hazard ratio that
+      changes over time (lesson 4). With crossing curves, "HR = 0.95" describes nothing that
+      actually happens to patients.
+
+      Options, all pre-specified: a weighted log-rank test, a test of the difference at a
+      fixed time, a max-combo test, or a different summary measure such as **RMST**.
+
+  - type: image
+    image: m04-03-rmst-crossing.png
+    caption: |
+      Illustrative curves. The treatment arm has more early events and fewer late ones. The
+      area under each curve up to tau = 24 months is its RMST, and the shaded gap between the
+      curves is what the RMST difference nets out.
+
+  - type: text
+    title: Restricted mean survival time
+    text: |
+      **RMST(τ)** is the area under the KM curve from 0 to a horizon τ. It's the **average
+      event-free time during the first τ months**.
+
+      - The difference between arms is in **months**, which is easy to explain. In the
+        illustration: 20.9 − 20.3 = about **0.6 extra stroke-free months** over 2 years, with
+        the early harm and late benefit netted out.
+      - It needs no proportional hazards assumption.
+      - τ must be **pre-specified** and chosen where enough patients remain at risk in both arms.
+
+      ```python
+      from lifelines.utils import restricted_mean_survival_time
+      rmst_z = restricted_mean_survival_time(fits["zetagrel"], t=24)
+      rmst_a = restricted_mean_survival_time(fits["aspirin"], t=24)
+      ```
+
+      RMST is increasingly reported next to the HR in cardiovascular and oncology trials. It's
+      a strong answer whenever an interviewer asks what to do when hazards aren't proportional.
+
+  - type: quiz
+    question: |
+      Over τ = 24 months, RMST is 21.4 months on zetagrel and 20.9 months on aspirin. What's the
+      correct interpretation?
+    options:
+      - Zetagrel patients live 0.5 months longer
+      - Median time to stroke is 0.5 months longer
+      - On average, zetagrel patients spend about 0.5 more months stroke-free during the first 24 months
+      - Zetagrel reduces stroke risk by 0.5%
+    answer: 2
+    explanation: |
+      RMST refers to the event in question (stroke-free time) and to the horizon (24 months),
+      and it's an average, not a median. "Live longer" confuses stroke-free time with overall
+      survival, and nothing is claimed beyond 24 months. It's a difference in time, not in
+      probability.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We want 1-year stroke risk after discharge. Why not just fit a logistic regression on
+      'stroke within 365 days'? Why do we need survival analysis?"
+    model_answer: |
+      Logistic regression on a 1-year label needs everyone's status at 1 year. With incomplete
+      follow-up, patients who left the plan, enrolled recently, or were lost after 4 months
+      don't have a known label. You can code them as "no stroke", which biases risk down, or
+      drop them, which biases risk up and selects on follow-up length. Survival methods use
+      each patient's (time, event) pair, so someone observed for 4 months without a stroke
+      still contributes 4 months of information. KM gives the 1-year risk directly, and a Cox
+      or other survival model gives covariate effects. The key assumption is non-informative
+      censoring, so I'd check whether censoring relates to prognosis and use IPCW if it does.
+      Logistic regression is fine if nearly everyone has complete 1-year follow-up or if the
+      outcome is already determined. I'd still be explicit about what happens to people who
+      die first, which is a competing risk and the topic of lesson 5.
+    key_points:
+      - Censored patients have an unknown 1-year label, so either coding them event-free or dropping them biases risk
+      - Survival analysis uses partial follow-up through the (time, event) pair
+      - KM or Cox gives the fixed-horizon risk properly
+      - Relies on non-informative censoring, which should be checked, with IPCW if needed
+      - Mentions competing risks such as death
+
+  - type: think
+    interview: true
+    prompt: |
+      "In a trial, the KM curves cross at about 8 months and the log-rank p-value is 0.40. The
+      team concludes the treatment has no effect. How do you respond?"
+    model_answer: |
+      A non-significant log-rank test isn't evidence of no effect, and crossing curves are the
+      classic case where it loses power. It sums observed minus expected events over time, so
+      early excess events in one arm cancel late deficits. The curves suggest early harm and
+      later benefit, which is clinically plausible for something like a procedure or a potent
+      antithrombotic. I'd describe the pattern rather than a single number: event
+      probabilities at clinically relevant times with CIs, and an RMST difference over a
+      horizon with enough patients at risk. If it was pre-specified, a weighted log-rank or
+      max-combo test would be appropriate. If it wasn't, I'd present these as post hoc and
+      avoid claiming significance. I'd also look for a mechanism, for example whether the early
+      events are bleeds or procedure-related, and whether the late separation rests on few
+      patients at risk. For future trials, I'd pre-specify a summary that doesn't depend on
+      proportional hazards.
+    key_points:
+      - Absence of significance is not evidence of no effect
+      - Crossing curves make observed-minus-expected contributions cancel, so log-rank loses power
+      - Proposes fixed-time differences and RMST instead of one HR or p-value
+      - Distinguishes pre-specified from post hoc analyses
+      - Checks the mechanism and the numbers at risk in the tail
+
+  - type: laptop
+    title: KM curves for the simulated trial
+    repo_path: 04-clinical-trials-survival/src/km_analysis.py
+    task: |
+      Extend `04-clinical-trials-survival/src/simulate_trial.py` (from lesson 1) to add
+      exponential stroke times (about 10% 12-month risk on aspirin, HR 0.75 for zetagrel),
+      staggered administrative censoring between 12 and 30 months, and about 5% per year
+      dropout. Write `data/adtte.parquet`. Then create `src/km_analysis.py` that plots KM
+      curves with `add_at_risk_counts`, prints 12-month event probabilities with CIs, the
+      log-rank p-value, and the RMST difference at 24 months. Finally, write your own 10-line
+      KM function and assert that it matches `survival_function_` on the tiny 8-patient example.
+
+  - type: recap
+    points:
+      - Survival data is a **(time, event)** pair; censoring is partial information, not missing data to discard
+      - Counting censored patients as event-free biases risk down, and dropping them biases it up
+      - KM multiplies (1 − d/n) over event times, and censored patients leave the risk set at their censoring time
+      - "**Non-informative censoring** is an untestable assumption, so check who is censored and why"
+      - Read KM plots with the numbers at risk; the tail rests on few patients
+      - Median survival is the first time S(t) ≤ 0.5, and in prevention trials it's often not reached
+      - Log-rank tests equality of curves, gives no effect size, and loses power when curves cross
+      - "**RMST** = average event-free time up to τ, which stays interpretable without proportional hazards"

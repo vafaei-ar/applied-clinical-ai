@@ -1,0 +1,425 @@
+id: m07-03-telling-your-story
+title: "Telling your story: portfolio, evidence, and interviews"
+summary: Turn this repo's projects into crisp evidence statements, answer behavioural questions with
+  STAR, give a 2-minute walkthrough, and handle technical deep dives.
+minutes: 25
+status: authored
+why_it_matters: Skills only count if you can communicate them. Two candidates with the same project get
+  very different offers depending on how specifically and honestly they describe it.
+objectives:
+  - Write resume-ready evidence statements tied to real artifacts in the repo
+  - Use STAR for behavioural answers, with the weight on your actions
+  - Prepare a 2-minute project walkthrough and depth ladders for deep-dive follow-ups
+  - Ask interviewers questions that show judgment
+key_points:
+  - Specific beats impressive
+  - Own the limitations before the interviewer finds them
+  - Tie every claim to evidence in the repo (a file, a test, a figure, a CI run)
+  - Spend walkthrough time on decisions and trade-offs, not on tools
+tags: [career, interview]
+steps:
+  - type: text
+    title: Same project, two candidates
+    text: |
+      Both built Module 01. The interviewer asks, "Tell me about a project."
+
+      **Candidate A**: "I built an end-to-end clinical data pipeline using SQL, Python, DuckDB,
+      and pytest to predict stroke readmissions with AI."
+
+      **Candidate B**: "I built an index ischemic-stroke cohort from eight synthetic EHR and
+      claims tables. The hardest part was a leakage trap: some diagnoses were recorded weeks
+      after their encounter, so filtering prior diagnoses on encounter date would have leaked
+      post-index information. I filtered on the diagnosis date instead, with a strict cut-off
+      at the index date, and wrote a test that fails if any feature source row is on or after
+      it."
+
+      A listed tools and claimed an outcome the project doesn't have (it builds a label, not a
+      model). B named a decision, the reason, and how they verified it. Interviewers hire B.
+
+  - type: text
+    title: What interviewers listen for
+    text: |
+      Across data science, ML engineering, and research roles, the questions differ but the
+      signals are the same:
+
+      - **Ownership**: what did _you_ decide and do?
+      - **Specificity**: concrete numbers, table names, failure cases
+      - **Judgment**: trade-offs you considered and why you chose one
+      - **Verification**: how you know it's right (tests, validation, checks)
+      - **Honesty**: limitations stated plainly, and "I don't know" when true
+
+      Everything in this lesson is a way to deliver those five signals quickly.
+
+  - type: text
+    title: The evidence statement
+    text: |
+      The repo README asks for "one concise resume-ready evidence statement" per project. A
+      reliable formula:
+
+      **Verb + what you built + scale or constraint + how you verified it + result**
+
+      For Module 01, using only what the repo actually contains:
+
+      _"Built a reproducible DuckDB pipeline that generates 5,000 synthetic patients across 8
+      EHR/claims tables and derives an index ischemic-stroke cohort (age 18+, 365-day
+      continuous coverage) with leakage-safe pre-index features and a 30-day readmission label,
+      with pytest checks for eligibility, uniqueness, and coverage rules."_
+
+      Add numbers you've measured yourself, such as the cohort size and the count of injected
+      data-quality issues your checks detected. Don't add numbers you haven't.
+
+  - type: quiz
+    question: Which evidence statement is best for a resume?
+    options:
+      - Leveraged cutting-edge AI to transform stroke care outcomes
+      - Proficient in SQL, DuckDB, Python, pytest, Ruff, and GitHub Actions
+      - Deployed a stroke readmission model used by clinicians to reduce readmissions
+      - Built a tested DuckDB cohort pipeline over 8 synthetic EHR/claims tables, with checks that detected injected duplicates and late-recorded diagnoses
+    answer: 3
+    explanation: |
+      D says what was built, the scale, and how it was verified, and every word can be backed by
+      the repo. A is hype with no content. B is a tool list, which belongs in a skills line, not
+      an evidence statement. C is the dangerous one: it claims deployment and clinical impact
+      that a synthetic-data project doesn't have, and one follow-up question exposes it.
+
+  - type: text
+    title: Specific beats impressive
+    text: |
+      A synthetic dataset isn't a weakness if you frame it correctly. It's a **controlled
+      environment**: the defects are known, so you can prove your checks catch them.
+
+      Compare:
+
+      - Weak: "I worked with EHR data." (Vague, and invites "which EHR? what data?")
+      - Strong: "I used synthetic data with injected defects, including duplicate diagnosis
+        rows, missing discharge times, coverage gaps, and late-recorded diagnoses, and wrote
+        checks that detect each one."
+
+      And **own the limitations first**: "It's synthetic, so the clinical relationships are
+      simplified. What transfers is the cohort logic, the leakage discipline, and the tests."
+      Saying that before the interviewer does reads as confident, not defensive.
+
+  - type: text
+    title: Templates for the later modules
+    text: |
+      Fill the brackets only with numbers you've actually produced:
+
+      - **M02**: "Trained a [model] for 30-day readmission on the M01 cohort. On a temporal
+        holdout: AUROC [x] (95% CI [a–b]), calibration slope [y], and subgroup gaps of [z] by
+        [group]. Beat a logistic regression baseline by [d]."
+      - **M03**: "Served the model as a FastAPI service in Docker with input validation,
+        [n] tests, and CI on every push. Deployed to [platform] with health checks and a drift
+        report on [features]."
+      - **M04**: "Analysed a synthetic trial of time to recurrent stroke with Kaplan–Meier and
+        Cox models, checked proportional hazards, and emulated a target trial from observational
+        data."
+      - **M05**: "Built an evaluation harness for a guideline RAG assistant: [n] golden
+        questions, retrieval recall@5 of [x], faithfulness of [y], and abstention on [z]% of
+        unanswerable questions."
+
+  - type: think
+    prompt: |
+      Write your own evidence statement for Module 01 (or whichever module you've finished).
+      Use the formula, and make sure every claim points to something in the repo.
+    model_answer: |
+      "Built a reproducible DuckDB pipeline over 8 synthetic EHR/claims tables (5,000 patients)
+      that derives an index ischemic-stroke cohort of [N] patients using ROW_NUMBER index-event
+      selection, age and 365-day continuous-coverage eligibility, and leakage-safe pre-index
+      features filtered on diagnosis date. Added pytest checks for uniqueness, age, coverage,
+      and pre-index windows, and quality checks that detected [k] injected duplicate diagnoses
+      and [m] late-recorded diagnoses."
+    key_points:
+      - Starts with a strong verb and names what was built
+      - Includes scale (tables, patients) and a cohort count you measured
+      - Names at least one specific technical decision (e.g., filtering on diagnosis date)
+      - States how it was verified (tests, quality checks)
+      - Makes no claims the repo can't back up (no deployment or clinical impact)
+
+  - type: text
+    title: Tie every claim to evidence
+    text: |
+      The repo's `SKILLS_MATRIX.md` has the right rule: _a skill is marked complete only when
+      there is visible technical evidence in the repository_.
+
+      Before an interview, make a private table: claim, then the file that proves it.
+
+      - "Leakage-safe features": `sql/02_features.sql` (strict `<` on `diagnosis_date`)
+      - "Cohort eligibility tests": `tests/test_pipeline.py`
+      - "Data-quality checks": `sql/00_quality_checks.sql`
+      - "Calibration" (M02): a reliability diagram in the repo, with the code that made it
+
+      If a claim has no file, either build the evidence or drop the claim. Interviewers
+      increasingly open your GitHub during the call.
+
+  - type: text
+    title: STAR for behavioural questions
+    text: |
+      "Tell me about a time..." questions want a story. STAR gives it a shape:
+
+      - **Situation**: one or two sentences of context
+      - **Task**: what you were responsible for
+      - **Action**: what _you_ did, step by step, with the reasoning
+      - **Result**: what happened, with a number if possible, and what you learned
+
+      Weight it toward **Action**, roughly 60% of the time. Say "I", not "we", for your own
+      part. End with a short reflection ("next time I'd write the test first"), which shows
+      that you learn from experience.
+
+  - type: quiz
+    question: |
+      A candidate's 2-minute answer spends 70 seconds on the hospital's background and the
+      project's history, 30 seconds on what they did, and 20 seconds on the result. What's
+      the best fix?
+    options:
+      - Cut the Situation to one or two sentences and spend most of the time on Action and its reasoning
+      - Skip the Result, since interviewers care about process
+      - Add more technical terms to the Action
+      - Speak faster to fit more in
+    answer: 0
+    explanation: |
+      Context matters only as much as the listener needs to follow the actions. Most weak STAR
+      answers are mostly Situation. Cutting it to a sentence or two frees time for what you did
+      and why, which is what's being assessed. The Result (B) is where you show impact, and
+      extra jargon (C) doesn't add signal.
+
+  - type: text
+    title: A STAR story from this course
+    text: |
+      _"Tell me about a time you found a problem in data others trusted."_
+
+      - **S**: "Building a stroke cohort from EHR-style data, where prior diagnoses were
+        features for a readmission model."
+      - **T**: "I owned the feature SQL and had to make sure nothing leaked from after the index
+        date."
+      - **A**: "I ran quality checks first and found diagnoses recorded more than 14 days after
+        their encounter started. The obvious filter was on encounter date, which would have
+        counted those late diagnoses as prior history. I switched to filtering on the diagnosis
+        date with a strict cut-off at the index date, and wrote a test that fails if any
+        feature source row is on or after the index date. I checked it by changing `<` to `<=`
+        and confirming the test failed."
+      - **R**: "The feature table now has zero post-index rows by test, and [n] patients'
+        prior-AF values changed. Next time I'd write the leakage test before the feature."
+
+      This is the leakage story from Module 01, lesson 5, told as an interview answer.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Tell me about a time you caught a mistake that would have affected your results."
+    model_answer: |
+      In my stroke cohort project, I was building pre-index features for a readmission model,
+      and I owned the feature SQL. Before writing features, I ran data-quality checks and found
+      diagnoses recorded more than two weeks after their encounter began.
+
+      The natural way to build "prior atrial fibrillation" was to join on encounters before the
+      index date. But that would have included diagnoses that were only entered into the system
+      after the index stroke, which is information the model couldn't have had at prediction
+      time. I changed the filter to the diagnosis date with a strict less-than, and I put the
+      window conditions in the join so patients without history kept their rows.
+
+      Then I wrote a test asserting that no feature source row is on or after the index date,
+      and confirmed it fails if I loosen the comparison. The result was a feature table with
+      zero post-index information, verified by test rather than by trust. What I took from it:
+      look at the data's timestamps before writing features, and write the leakage test first.
+    key_points:
+      - Short situation, clear personal ownership
+      - Explains the specific mistake and why it mattered (post-index information)
+      - Describes concrete actions with reasoning (diagnosis date, strict cut-off, join placement)
+      - Verifies the fix with a test, including checking that the test can fail
+      - Ends with a result and a lesson learned
+
+  - type: image
+    image: m07-03-walkthrough.png
+    caption: |
+      A 2-minute walkthrough budget. The biggest block goes to the hardest decision. Stop before
+      two minutes and let the interviewer pick where to dig.
+
+  - type: text
+    title: The 2-minute walkthrough
+    text: |
+      A script for the stroke project:
+
+      - **Problem (15 s)**: "Readmission after stroke is common and costly. I built the data
+        foundation for a readmission model: the cohort, features, and label."
+      - **Data and cohort (20 s)**: "Eight synthetic EHR and claims tables. Index event is the
+        first ED or inpatient ischemic stroke, age 18 or older, with 365 days of continuous
+        coverage."
+      - **Hardest decision (35 s)**: the leakage story, or the readmission window. Explain the
+        options and why you chose one.
+      - **Result (20 s)**: "A cohort of [N], features with zero post-index rows by test, and CI
+        running the checks."
+      - **Limitations and next step (20 s)**: "It's synthetic, and the readmission window is
+        anchored on admission because discharge times are missing. Next I'm training and
+        calibrating the model on it."
+
+      Then stop. Leaving obvious threads (the readmission window) invites the deep dive you've
+      prepared for.
+
+  - type: quiz
+    question: Where should most of a 2-minute project walkthrough go?
+    options:
+      - Listing the tech stack, so the interviewer can match it to the job description
+      - The background of the clinical problem
+      - The hardest decision you made, the options you considered, and why you chose one
+      - Future work
+    answer: 2
+    explanation: |
+      Decisions and trade-offs are where judgment shows, and judgment is what separates levels.
+      The stack (A) comes across in passing ("in DuckDB") or in the follow-ups. Background (B)
+      needs a sentence. Future work (D) is worth a sentence at the end, to show you know what's
+      missing.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through a project you're proud of." (Answer in about 2 minutes, out loud if you
+      can, then type the outline.)
+    model_answer: |
+      "I built the data foundation for a 30-day readmission model after ischemic stroke. The
+      data was synthetic, eight EHR and claims tables for 5,000 patients, deliberately seeded
+      with real-world defects.
+
+      The cohort is the first ED or inpatient stroke encounter per patient, adults only, with
+      365 days of continuous coverage so every patient has a full lookback window. The hardest
+      decision was about time. Some diagnoses were recorded weeks after their encounter, so
+      filtering history on encounter date would leak post-index information. I filtered on
+      diagnosis date with a strict cut-off and wrote a test that fails on any post-index row.
+
+      A second trade-off: discharge times are sometimes missing, so I anchored the readmission
+      window on admission, which slightly shortens follow-up for long stays. I documented it
+      and would run a sensitivity analysis on the discharge-anchored version.
+
+      The result is a cohort of [N] patients with tested eligibility and leakage checks in CI.
+      The main limitation is that it's synthetic, so the next step is training and calibrating
+      a model on it and, ideally, repeating the pipeline on a real dataset like MIMIC."
+    key_points:
+      - States the problem and scope in one or two sentences
+      - Describes the data and cohort definition concretely
+      - Spends the most time on a hard decision and its trade-off
+      - Gives a verifiable result
+      - Names limitations and a next step without being asked
+
+  - type: text
+    title: Deep dives go four levels down
+    text: |
+      Interviewers pick one thread and keep asking "why?". Prepare **depth ladders** for three
+      decisions. For each, know:
+
+      1. **What** you did
+      2. **Why**, and the alternatives you considered
+      3. **The trade-off**, and what it costs
+      4. **The evidence**: how you'd know if it was the wrong choice
+
+      Good candidates from Module 01:
+
+      - The readmission window anchored on admission instead of discharge
+      - The 365-day continuous-coverage rule (complete lookback, but it excludes people with
+        coverage gaps)
+      - Excluding index-day data with a strict `<` (safe, but it may drop useful ED labs)
+
+  - type: quiz
+    question: |
+      The interviewer asks: "Why is your readmission window 30 days from admission? The
+      standard definition is from discharge." What's the strongest answer?
+    options:
+      - "It's simpler to implement, and the difference is small."
+      - "You're right, I should have used discharge. I'll fix it."
+      - "Discharge times are missing for some encounters, so I anchored on admission and documented that it shortens follow-up for long stays. I'd run a discharge-anchored sensitivity analysis, imputing or excluding the missing ends."
+      - "Admission-anchored windows are the standard in research."
+    answer: 2
+    explanation: |
+      C acknowledges the standard, gives the real reason (missing `encounter_end`), names the
+      cost, and proposes how to check it. A is a guess with no evidence. B gives up a defensible
+      choice without explaining it. D is false: the common CMS-style definition counts from
+      discharge. Confidently wrong is the worst outcome in a deep dive.
+
+  - type: text
+    title: When you don't know
+    text: |
+      Deep dives are meant to reach the edge of what you know. What matters is how you behave
+      there:
+
+      - **Say so plainly**: "I haven't done that directly."
+      - **Reason from principles**: "My understanding is that X works because Y, so I'd expect..."
+      - **Say how you'd find out**: "I'd check it by..."
+
+      Bluffing is the one unrecoverable mistake. Clinical teams care about it a lot, because
+      the same habit in production means a confident wrong answer about patient data.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your project uses synthetic data. Why should I believe any of it transfers to real EHR
+      data?"
+    model_answer: |
+      That's a fair challenge, and I'd separate what transfers from what doesn't. The clinical
+      relationships don't. The synthetic effect sizes and distributions are simplified, so I
+      wouldn't claim anything about real readmission risk from it.
+
+      What does transfer is the engineering and the reasoning. The defects are the ones real EHR
+      data has: duplicate diagnosis rows, missing discharge times, coverage gaps, and diagnoses
+      recorded after the fact. Because they were injected deliberately, I could prove my checks
+      catch them, which is harder to do on real data where you don't know the ground truth. The
+      cohort logic, the time-zero discipline, and the tests would apply unchanged to a real
+      schema.
+
+      To close the gap, I'd rerun the pipeline on an open dataset like MIMIC-IV or on an OMOP
+      instance, map the schema (which is part of the course's standards module), and compare
+      the defect rates and cohort attrition with what I saw here.
+    key_points:
+      - Concedes that clinical relationships and effect sizes don't transfer
+      - Explains that the defects mirror real EHR problems
+      - Notes that known, injected defects let you prove the checks work
+      - Says the cohort logic, leakage discipline, and tests transfer to real schemas
+      - Proposes a concrete next step on real or open data
+
+  - type: text
+    title: Questions to ask them
+    text: |
+      Your questions are part of the assessment. Ask ones that only someone who has done this
+      work would think of:
+
+      - **Data**: "How are outcome labels defined for your models, and who signs off on them?"
+      - **Deployment**: "How many models are live today, and what happens when one drifts? Who
+        gets paged?"
+      - **Evidence**: "How do you decide a model is worth deploying? Has anything gone through
+        silent mode or a prospective evaluation?"
+      - **Team**: "How do clinicians take part day to day, as advisors or as members of the
+        team?"
+      - **Success**: "What would a great first six months look like for this role?"
+
+      Avoid questions the website answers, and save compensation for the recruiter.
+
+  - type: quiz
+    question: Which question to an interviewer signals the most relevant experience?
+    options:
+      - What tech stack do you use?
+      - Is remote work possible?
+      - How big is the data science team?
+      - When a deployed model's performance drops, how do you find out, and who decides whether to retrain or roll back?
+    answer: 3
+    explanation: |
+      D shows you know models degrade after deployment and that ownership of that decision is
+      often unclear, which is a real pain point. The answer also tells you how mature their
+      MLOps is. A and C are fine but generic, and B is for the recruiter.
+
+  - type: laptop
+    title: Add an evidence section to the Module 01 README
+    repo_path: 01-clinical-data-engineering/README.md
+    task: |
+      Add an "Evidence" section at the end of `01-clinical-data-engineering/README.md` with your
+      one-sentence evidence statement and 3–5 bullets, each linking a claim to a file (SQL,
+      test, or check). Fill in real numbers from your run (cohort size, detected duplicates and
+      late diagnoses). Then update `SKILLS_MATRIX.md`, marking a skill complete only if one of
+      your bullets proves it.
+
+  - type: recap
+    points:
+      - "Evidence statement = verb + what you built + scale + how you verified it + result"
+      - "**Specific beats impressive**: never claim deployment or impact the repo can't show"
+      - Frame synthetic data as a controlled environment, and state its limits first
+      - Map every claim to a file, a test, or a figure
+      - "STAR, weighted toward **Action**, in the first person, with a lesson learned"
+      - "2-minute walkthrough: most time on the hardest decision, then stop"
+      - "Depth ladders: what, why, trade-off, evidence. And never bluff"
+      - Ask questions about labels, drift, evidence, and ownership

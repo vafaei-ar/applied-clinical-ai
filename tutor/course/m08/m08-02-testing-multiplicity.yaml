@@ -1,0 +1,514 @@
+id: m08-02-testing-multiplicity
+title: P-values, multiplicity, and subgroup fishing
+summary: What a p-value is and is not, FWER versus FDR, Holm and Benjamini-Hochberg, why unplanned subgroup analyses mislead, and how to test interactions and non-inferiority properly.
+minutes: 25
+status: authored
+why_it_matters: Clinical evidence, and ML model audits too, are full of over-interpreted p-values and post hoc
+  slices. Being precise about what a p-value says and what multiplicity does to it is a fast signal of
+  rigor in interviews and in review.
+objectives:
+  - State what a p-value means and list the common misinterpretations
+  - Distinguish family-wise error rate from false discovery rate and pick a correction
+  - Explain why unplanned subgroup analyses produce false positives (ISIS-2 astrological signs)
+  - Design interaction tests and pre-specified subgroups instead of fishing
+  - Explain non-inferiority margins and one- vs two-sided tests
+key_points:
+  - p is the probability of data this extreme given the null and the model, not the probability the null is true
+  - With K independent true nulls, the chance of at least one p < 0.05 is 1 - 0.95^K
+  - Holm dominates Bonferroni; BH controls FDR under independence or positive dependence
+  - Test for interaction, don't compare p-values across subgroups
+  - Model audits multiply tests too (subgroups, thresholds, metrics, time windows)
+  - Absence of significance is not evidence of equivalence
+tags: [statistics, multiplicity, subgroups, interview]
+steps:
+  - type: text
+    title: Three red flags out of forty
+    text: |
+      The model audit for the readmission model slices performance by payer, race and ethnicity,
+      sex, age band, facility, stroke severity, and a dozen other columns. Forty subgroup levels in
+      all. Three come back "significantly worse than the rest, p < 0.05".
+
+      The fairness lead wants to write "the model underperforms for these three groups". The
+      statistician on the team says "that's about what forty slices give you by chance". (The
+      numbers here are invented, the pattern is not.)
+
+      Both can be partly right. This lesson gives you the arithmetic to tell them apart, the tools
+      to correct for it, and the vocabulary for explaining it in an interview. Trial teams call it
+      **multiplicity**. The exact same problem lives in your evaluation notebooks.
+
+  - type: text
+    title: What a p-value is, precisely
+    text: |
+      A p-value is the probability, **computed assuming the null hypothesis and every other
+      modelling assumption are true**, of getting a test statistic at least as extreme as the one
+      observed.
+
+      Note what is inside "every other assumption": independence of observations, the
+      distribution used, and even the **sampling plan** (how many looks you took at the data).
+      A small p-value can signal a false null, but also a violated assumption.
+
+      The ASA statement on p-values (Wasserstein and Lazar, The American Statistician 2016)
+      lists six principles. The two interviewers quote most:
+
+      - p-values do **not** measure the probability that the studied hypothesis is true, or the
+        probability that the data were produced by chance alone;
+      - a p-value does **not** measure the size of an effect or the importance of a result.
+
+      Two more facts worth having ready. If the null is true and the test is exact with a
+      continuous statistic, p is **uniformly distributed** between 0 and 1, so 5% of true nulls
+      give p < 0.05 at any sample size. And alpha (0.05) is a property of a **decision rule fixed
+      before the data**, while p is a summary of the data you got.
+
+  - type: quiz
+    question: |
+      A well-run randomized trial reports p = 0.03 for the treatment effect. Which statement is
+      correct?
+    options:
+      - There is a 3% probability that the drug has no effect
+      - If the drug had no effect and the model's assumptions held, data at least this extreme would occur about 3% of the time
+      - There is a 97% chance that a repeat trial will also be significant
+      - The effect is large enough to matter clinically
+    answer: 1
+    explanation: |
+      The p-value is a statement about the **data given the null**. The first option turns it
+      around (probability of the hypothesis given the data), which needs a prior and a Bayesian
+      calculation. The third confuses p with replicability: even if the true effect is exactly what
+      was observed, a repeat trial of the same size has only about a 60% chance of reaching
+      p < 0.05, not 97%.
+      The fourth confuses statistical significance with importance: with enough patients, a
+      trivial effect gets p = 0.03 too.
+
+  - type: quiz
+    question: |
+      Predict first. You test 20 subgroups, and in truth the treatment does nothing in any of
+      them. The tests are independent and each uses alpha = 0.05. What is the chance that at
+      least one subgroup shows p < 0.05?
+    options:
+      - 5%, because each test only has a 5% error rate
+      - About 25%
+      - About 64%
+      - About 95%
+    answer: 2
+    explanation: |
+      Each test stays clean with probability 0.95, so all 20 stay clean with probability
+      0.95²⁰ ≈ 0.36, and at least one false positive has probability 1 − 0.36 ≈ **0.64**. The 5%
+      answer confuses the per-test error rate with the error rate of the whole family. "About
+      95%" would need roughly 60 tests. The next steps show it by simulation.
+
+  - type: code
+    title: Twenty null subgroups, ten thousand studies
+    language: python
+    text: Simulate studies where every subgroup effect is exactly zero.
+    code: |
+      import numpy as np
+      from math import erfc, sqrt
+
+      rng = np.random.default_rng(0)
+      k, n = 20, 10_000                  # 20 subgroups, all with zero true effect
+      z = rng.normal(size=(n, k))        # test statistics under the null
+      p = np.vectorize(lambda v: erfc(abs(v) / sqrt(2)))(z)   # two-sided p-values
+      best = p.min(axis=1)               # the "most significant" subgroup per study
+
+      print("studies with any p < 0.05:", (best < 0.05).mean())
+      print("median best-of-20 p-value:", np.median(best).round(3))
+    after: |
+      Output: `studies with any p < 0.05: 0.6469` and `median best-of-20 p-value: 0.034`.
+
+      The first matches 1 − 0.95²⁰. The second is the sobering one: in a study where **nothing
+      works**, the typical "best subgroup" already has p = 0.034, a headline-ready number. If
+      the only subgroup you report is the best one, the p-value is not a p-value any more.
+
+  - type: image
+    image: m08-02-subgroup-false-positives.png
+    caption: |
+      Simulated: every true effect is zero, 10,000 studies per point. Without correction the chance
+      of at least one false-positive subgroup climbs to 46% at 12 subgroups, 64% at 20, and 87% at 40 subgroups.
+      With Holm (or Bonferroni, or Benjamini-Hochberg, which coincide under the global null)
+      it stays near 5% at any K.
+
+  - type: text
+    title: Two error rates you can control
+    text: |
+      Correction methods target one of two notions of "error across a family of tests":
+
+      - **FWER** (family-wise error rate): the probability of **at least one** false rejection.
+        It is the strict, confirmatory standard: "we claim these effects, and the chance any
+        claim is false is at most 5%".
+      - **FDR** (false discovery rate): the **expected proportion** of false rejections among
+        the rejections, `E[V / max(R, 1)]`. It is the screening standard: "of the things we flag
+        for follow-up, about 5% will be duds".
+
+      Use **FWER** when each claim carries weight on its own: co-primary endpoints, a label
+      claim, a clinical guideline. Use **FDR** when you screen many candidates and will confirm
+      later: biomarker panels, feature screening, hypothesis-generating subgroup scans.
+
+      FDR is not "a looser FWER with the same meaning". A controlled FDR of 5% still allows a
+      high probability that **at least one** flagged finding is false when you flag many.
+
+  - type: text
+    title: The four procedures you should be able to do by hand
+    text: |
+      Sort the m p-values: `p(1) ≤ p(2) ≤ … ≤ p(m)`.
+
+      - **Bonferroni.** Reject if `p ≤ α/m`. FWER control under **any** dependence. Simple and
+        the most conservative.
+      - **Holm** (step-down, Holm 1979). Reject `p(1)` if `p(1) ≤ α/m`, then `p(2)` if
+        `p(2) ≤ α/(m−1)`, and so on; **stop at the first failure**. Also FWER control under any
+        dependence, and **never less powerful than Bonferroni**. There is no reason to prefer
+        Bonferroni other than habit.
+      - **Hochberg** (step-up). Finds the largest `i` with `p(i) ≤ α/(m−i+1)` and rejects all
+        up to it. More powerful than Holm, but valid under independence or certain positive
+        dependence only.
+      - **Benjamini-Hochberg** (step-up, 1995). Find the largest `k` with `p(k) ≤ (k/m)·q` and
+        reject the `k` smallest. Controls FDR at `q` under independence and under positive
+        regression dependence (Benjamini and Yekutieli, 2001). The Benjamini-Yekutieli variant
+        divides by `1 + 1/2 + … + 1/m` and is valid under **any** dependence, at a cost in power.
+
+      Step-up procedures look for the **largest** passing index, so a p-value can be rejected
+      even when a smaller one is not. Step-down ones stop early.
+
+  - type: quiz
+    question: |
+      Six hypotheses give p-values 0.001, 0.008, 0.012, 0.030, 0.041, 0.20, all tested at 0.05.
+      How many does each procedure reject?
+    options:
+      - Bonferroni 2, Holm 3, Benjamini-Hochberg 5
+      - Bonferroni 2, Holm 2, Benjamini-Hochberg 2
+      - Bonferroni 3, Holm 3, Benjamini-Hochberg 3
+      - Bonferroni 5, Holm 5, Benjamini-Hochberg 5
+    answer: 0
+    explanation: |
+      Bonferroni: the cut-off is 0.05/6 = 0.0083, so only 0.001 and 0.008 pass (2). Holm:
+      cut-offs 0.0083, 0.010, 0.0125, 0.0167, …; the first three pass (0.012 ≤ 0.0125) and 0.030
+      fails, so it stops at 3. BH: cut-offs are 0.0083, 0.0167, 0.025, 0.0333, 0.0417, 0.05, and
+      the largest k with p(k) under its cut-off is k = 5 (0.041 ≤ 0.0417), so five are rejected,
+      even though 0.030 and 0.041 would have failed under Holm. More power, at the price of
+      controlling FDR instead of FWER.
+
+  - type: code
+    title: Adjusted p-values in numpy
+    language: python
+    text: |
+      Interviewers like "implement BH". Adjusted p-values let you compare directly with alpha.
+    code: |
+      import numpy as np
+
+      def holm_adj(p):
+          p = np.asarray(p, float); m = len(p); o = np.argsort(p)
+          adj = np.minimum(1, (m - np.arange(m)) * p[o])    # p(i) * (m - i + 1)
+          out = np.empty(m)
+          out[o] = np.maximum.accumulate(adj)               # keep it monotone
+          return out
+
+      def bh_adj(p):
+          p = np.asarray(p, float); m = len(p); o = np.argsort(p)
+          adj = np.minimum(1, p[o] * m / np.arange(1, m + 1))   # p(i) * m / i
+          out = np.empty(m)
+          out[o] = np.minimum.accumulate(adj[::-1])[::-1]       # monotone from the top
+          return out
+
+      p = [0.001, 0.008, 0.012, 0.030, 0.041, 0.20]
+      print(holm_adj(p).round(3))   # [0.006 0.04  0.048 0.09  0.09  0.2  ]
+      print(bh_adj(p).round(3))     # [0.006 0.024 0.024 0.045 0.049 0.2  ]
+    after: |
+      Reject where the adjusted p-value is at most 0.05: three for Holm, five for BH, matching the
+      quiz. In practice use `statsmodels.stats.multitest.multipletests(p, alpha=0.05,
+      method="holm")` or `method="fdr_bh"`. It returns `(reject, pvals_corrected, alphacSidak,
+      alphacBonf)`. **Always pass `method` explicitly**: its default is `"hs"` (Holm-Sidak),
+      which is not what most people expect.
+
+  - type: image
+    image: m08-02-correction-tradeoff.png
+    caption: |
+      Simulated: 50 tests, 10 with a real effect (test statistic shifted by 3 standard errors),
+      40 true nulls, 10,000 studies. No correction finds the most real effects but averages 2
+      false findings per study. Holm is slightly better than Bonferroni. BH finds about 6 of the 10
+      with 0.3 false findings on average, trading a little error for a lot of power.
+
+  - type: quiz
+    question: |
+      Team A screens 400 candidate biomarkers to decide which 15 to validate in a next study.
+      Team B tests three co-primary endpoints to support a regulatory efficacy claim. Which
+      corrections fit?
+    options:
+      - Bonferroni for both, because it is the safest
+      - Benjamini-Hochberg for both, because FDR is always the better error rate
+      - No correction for the screen, since it is only exploratory, and Holm for the claims
+      - Benjamini-Hochberg (FDR) for the screen, and Holm or a pre-specified hierarchy (FWER) for the claims
+    answer: 3
+    explanation: |
+      A screen feeds a confirmation step, so tolerating a small proportion of duds in exchange for
+      power is sensible: FDR. A regulatory claim must limit the chance of any false claim: FWER,
+      with Holm, a fixed-sequence hierarchy, or a graphical procedure, pre-specified in the
+      protocol. Bonferroni for the 400-biomarker screen throws away most real signals. No
+      correction at all on 400 tests would hand you about 20 false leads by chance.
+
+  - type: text
+    title: The multiplicity you did not count
+    text: |
+      ICH E9 (Statistical Principles for Clinical Trials, 1998) says that in confirmatory
+      analyses any remaining multiplicity should be identified in the protocol, with adjustment
+      considered. Check the current ICH versions, since the guidance family has been extended
+      since 1998 (for example the 2019 estimands addendum E9(R1)).
+
+      ML evaluation breeds multiplicity that never appears as a "test":
+
+      - **Subgroups**: every column you might slice on.
+      - **Thresholds and windows**: 4 alert thresholds × 3 time windows × 5 subgroups is 60
+        cells, and the best cell looks impressive.
+      - **Metrics**: AUROC, AUPRC, sensitivity, PPV, each "tried" until one works.
+      - **Model variants and seeds**: Module 02's leaderboard warning is the same problem.
+      - **Analysis choices made after seeing data**: exclusion rules, imputation, cut-points.
+
+      Gelman and Loken called this the **garden of forking paths**: even with no deliberate
+      fishing, choices that depend on the data silently multiply the comparisons. The defence is
+      to write the evaluation plan **before** the run: which subgroups, which metric, which
+      threshold, which correction. Then anything else is labelled exploratory.
+
+  - type: text
+    title: Subgroups, ISIS-2, and what the literature says
+    text: |
+      Subgroup analyses mislead for three reasons: each is **underpowered**, there are **many**
+      of them, and people often use the **wrong test** (next steps).
+
+      The classic demonstration is ISIS-2 (Lancet 1988), a large trial of aspirin and
+      streptokinase after suspected heart attack. The authors reported that for patients born
+      under **Gemini or Libra** aspirin looked slightly adverse on mortality (a 9% increase, SD 13,
+      not significant), while for all other astrological signs it was strikingly beneficial (a 28%
+      reduction, SD 5, p < 0.00001). They presented it as a warning about subgroup analysis.
+
+      How common are believable subgroup claims? A systematic review of 207 randomized trials
+      published in 2007 that reported subgroup analyses (Sun et al., BMJ 2012) found that 64 (31%)
+      made a claim about a subgroup effect on the primary outcome, and 84% of those claims met
+      **four or fewer of ten** credibility criteria. A subgroup result is a hypothesis, most of
+      the time.
+
+  - type: text
+    title: "Significant here, not significant there"
+    text: |
+      The most common subgroup error is not multiplicity. It is this sentence:
+
+      _"The drug works in men (HR 0.70, p = 0.01) but not in women (HR 0.85, p = 0.20)."_
+
+      The difference between "significant" and "not significant" is **not itself statistically
+      significant** (Gelman and Stern, The American Statistician 2006). Those two hazard ratios
+      are compatible with the **same** underlying effect: each subgroup has half the events of
+      the whole trial, so its interval is wide, and one can land on each side of 0.05 by noise.
+
+      The correct question is whether the effect **differs** between subgroups. That is a single
+      test of a **treatment × subgroup interaction**: the ratio of the two hazard ratios with
+      its confidence interval, from one model. If the interval for the ratio includes 1, you have
+      no evidence of a differential effect, whatever the separate p-values say.
+
+  - type: quiz
+    question: |
+      In a trial, the HR in men is 0.70 (p = 0.01) and in women 0.85 (p = 0.20). The interaction
+      test gives p = 0.45. What is the best conclusion?
+    options:
+      - The drug works in men and not in women, since only one subgroup is significant
+      - No evidence of a differential effect; the overall effect is the best estimate for both sexes
+      - The drug works in men, if men had more events than women
+      - Subgroup analyses are never valid, so ignore all of it
+    answer: 1
+    explanation: |
+      The interaction p = 0.45 says the data are entirely consistent with one common effect, and
+      the gap between 0.70 and 0.85 is within noise. Under a common true effect, the overall
+      estimate is the most precise for each subgroup. The third option keeps the logic of
+      "significant in one, not the other". The fourth overreacts: pre-specified subgroups with
+      interaction tests are informative. Testing each subgroup separately is what is wrong.
+
+  - type: quiz
+    question: |
+      Predict first. A trial has 80% power for its overall effect of 0.2 SD. Two equal halves of
+      the sample truly differ, with effects 0.3 and 0.1, so the interaction (0.2) is as large as
+      the overall effect. About how much power does the interaction test have at the same alpha?
+    options:
+      - About 80%
+      - About 60%
+      - About 29%
+      - About 5%
+    answer: 2
+    explanation: |
+      The standard error of the **difference between two half-sample estimates** is double the
+      standard error of the overall estimate (each half has half the data, and you add two
+      variances). Same effect size, half the z-score: for N = 785 the main test has 80% power
+      and the interaction test about 29%. You would need four times the sample (about 3,100) to
+      reach 80% for the interaction. (Computed with the normal approximation; continuous outcome,
+      SD 1, 1:1 randomization, equal subgroups.) Interactions are expensive to detect, so their
+      absence in an underpowered trial is weak evidence.
+
+  - type: text
+    title: Interaction tests done properly
+    text: |
+      A defensible subgroup analysis looks like this:
+
+      - **Pre-specify** a short list of subgroups with a reason for each (mechanism, prior
+        evidence), and the **direction** of the expected difference.
+      - Fit **one model** with treatment, subgroup, and their product. In a Cox model this is
+        `treatment * sex`. Report the interaction estimate (ratio of HRs) with its CI and p.
+      - Show a **forest plot** of subgroup effects **with the overall effect** and the
+        interaction p-values. Do not colour-code by significance.
+      - Adjust or at least count: state how many subgroup analyses were run.
+      - Treat a surprise as a **hypothesis** for another trial, dataset, or site. Credibility
+        checklists such as Sun et al. reward pre-specification, few subgroups, a significant
+        interaction test, consistency across related outcomes, and external replication.
+
+      For a model audit, the translation is: fix the list of subgroups in advance, report **all**
+      of them with event counts, test the gap with subgroup-versus-rest comparisons, and say what
+      correction (if any) you used.
+
+  - type: quiz
+    question: |
+      The audit script below flags 3 of 38 subgroup levels. What is the most defensible next step?
+    language: python
+    code: |
+      for col in ["sex", "race_ethnicity", "plan_type", "facility_id", "age_band"]:
+          for level, d in test_df.groupby(col):
+              lo, hi = auroc_ci(d["y"], d["p_hat"])
+              if hi < overall_auc:
+                  print(f"{col}={level}: model underperforms ({lo:.2f}-{hi:.2f})")
+    options:
+      - Report the three groups as biased and retrain with group-specific loss weights
+      - Drop the small subgroups so fewer comparisons remain
+      - Apply Bonferroni, and if none survives, conclude the model is fair
+      - Report all 38 with CIs and event counts, treat the three as hypotheses to check in another period or site, and do not read "no flag" as evidence of fairness
+    answer: 3
+    explanation: |
+      With 38 comparisons, a few flags are expected by chance (a simulation I ran of a model
+      that was identical in all 10 subgroups of a 4,000-patient cohort flagged at least one
+      subgroup in about 1 audit in 5, even with a conservative approximate test). So the flags
+      are leads, not verdicts. Dropping small groups hides the ones where the model may fail most.
+      And a corrected test with low power cannot certify fairness: absence of a flag is weak
+      evidence when a group has 20 events (Module 02).
+
+  - type: text
+    title: One-sided tests and non-inferiority
+    text: |
+      **Sidedness.** ICH E9 says the one-sided versus two-sided question is controversial, and
+      that setting the type I error of a one-sided test at **half** the conventional two-sided
+      level is **preferable in regulatory settings**, for consistency with two-sided confidence
+      intervals. So a "one-sided test at 0.025" corresponds to the usual two-sided 95% CI. A
+      one-sided test at 0.05 to claim superiority is a red flag.
+
+      **Non-inferiority.** Pre-specify a margin, justified by how much of the active comparator's
+      benefit you can afford to lose. NI is shown when the **one-sided interval's bound** lies
+      inside the margin (ICH E9 uses a one-sided interval for NI trials).
+
+      **Equivalence.** ICH E9 infers equivalence when the entire **two-sided** CI lies inside
+      the equivalence margins, which is operationally two one-sided tests (TOST).
+
+      Whichever you use, "no significant difference" is **not** a non-inferiority or
+      equivalence result. A p-value of 0.4 from a small study is compatible with a large
+      deficit.
+
+  - type: quiz
+    question: |
+      A triage AI is compared with radiologists on a small test set: sensitivity 88% vs 90%,
+      p = 0.40 for the difference. The authors conclude "AI is non-inferior". What is the right
+      reaction?
+    options:
+      - Non-inferiority needs a pre-specified margin and a CI bound inside it; p = 0.40 only says the data do not show a difference
+      - Correct, because p > 0.05 means the two are equivalent
+      - Correct if the AI had fewer false positives as well
+      - Incorrect, because non-inferiority can only be shown with a p-value below 0.05
+    answer: 0
+    explanation: |
+      Non-inferiority is a claim about a **bound**: the lower confidence limit of (AI − radiologist)
+      must exceed a margin chosen beforehand, such as −5 points. With a small test set the
+      interval for the difference could run from −15 to +10, which includes clinically
+      unacceptable deficits, and p = 0.40 would still appear. The fourth option mixes up the
+      tests: NI is judged against the margin, not against a p < 0.05 for a difference.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A realistic failure in ML evaluation.
+
+      A team runs the readmission model silently for three months next to the nurses' existing
+      referral rule. They compare PPV at **4 alert thresholds**, for **3 outcome windows**
+      (7, 14, 30 days), in **5 subgroups**. That is 60 comparisons. One cell, 14-day readmission
+      at the 10% alert rate in patients over 75, shows the model beating the rule with p = 0.01,
+      and it goes into the summary slide. Nobody mentions the other 59.
+
+      With 60 tests, about 3 would pass p < 0.05 by chance even if the model were exactly as good
+      as the rule. A single p = 0.01 among 60 survives **no** standard correction (Holm or
+      Bonferroni would need p ≤ 0.0008, BH about 0.0008 as well for a lone discovery).
+
+      The fix is procedural. The analysis plan named one primary comparison (PPV at the agreed
+      alert budget, 30-day outcome, everyone) before the silent period. The other 59 cells are
+      reported in a table as exploratory, with intervals and event counts, and nobody claims a win
+      from the best one.
+
+  - type: think
+    interview: true
+    prompt: |
+      A clinician reads your result, "p = 0.03", and asks: "So there's only a 3% chance this is
+      due to chance?" How do you answer?
+    model_answer: |
+      The 20-second version: not quite. The p-value is the probability of seeing data this
+      extreme **if** there were no real effect, so it is about the data given the null, not about
+      the probability that the null is true. It tells you how surprising the data are under "no
+      effect".
+
+      The deeper version: to get the probability that the effect is real, I'd need the prior
+      plausibility of the effect as well, and that is a Bayesian calculation. If most ideas in this
+      area fail, a p of 0.03 can still leave a high chance of a false finding, particularly if the
+      study was underpowered or if many comparisons were made. I'd also add what p-values don't
+      tell you: the size of the effect, for which I'd show the estimate and its interval, and
+      whether the analysis was pre-specified. I'd want to know how many things were tested before
+      this one was picked.
+    key_points:
+      - States that p is the probability of data at least this extreme given the null (and all assumptions), not the probability the null is true
+      - Notes that the real-effect probability needs a prior or context, and depends on power and prior plausibility
+      - Points to effect size and confidence interval as the informative quantity
+      - Mentions pre-specification and how many comparisons were made
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your model audit covers 40 subgroups and two of them come back significantly worse than the
+      rest at p < 0.05. What do you do before anyone writes that the model is biased?"
+    model_answer: |
+      The 20-second version: I'd say two out of forty is about what chance produces, so these are
+      leads to check, not findings. I'd report all forty with intervals and event counts.
+
+      The deeper version: first I'd check whether the subgroups were pre-specified, and how many
+      slices were looked at in total, including ones dropped along the way. Then I'd quantify the
+      multiplicity: at forty independent tests the expected number of false flags at 0.05 is two.
+      I'd apply Holm or BH depending on whether I'm making claims or screening, and report the
+      adjusted values. I'd check the effect size and calibration within those groups, not just the
+      discrimination, and look for a mechanism, such as missing history for one payer. Then I'd
+      try to replicate on another time period or site, because that is the real test. Finally I'd
+      be careful in the other direction: a subgroup with 20 events that shows no flag isn't proof
+      of fairness, just lack of power. A small-n subgroup could be shrunk toward the overall
+      estimate in a hierarchical model, which the Bayesian lesson covers.
+    key_points:
+      - Recognises that about 2 of 40 flags is the expected chance rate and treats flags as hypotheses
+      - Asks whether subgroups and metrics were pre-specified and counts all comparisons
+      - Applies an appropriate correction (Holm for claims, BH for screening) and reports all subgroups with counts
+      - Checks effect size, calibration, mechanism, and replicates in a new period or site
+      - Warns that no flag in a small subgroup is not evidence of fairness
+
+  - type: laptop
+    title: A multiplicity-aware subgroup audit
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/subgroups.py
+    task: |
+      Extend the subgroup evaluation so that it (1) takes a **pre-specified list** of columns from
+      a config file, (2) prints event counts with every estimate, and (3) tests each subgroup
+      against the rest with a patient-level bootstrap difference in AUROC.
+
+      Add Holm and Benjamini-Hochberg adjusted p-values using the numpy functions from this
+      lesson, and a column saying which comparisons survive each. Then write a simulation in which
+      the model is exactly as good in every subgroup and measure how often the unadjusted audit
+      flags at least one group. Compare with the adjusted audit.
+
+  - type: recap
+    points:
+      - "A p-value is the probability of data this extreme **given the null and all assumptions**; it is not the probability the null is true or a measure of effect size"
+      - "With K true nulls, P(at least one p < 0.05) = 1 − 0.95^K: 46% at 12, 64% at 20, 87% at 40"
+      - "**FWER** for confirmatory claims (Holm, hierarchies, graphical); **FDR** for screening (Benjamini-Hochberg)"
+      - Holm is never worse than Bonferroni; BH needs independence or positive dependence, BY handles any dependence
+      - Model evaluation multiplies tests through subgroups, thresholds, metrics, windows, and variants, so pre-specify the plan
+      - "The difference between significant and not significant is not itself significant: test the interaction"
+      - Interaction tests are low powered (the same-size effect needs about 4x the sample), so subgroup findings are hypotheses
+      - "No significant difference is not equivalence: non-inferiority needs a pre-specified margin and an interval bound inside it"

@@ -1,0 +1,402 @@
+id: m05-03-retrieval-eval
+title: Evaluating retrieval
+summary: Building a gold query-to-relevant-chunks set, computing precision@k, recall@k, MRR, and nDCG
+  by hand and in code, evaluating components separately, and using hard negatives.
+minutes: 25
+status: authored
+why_it_matters: You cannot fix a RAG system you do not measure, and retrieval metrics are the cheapest,
+  most deterministic layer of any clinical LLM evaluation. Computing them by hand, and knowing their
+  traps, is a common interview exercise.
+objectives:
+  - Build a labelled query-to-relevant-chunk set with clinicians, using pooling
+  - Compute precision@k, recall@k, MRR, and nDCG by hand and in code
+  - Match metrics and cutoffs to pipeline stages (first stage, reranker, context)
+  - Separate retrieval failures from generation failures
+  - Use hard negatives to stress-test retrieval
+key_points:
+  - Evaluate components separately; retrieval recall caps grounded answer quality
+  - Recall@k matters most for what enters the prompt
+  - MRR only looks at the first relevant hit
+  - nDCG uses graded relevance, and IDCG comes from the gold set, not from what was retrieved
+  - Pool candidates from several retrievers, and label passages rather than chunk IDs
+  - Hard negatives (superseded, wrong population, trial vs recommendation) reveal real weaknesses
+  - Small eval sets need confidence intervals before you declare a winner
+tags: [evaluation, rag, interview]
+steps:
+  - type: text
+    title: '"The answers look better"'
+    text: |
+      Two weeks after the assistant launches, an engineer swaps in a new embedding model. They
+      try five questions, the answers look better, and they ship it.
+
+      A week later, neurologists report that questions about **thrombolysis contraindications**
+      now get vague answers. Nobody can say whether the new model caused it, how often it
+      happens, or whether other question types got better or worse.
+
+      The fix is not better vibes. It's a **retrieval evaluation**: a fixed set of real
+      questions, each labeled with the chunks that answer it, and metrics you can recompute in
+      seconds on every change.
+
+  - type: text
+    title: Why evaluate retrieval on its own
+    text: |
+      In a RAG system the generator can only ground its answer in what it was given. So:
+
+      - **Retrieval recall caps grounded quality.** If the right chunk never reaches the
+        prompt, a correct answer can only come from the model's memory, which is exactly what
+        you're trying to avoid.
+      - **Retrieval eval is cheap and deterministic.** No LLM calls, no judge, no sampling
+        noise. You can run it on every commit, like the Module 01 pytest suite.
+      - **It localizes blame.** When end-to-end quality drops, retrieval metrics tell you
+        whether to look at the index or the prompt.
+
+      End-to-end evaluation (Lesson 04) is still needed. But start here.
+
+  - type: text
+    title: Building the gold set
+    text: |
+      A **gold set** maps each query to its relevant chunks with a relevance grade.
+
+      **Queries**: collect real clinician questions from logs, interviews, or shadowing. Cover
+      the types that matter: thresholds (BP before thrombolysis), durations (DAPT), drug choice,
+      contraindications, and **out-of-scope** questions with no answer in the corpus. A
+      100–300-query start is realistic.
+
+      **Labels**: clinicians grade candidate chunks: 2 = answers the question, 1 = partly or
+      supporting, 0 = not relevant.
+
+      **Pooling**: nobody can grade 20,000 chunks per query. Grade the **union of the top-k from
+      several different retrievers** (BM25, dense, hybrid), as in TREC evaluations. Unjudged
+      chunks are treated as non-relevant, which biases against a new retriever that finds
+      different things. So re-pool and grade new candidates when you evaluate a new system.
+
+  - type: text
+    title: Gold-set gotchas
+    text: |
+      - **Label passages, not chunk IDs.** If labels point at `chunk_4812` and you re-chunk,
+        every label breaks. Label the recommendation or text span, then map spans to whatever
+        chunks the current chunker produces.
+      - **Double-label a subset** and report inter-annotator agreement. If two neurologists
+        disagree on relevance, your metric has a noise floor.
+      - **Synthetic queries** (an LLM writes a question for each chunk) are cheap and good for
+        coverage, but they reuse the chunk's wording, which makes retrieval look easy. Report
+        real-query results separately.
+      - **Hold out a test split.** If you tune chunk size, k, and fusion weights on the same
+        queries you report, you are overfitting the eval.
+
+  - type: quiz
+    question: |
+      To save time, you ask an LLM to write one question per chunk and treat that chunk as the
+      only relevant item. What's the biggest problem with the resulting scores?
+    options:
+      - LLM-written questions are grammatically unusual
+      - The eval set becomes too large to run quickly
+      - Scores look better than on real questions, and other chunks that also answer the question are counted as misses
+      - It only works for BM25, not dense retrieval
+    answer: 2
+    explanation: |
+      Questions generated from a chunk borrow its vocabulary, so both lexical and dense
+      retrievers find it easily, which inflates scores. And with a single relevant label, a
+      retriever that returns a different but equally valid chunk gets penalized. Use synthetic
+      queries for coverage, but validate on real clinician questions with pooled labels.
+
+  - type: text
+    title: Precision@k and recall@k
+    text: |
+      For one query with a ranked list:
+
+      - **Precision@k** = (relevant chunks in the top k) ÷ k. _How much of what I retrieved
+        is useful?_
+      - **Recall@k** = (relevant chunks in the top k) ÷ (all relevant chunks in the gold set).
+        _How much of what exists did I find?_
+      - **Hit rate@k**: 1 if at least one relevant chunk is in the top k, else 0.
+
+      Average each over queries. For RAG, **recall@k of what enters the prompt** usually
+      matters most: a missing recommendation can't be cited, while one irrelevant chunk mostly
+      costs tokens (though distractors can mislead the model, as in the DAPT example from
+      Lesson 02).
+
+      Treat any grade above 0 as relevant for these binary metrics.
+
+  - type: image
+    image: m05-03-ranked-list.png
+    caption: |
+      One query from the gold set. The retriever returned five chunks; ranks 2, 3, and 5 are
+      relevant. A fourth relevant chunk exists but was ranked 14th. Use this list for the next
+      few questions.
+
+  - type: quiz
+    question: For the query in the figure, what is precision@5?
+    options:
+      - "0.40"
+      - "0.60"
+      - "0.75"
+      - "0.80"
+    answer: 1
+    explanation: |
+      Three of the five retrieved chunks are relevant (ranks 2, 3, 5), so P@5 = 3/5 = 0.60.
+      0.75 is recall@5, a common mix-up: precision divides by k, recall divides by the number
+      of relevant chunks in the gold set.
+
+  - type: quiz
+    question: For the same query, what is recall@5?
+    options:
+      - "0.60"
+      - "1.00, because every relevant chunk that was retrieved is in the top 5"
+      - "0.75"
+      - "0.50"
+    answer: 2
+    explanation: |
+      The gold set has 4 relevant chunks and 3 are in the top 5: R@5 = 3/4 = 0.75. The
+      tempting 1.00 divides by the relevant chunks that were _retrieved_, which ignores the
+      one stuck at rank 14. Recall must be measured against the gold set.
+
+  - type: text
+    title: MRR, the first-hit metric
+    text: |
+      **Reciprocal rank** for one query is 1 / (rank of the first relevant chunk), or 0 if no
+      relevant chunk appears within the cutoff. **MRR** is its mean across queries.
+
+      In the figure, the first relevant chunk is at rank 2, so RR = 0.5.
+
+      MRR fits tasks where **one good hit is enough**, such as "find the protocol section". It
+      ignores everything after the first hit, so it can't tell a list with one relevant chunk
+      from a list with four. For multi-part clinical questions, pair it with recall.
+
+  - type: quiz
+    question: |
+      Three queries. The first relevant chunk appears at rank 1, at rank 3, and not at all in
+      the top 10. What is MRR@10?
+    options:
+      - "0.67"
+      - "0.44"
+      - "0.50"
+      - "0.33"
+    answer: 1
+    explanation: |
+      RR values are 1, 1/3, and 0, so MRR = (1 + 0.333 + 0)/3 ≈ 0.44. The tempting 0.67
+      averages only the two queries that got a hit, which quietly drops the failure. Queries
+      with no hit must count as 0.
+
+  - type: text
+    title: nDCG, for graded relevance
+    text: |
+      Precision and recall treat a perfect recommendation and a loosely related trial summary
+      the same. **nDCG** uses the grades and rewards putting the best chunks first.
+
+      - **DCG@k** = Σ over ranks i = 1..k of **rel_i / log₂(i + 1)**. Rank 1 is divided by 1,
+        rank 2 by 1.58, rank 3 by 2, rank 5 by 2.58.
+      - **IDCG@k** is the DCG of the **ideal ranking**: all relevant chunks **from the gold
+        set**, sorted by grade, cut at k.
+      - **nDCG@k** = DCG@k ÷ IDCG@k, between 0 and 1.
+
+      A common variant uses gain 2^rel − 1 instead of rel, which rewards grade-2 chunks even
+      more. Both are standard. Say which one you report.
+
+  - type: quiz
+    question: |
+      For the figure (grades by rank: 0, 2, 1, 0, 2; gold grades 2, 2, 1, 1), what is nDCG@5
+      with linear gain? Useful values: 1/log₂3 ≈ 0.63, 1/log₂5 ≈ 0.43, 1/log₂6 ≈ 0.39.
+    options:
+      - "0.40"
+      - "0.75"
+      - "1.00"
+      - "0.60"
+    answer: 3
+    explanation: |
+      DCG = 0 + 2(0.63) + 1/2 + 0 + 2(0.39) ≈ 1.26 + 0.50 + 0.77 = 2.54. The ideal ranking is
+      2, 2, 1, 1, 0: IDCG = 2 + 1.26 + 0.50 + 0.43 = 4.19. nDCG@5 = 2.54/4.19 ≈ 0.60. Getting
+      1.00 means the ideal was built only from the retrieved chunks, the bug in the next
+      question.
+
+  - type: code
+    language: python
+    title: The four metrics in code
+    code: |
+      import numpy as np
+
+      # ranked: list of chunk IDs; rel: {chunk_id: grade} from the gold set
+      def precision_at_k(ranked, rel, k):
+          return sum(rel.get(d, 0) > 0 for d in ranked[:k]) / k
+
+      def recall_at_k(ranked, rel, k):
+          n_rel = sum(g > 0 for g in rel.values())   # guard against 0 in real code
+          return sum(rel.get(d, 0) > 0 for d in ranked[:k]) / n_rel
+
+      def reciprocal_rank(ranked, rel):
+          for i, d in enumerate(ranked, start=1):
+              if rel.get(d, 0) > 0:
+                  return 1 / i
+          return 0.0
+
+      def ndcg_at_k(ranked, rel, k):
+          gains = np.array([rel.get(d, 0) for d in ranked[:k]], dtype=float)
+          dcg = (gains / np.log2(np.arange(2, len(gains) + 2))).sum()
+          ideal = np.sort(np.array(list(rel.values()), dtype=float))[::-1][:k]
+          idcg = (ideal / np.log2(np.arange(2, len(ideal) + 2))).sum()
+          return dcg / idcg if idcg > 0 else 0.0
+
+  - type: quiz
+    question: |
+      A colleague "simplifies" `ndcg_at_k` by replacing the `ideal = ...` line with
+      `ideal = np.sort(gains)[::-1]`. What happens?
+    options:
+      - Nothing, since sorting the retrieved gains gives the same ideal
+      - nDCG is overstated, because relevant chunks the retriever missed no longer count against it
+      - nDCG is understated, because the ideal now includes non-relevant chunks
+      - It raises an error because `gains` may contain zeros
+    answer: 1
+    explanation: |
+      The ideal must come from the **gold set**. Built from the retrieved gains, a retriever
+      that finds one grade-1 chunk at rank 1 and misses every grade-2 chunk scores a perfect
+      1.0. In the figure it would ignore the chunk at rank 14 and inflate the score. This bug
+      appears in real codebases, which is why you unit-test metrics on a hand-computed example.
+
+  - type: text
+    title: Match the metric to the stage
+    text: |
+      A two-stage retriever has two jobs, so measure each one:
+
+      - **First stage** (hybrid search, top 50): its job is to not lose anything. Measure
+        **recall@50**. Precision at 50 hardly matters, since the reranker cleans up.
+      - **Reranker** (50 → 5): its job is ordering. Measure **nDCG@5** or **recall@5** on the
+        candidates it was given.
+      - **Context sent to the model**: **recall@5** (did the answer get in?) and the rate of
+        **hard negatives** in it (below).
+
+      Report metrics **per query type** (thresholds, durations, contraindications), not only
+      overall. And with ~150 queries, differences of a couple of points are often noise, so
+      bootstrap over queries for confidence intervals.
+
+  - type: quiz
+    question: |
+      Your first stage returns 50 candidates and the reranker passes 5 to the model. Which
+      metric best tells you whether the **first stage** is doing its job?
+    options:
+      - Precision@5 of the first stage
+      - MRR of the first stage
+      - nDCG@5 of the final context
+      - Recall@50 of the first stage
+    answer: 3
+    explanation: |
+      The first stage only needs to get the relevant chunks somewhere into the 50 candidates;
+      ordering inside that list is the reranker's job. Recall@50 measures exactly that.
+      nDCG@5 of the final context mixes both stages, so a drop wouldn't tell you which one
+      broke.
+
+  - type: text
+    title: Separating retrieval from generation failures
+    text: |
+      For each end-to-end test question, record two things: was a relevant chunk in the
+      context, and was the final answer correct? That gives four cells:
+
+      - **Hit, correct**: working as designed.
+      - **Hit, wrong**: a **generation** failure. The evidence was there and the model
+        misused it, ignored it, or was distracted. Fix the prompt, model, or context order.
+      - **Miss, wrong**: a **retrieval** failure. Fix chunking, filters, or ranking.
+      - **Miss, correct**: suspicious. Either the model answered from memory (ungrounded, and
+        risky when guidelines differ from what it learned) or your gold set is incomplete.
+
+      Just counting how many questions fall in each cell tells you where to spend next week.
+
+  - type: quiz
+    question: |
+      On 40 questions, no relevant chunk reached the context, yet the answer was correct. How
+      should you read this?
+    options:
+      - As a success, since the answers were right
+      - As proof that retrieval doesn't matter for this model
+      - As a generation failure that needs prompt changes
+      - As a warning sign of answers from model memory or a gold set that's missing relevant chunks
+    answer: 3
+    explanation: |
+      A correct answer without supporting context is **ungrounded**: it can't be cited, and it
+      will be wrong wherever your institution's protocol differs from what the model learned.
+      Alternatively, the retriever found a valid chunk your pooled labels never judged. Both
+      need investigating. Neither is a success to bank.
+
+  - type: text
+    title: Hard negatives
+    text: |
+      A **hard negative** is a chunk that looks relevant (similar words, similar meaning) but
+      doesn't answer the question. Random negatives are easy; hard negatives are where clinical
+      retrieval actually fails:
+
+      - A **superseded** version of the same recommendation.
+      - **Hemorrhagic** instead of ischemic stroke; **pediatric** instead of adult.
+      - A **trial description** instead of the institutional recommendation (the 90-day POINT
+        chunk from Lesson 02).
+      - Another **patient's** discharge medications.
+
+      Put them in the corpus on purpose, label them 0, and write queries that target them.
+      Track the **hard-negative rate in the top 5** as its own metric. The same pairs are also
+      the best training data if you later fine-tune an embedding model or reranker.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you build a retrieval evaluation set for a stroke-guideline assistant from
+      scratch? Be concrete."
+    model_answer: |
+      I'd start with real questions: pull them from pilot logs, or run short sessions with a few
+      neurologists and stroke nurses, and aim for 150–200 covering thresholds, durations,
+      drug choice, contraindications, and some out-of-scope questions. Then candidates: I'd pool
+      the top 20 from BM25, a dense retriever, and hybrid for each query, so labels aren't
+      biased toward one system. Two clinicians grade each candidate 0/1/2 using a short written
+      rubric, and I'd double-label a subset to measure agreement and resolve disagreements.
+      Labels attach to recommendation IDs or text spans, not chunk IDs, so re-chunking doesn't
+      invalidate them. I'd add hard negatives on purpose: superseded versions, hemorrhagic
+      stroke sections, trial summaries. Then I'd split into dev and held-out test sets, report
+      recall@k, nDCG, and hard-negative rate by query type with bootstrap intervals, and rerun
+      it in CI on every retrieval change.
+    key_points:
+      - Uses real clinician queries covering the important question types, including out-of-scope ones
+      - Pools candidates from multiple retrievers before labeling
+      - Uses graded labels with a rubric, double-labeling a subset for agreement
+      - Anchors labels to passages or spans so re-chunking doesn't break them
+      - Adds hard negatives and keeps a held-out test split
+      - Reports per-slice metrics with uncertainty and runs them in CI
+
+  - type: think
+    interview: true
+    prompt: |
+      "A new embedding model raises recall@5 from 0.71 to 0.74 on our 120-query eval set.
+      Do we ship it?"
+    model_answer: |
+      Not on that number alone. Three points on 120 queries could easily be noise, so I'd run a
+      paired bootstrap over queries and look at the confidence interval of the difference. I'd
+      also count per-query wins and losses: an average gain can hide a regression on a
+      clinically important slice, like contraindications, which is exactly what happened in
+      our earlier incident. I'd check the hard-negative rate, latency, index rebuild cost, and
+      whether the model can run in our environment given PHI in the discharge summaries.
+      Then I'd confirm the retrieval gain actually shows up end to end, in grounded answer
+      accuracy on a sample. If the interval excludes zero, no important slice regresses, and
+      the cost is acceptable, I'd ship it behind a flag and keep the old index for rollback.
+    key_points:
+      - Checks statistical uncertainty with a paired bootstrap over queries
+      - Looks at per-query and per-slice wins and losses, not only the average
+      - Checks hard negatives, latency, cost, and hosting constraints
+      - Confirms the gain carries through to end-to-end answer quality
+      - Ships behind a flag with rollback
+
+  - type: laptop
+    title: Retrieval metrics with a hand-checked test
+    repo_path: 05-clinical-llm-evaluation/eval/retrieval_metrics.py
+    task: |
+      Create `05-clinical-llm-evaluation/eval/retrieval_metrics.py` with the four functions from
+      this lesson (handle queries with no relevant chunks explicitly). In
+      `tests/test_retrieval_metrics.py`, encode the figure's example (ranks with grades 0, 2,
+      1, 0, 2 and one missed grade-1 chunk) and assert P@5 = 0.6, R@5 = 0.75, RR = 0.5, and
+      nDCG@5 ≈ 0.605. Then add `bootstrap_diff(metric_a, metric_b, n=2000, seed=0)` that
+      returns a 95% interval for the paired difference between two systems.
+
+  - type: recap
+    points:
+      - Retrieval eval is cheap and deterministic, and retrieval recall caps grounded answer quality
+      - Build gold sets from real queries, pool candidates from several retrievers, and label passages, not chunk IDs
+      - "**Precision@k** divides by k; **recall@k** divides by all relevant chunks in the gold set"
+      - MRR looks only at the first hit, and queries with no hit count as 0
+      - nDCG uses graded relevance, and **IDCG comes from the gold set**
+      - Measure each stage with its own metric, like recall@50 for the first stage and nDCG@5 for the reranker
+      - "A hit-or-miss by correct-or-wrong table separates retrieval from generation failures"
+      - Hard negatives and bootstrap intervals keep you honest

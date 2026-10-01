@@ -1,0 +1,400 @@
+id: m04-06-cdisc
+title: "CDISC standards: SDTM and ADaM"
+summary: How trial data becomes a submission, from CDASH collection to SDTM tabulation domains, ADaM
+  analysis datasets (ADSL, ADTTE), define.xml, and traceability.
+minutes: 25
+status: authored
+why_it_matters: Every pharma and CRO data role touches CDISC, and regulators like the FDA require it
+  for submissions. Knowing the flow, a handful of domains, and how ADTTE encodes censoring lets you talk
+  credibly with statistical programmers from day one.
+objectives:
+  - Describe the CDASH → SDTM → ADaM → TLF flow and what each stage is for
+  - Name common SDTM domains (DM, AE, LB, VS, EX, DS, CM) and read core variables
+  - Explain ADSL and the BDS structure, including ADTTE with PARAMCD, AVAL, and CNSR
+  - Explain traceability and define.xml, and why regulators require standards
+key_points:
+  - SDTM is "what was collected", organized; ADaM is "ready to analyse", with derivations
+  - USUBJID identifies a subject uniquely across the submission; variables are prefixed by domain
+  - Findings domains are long, with --TESTCD, --ORRES (as collected) and --STRESN (standardized numeric)
+  - ADSL has one row per subject; BDS has one row per subject, parameter, and timepoint
+  - "In ADTTE, CNSR = 0 is an event and CNSR ≥ 1 is censored, the opposite of a usual event flag"
+  - Traceability means a reviewer can follow every result back to the collected data
+  - define.xml is the machine-readable metadata for datasets, variables, codelists, and derivations
+tags: [cdisc, pharma, trials, interview]
+steps:
+  - type: text
+    title: Your first week in pharma
+    text: |
+      You join the biostatistics team on our secondary-stroke-prevention trial. On day two a statistical
+      programmer messages you:
+
+      "For ADTTE, are we taking the death date for CNSR = 2 from DS or from AE? And should the
+      stroke come from CE only, or should adjudicated AEs map there too?"
+
+      Every word in that message is a CDISC concept. The team isn't being obscure. This vocabulary is
+      how thousands of people across sponsors, CROs, and regulators exchange trial data without
+      re-explaining their spreadsheets every time.
+
+      You won't need to write SDTM yourself as a data scientist. You _will_ need to read it, ask for
+      the right dataset, and not misread a censoring flag. That's this lesson.
+
+  - type: text
+    title: Why regulators insist on standards
+    text: |
+      Before standards, every sponsor delivered data in its own layout. FDA reviewers had to learn
+      a new structure for each application before they could check a single p-value.
+
+      Today the FDA **requires** standardized study data for most NDAs, BLAs, and ANDAs (for studies
+      that started after December 2016), in the versions listed in its **Data Standards Catalog**.
+      Japan's PMDA has a similar requirement. Submissions missing required standardized datasets can
+      be rejected at technical validation, before any scientific review.
+
+      The payoff for reviewers: the same tools, scripts, and checks work on every submission. They
+      can re-run your primary analysis, pool data across trials, and spot problems quickly.
+
+      Datasets go in as SAS transport files (**XPT version 5**), which is why variable names are at
+      most 8 characters. That's an old format constraint, not a style choice. FDA's technical
+      guidance still specifies XPT v5 at the time of writing, while CDISC's JSON-based
+      Dataset-JSON is being piloted as a possible successor, so check the current guide.
+
+  - type: text
+    title: The flow
+    text: |
+      CDISC (the Clinical Data Interchange Standards Consortium) maintains the chain:
+
+      - **CDASH**: how data is **collected**. Standard CRF fields in the electronic data capture
+        (EDC) system, designed so they map cleanly downstream.
+      - **SDTM**: how collected data is **tabulated**. Standard domains such as DM, AE, and LB, with
+        standard variable names and controlled terminology.
+      - **ADaM**: how data is prepared for **analysis**. Derived datasets like ADSL and ADTTE, built
+        from SDTM, "one procedure away" from the result.
+      - **TLFs**: the tables, listings, and figures in the clinical study report (CSR).
+
+      Running alongside: **CDISC Controlled Terminology** (allowed values, such as `SEX` = M/F/U) and
+      **Define-XML**, the metadata that describes all of it.
+
+  - type: image
+    image: m04-06-cdisc-flow.png
+    caption: |
+      Data moves left to right: collected (CDASH), tabulated (SDTM), analysis-ready (ADaM), reported
+      (TLFs). define.xml documents SDTM and ADaM, and traceability runs right to left, so every number in
+      the report can be followed back to what was collected.
+
+  - type: quiz
+    question: |
+      Where does "time to recurrent stroke in days, with a censoring flag" live?
+    options:
+      - In the SDTM AE domain, as collected
+      - In an ADaM ADTTE dataset, as a derived parameter
+      - In the CDASH CRF, entered by the site
+      - In define.xml
+    answer: 1
+    explanation: |
+      Time-to-event values are **derived**: they combine a start date, an event or censoring date from
+      several sources, and censoring rules from the SAP. Derivations belong in ADaM. SDTM holds the raw
+      ingredients (the stroke event date, the death date, the last contact). define.xml _describes_ the
+      derivation but doesn't hold the data.
+
+  - type: text
+    title: How SDTM is organized
+    text: |
+      SDTM groups domains into a few **classes**:
+
+      - **Special purpose**: DM (demographics), plus SV and SE (visits and elements)
+      - **Interventions**: EX (study drug exposure), CM (concomitant medications)
+      - **Events**: AE (adverse events), DS (disposition), MH (medical history), CE (clinical events)
+      - **Findings**: LB (labs), VS (vital signs), EG (ECG), QS (questionnaires)
+
+      Every record carries identifiers: `STUDYID`, `DOMAIN`, **`USUBJID`** (a subject ID that is
+      unique across the entire submission, often study + site + subject), and `--SEQ` (a sequence
+      number within the subject).
+
+      The `--` means "domain prefix": `AESTDTC` is the AE start date, `LBTESTCD` is the lab test code.
+      Dates are **ISO 8601 text** (`2024-03-04`, or partial like `2024-03`), because SDTM never imputes
+      missing parts.
+
+  - type: text
+    title: Seven domains worth knowing
+    text: |
+      - **DM**: one row per subject. Age, sex, race, site, planned and actual arm (`ARM`, `ACTARM`),
+        and reference start date `RFSTDTC`.
+      - **AE**: adverse events. Verbatim term `AETERM`, MedDRA-coded `AEDECOD`, seriousness `AESER`,
+        start date `AESTDTC`.
+      - **LB**: laboratory results, one row per test per sample.
+      - **VS**: vital signs such as blood pressure and weight.
+      - **EX**: study drug **as administered**: dose, route, start and end.
+      - **CM**: concomitant medications (anything that isn't study drug), coded with WHODrug.
+      - **DS**: disposition milestones, such as randomized, completed, discontinued, or died.
+
+      In our stroke trial, the recurrent-stroke endpoint would typically sit in **CE** (or a
+      sponsor-defined events domain) after adjudication, with deaths recorded in DS.
+
+  - type: quiz
+    question: |
+      During the trial, a patient starts atorvastatin prescribed by their GP. It's not study drug. Which
+      SDTM domain records it?
+    options:
+      - EX
+      - AE
+      - DS
+      - CM
+    answer: 3
+    explanation: |
+      Non-study medications go in **CM** (concomitant medications). **EX** is reserved for the
+      protocol-specified study treatment as administered. It's a common early mix-up because both
+      are "drugs the patient took". Starting a statin isn't an adverse event either, though the
+      reason for it might be.
+
+  - type: text
+    title: Findings are long, with two versions of each result
+    text: |
+      Findings domains like LB are **long** (vertical): one row per test, per subject, per timepoint.
+      Key variables:
+
+      - `LBTESTCD` / `LBTEST`: short test code (≤ 8 chars, like `LDL`) and its full name
+      - `LBORRES` / `LBORRESU`: the **original** result and unit, as collected (text)
+      - `LBSTRESC` / **`LBSTRESN`** / `LBSTRESU`: the **standardized** result, in the sponsor's
+        standard unit, as text and as a **number**
+      - `VISIT`, `LBDTC`, and `LBNRIND` (low/normal/high relative to the reference range)
+
+      Two sites might report LDL in mmol/L and mg/dL. `--ORRES` keeps what each site sent, and
+      `--STRESN` puts both on one scale.
+
+  - type: code
+    title: Two LDL rows in SDTM LB
+    language: text
+    code: |
+      USUBJID        LBTESTCD LBORRES LBORRESU LBSTRESN LBSTRESU VISIT     LBDTC
+      SSP301-014-042 LDL      2.6     mmol/L   100.5    mg/dL    BASELINE  2024-03-04
+      SSP301-014-042 LDL      71      mg/dL    71       mg/dL    MONTH 6   2024-09-02
+      SSP301-022-007 LDL      <10     mg/dL             mg/dL    MONTH 6   2024-10-15
+    after: |
+      Same test, one baseline in SI units, one follow-up in conventional units. The third row shows why
+      there is also a character standardized result: "<10" is a real result but not a number, so it
+      lives in `LBSTRESC` while `LBSTRESN` is empty. Deciding how to analyse it is a derivation, so it
+      belongs in ADaM.
+
+  - type: quiz
+    question: |
+      You want the mean month-6 LDL across all sites. Which variable should you average?
+    options:
+      - LBORRES
+      - LBSTRESN
+      - LBSTRESC
+      - LBORRESU
+    answer: 1
+    explanation: |
+      `LBSTRESN` is numeric and on one standard unit. `LBORRES` mixes units and is stored as text, so
+      averaging it silently combines 2.6 mmol/L with 71 mg/dL. `LBSTRESC` is standardized but
+      character. And remember the "<10" row: someone has to decide how to treat it before averaging.
+
+  - type: text
+    title: SDTM describes, ADaM derives
+    text: |
+      The mental model that keeps you out of trouble:
+
+      - **SDTM = what was collected**, organized into standard shapes. It avoids analysis
+        derivations. (It does include a few standard ones, like unit conversion into `--STRESN` and
+        study day `--DY`.) Extra sponsor variables go into supplemental qualifier datasets (SUPP--).
+      - **ADaM = what will be analysed.** It holds the imputations, windowing, baseline flags,
+        population flags, change from baseline, and time-to-event values the SAP specifies.
+
+      ADaM's stated principles are that datasets should be **analysis-ready** (one procedure away
+      from a result), **traceable** to SDTM, and **described by metadata**.
+
+  - type: text
+    title: ADSL and BDS
+    text: |
+      **ADSL** (subject-level analysis dataset): exactly **one row per subject**. It holds everything
+      you'd adjust for or subset on:
+
+      - population flags such as `ITTFL`, `SAFFL`, and `PPROTFL` (Y/N)
+      - planned and actual treatment `TRT01P` / `TRT01A`, and treatment start `TRTSDT`
+      - baseline covariates and stratification factors (`AGE`, `SEX`, baseline NIHSS…)
+
+      **BDS** (Basic Data Structure): **one row per subject, per parameter, per analysis timepoint**.
+      The core variables are `PARAMCD` / `PARAM` (what is measured), `AVAL` (the analysis value),
+      `AVISIT` and `ADT` (when), `BASE` and `CHG` (baseline and change). ADLB and ADVS are BDS.
+
+      Adverse events use a third structure, OCCDS (ADAE). ADSL variables are merged onto the others so
+      every dataset is analysis-ready by itself.
+
+  - type: text
+    title: ADTTE and the CNSR trap
+    text: |
+      **ADTTE** is the BDS flavor for time-to-event. One row per subject per event parameter:
+
+      - `PARAMCD`: sponsor-defined code, such as `TTRSTR` (time to recurrent stroke)
+      - `STARTDT`: the origin, such as the randomization date
+      - `ADT`: the event date or the censoring date
+      - `AVAL`: time from `STARTDT` to `ADT` (units in `AVALU`; the day-count convention is documented)
+      - **`CNSR`**: **0 = event**, **1, 2, … = censored**, with different integers for different reasons
+      - `EVNTDESC` / `CNSDTDSC`: text descriptions, and `SRCDOM` / `SRCVAR` / `SRCSEQ` pointing to the source record
+
+      Read that again: **CNSR = 1 means censored**. Most survival software wants an _event_ indicator,
+      where 1 means the event happened. Flip it, or you'll analyse the censorings as events.
+
+      Competing risks are not handled by a dedicated flag in ADTTE, as far as we know (check the
+      current ADaM time-to-event guide and your SAP). Teams usually add a separate death parameter or
+      a documented censoring code for death, which is exactly what the programmer's CNSR = 2 question
+      was about.
+
+  - type: code
+    title: Three ADTTE rows and a KM fit
+    language: python
+    code: |
+      # USUBJID         PARAMCD STARTDT     ADT         AVAL CNSR EVNTDESC / CNSDTDSC     SRCDOM
+      # SSP301-014-042  TTRSTR  2024-03-04  2025-01-19   322  0   RECURRENT STROKE          CE
+      # SSP301-014-057  TTRSTR  2024-03-11  2026-03-10   730  1   COMPLETED STUDY           DS
+      # SSP301-022-007  TTRSTR  2024-04-02  2026-02-14   684  2   DEATH WITHOUT STROKE      DS
+
+      from lifelines import KaplanMeierFitter
+
+      tte = adtte[(adtte.PARAMCD == "TTRSTR") & (adtte.ITTFL == "Y")]
+      kmf = KaplanMeierFitter()
+      kmf.fit(tte.AVAL / 365.25, event_observed=tte.CNSR)
+
+  - type: quiz
+    question: What is wrong with the `kmf.fit` call above?
+    options:
+      - AVAL must be in days, not years
+      - It passes CNSR as the event flag, so censorings are treated as events and strokes as censored
+      - ITTFL is an ADSL variable and can't be used in ADTTE
+      - Nothing, because lifelines reads CNSR natively
+    answer: 1
+    explanation: |
+      lifelines expects `event_observed` = 1 for an event. CNSR = 0 is the event in ADaM, so the call
+      needs `event_observed=(tte.CNSR == 0)`. As written, the stroke becomes a censoring and the
+      completer and the death become "events". ITTFL is fine: ADSL variables are routinely merged onto
+      ADTTE. And the death row is a reminder that censoring death feeds straight into the competing-risk
+      issue from the previous lesson.
+
+  - type: text
+    title: Traceability
+    text: |
+      **Traceability** means a reviewer can follow any result back to the data it came from:
+      TLF → ADaM → SDTM → CRF. There are two kinds:
+
+      - **Metadata traceability**: the derivation is documented. For example, "AVAL = ADT − STARTDT +
+        1; ADT = earliest of adjudicated stroke date (CE), death date (DS), or last contact".
+      - **Data-point traceability**: the record itself points to its source, through `SRCDOM`,
+        `SRCVAR`, and `SRCSEQ`, or by carrying the SDTM variables along.
+
+      Why regulators care: an FDA reviewer who doubts your hazard ratio should be able to rebuild it
+      from SDTM with your documented rules, without calling you. When they can't, you get questions,
+      delays, or a request for reanalysis.
+
+  - type: text
+    title: define.xml and friends
+    text: |
+      **define.xml** (built to the Define-XML standard) ships with every SDTM and ADaM package. It's
+      machine-readable metadata that a browser renders as a navigable document. It lists:
+
+      - every **dataset**, with its structure and keys
+      - every **variable**, with its type, length, label, and **origin** (CRF, derived, assigned,
+        protocol)
+      - **codelists**, the controlled terminology each variable may take
+      - **value-level metadata**, such as "for LBTESTCD = LDL, LBSTRESU is mg/dL"
+      - **computational methods**: the derivation text for every derived variable
+
+      It's accompanied by human-readable **reviewer's guides** (for SDTM and for ADaM), and it is
+      checked, with the datasets, by conformance validators such as Pinnacle 21 before submission.
+
+  - type: quiz
+    question: |
+      A reviewer asks how `AVAL` was computed for subject SSP301-022-007. Where should they look first?
+    options:
+      - The CRF pages for that subject
+      - The SAS log from the ADaM programs
+      - The computational method for AVAL in define.xml, plus SRCDOM/SRCSEQ on the record
+      - The CSR's efficacy results section
+    answer: 2
+    explanation: |
+      That's precisely what define.xml and the source variables are for: the rule, and the source row
+      it was applied to. CRFs are too far upstream to show the derivation. Logs aren't part of the
+      standard package, and the CSR states results rather than per-record derivations.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why do we need both SDTM and ADaM? Why not submit the analysis datasets and skip SDTM?"
+    model_answer: |
+      They serve different purposes, and regulators want both. SDTM is a faithful, standardized
+      tabulation of what was collected, with no analysis choices baked in. That lets a reviewer
+      look at the raw evidence, run their own analyses, and pool across studies and sponsors with
+      the same tools. ADaM encodes the sponsor's analysis decisions: populations, baseline
+      definitions, visit windows, imputations, and censoring rules for time to event. If you only had
+      ADaM, the reviewer couldn't separate the data from your decisions, or check that those decisions
+      were applied as the SAP says. Keeping them separate, with traceability from ADaM back to SDTM
+      and derivations documented in define.xml, is what makes the analysis reproducible and auditable.
+      There's a practical benefit too: SDTM can be produced as data comes in and reused for integrated
+      summaries, while ADaM changes when the SAP changes.
+    key_points:
+      - SDTM is a standardized record of what was collected, free of analysis decisions
+      - ADaM encodes sponsor analysis decisions such as populations, imputation, windows, and censoring
+      - Separation lets reviewers audit decisions and rerun or change analyses
+      - Traceability and define.xml link the two and make results reproducible
+      - SDTM supports pooling across studies, such as integrated safety summaries
+
+  - type: text
+    title: Where a data scientist fits
+    text: |
+      Statistical programmers build SDTM and ADaM, usually with independent **double programming**
+      (two people derive the same dataset and compare). Data scientists more often _consume_ them:
+
+      - pooling ADaM across past trials for historical-control or disease-progression models
+      - building ML features from SDTM LB/VS across a program
+      - QC'ing derivations, or automating spec-to-code pipelines
+
+      SAS is still common, but open-source tooling is mature: the **pharmaverse** R packages (such as
+      `admiral` for ADaM derivations) and R Consortium pilot submissions to the FDA have shown R-based
+      packages can go through review.
+
+      Module 06 covers the real-world-data counterpart of CDISC, **OMOP**, which plays the same
+      "common model" role for EHR and claims data.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through how a time-to-recurrent-stroke endpoint gets from the site to the Kaplan–Meier
+      figure in the CSR."
+    model_answer: |
+      At the site, a suspected stroke is captured on a CDASH-based CRF in the EDC and sent to a
+      blinded adjudication committee. Confirmed events are mapped to SDTM, typically a clinical events
+      domain like CE, with ISO 8601 dates and a USUBJID. Deaths and study completion go in DS,
+      randomization dates and arm in DM, and visits in SV. Programmers then build ADSL: one row per
+      subject with the ITT flag, randomized treatment, stratification factors, and the randomization
+      date. ADTTE is derived from that per the SAP: STARTDT is randomization, ADT is the adjudicated
+      stroke date, or the censoring date if there was no stroke, with CNSR = 0 for events and
+      documented positive codes for each censoring reason, and AVAL is the day count. SRCDOM and SRCSEQ
+      point to the source records. The derivations are documented in define.xml and the ADaM reviewer's
+      guide, the datasets are double-programmed and validated, and the KM figure and Cox model are
+      produced from ADTTE merged with ADSL. Taking care that the event flag is CNSR == 0 is the classic
+      detail.
+    key_points:
+      - CDASH CRF capture, with adjudication for the endpoint
+      - SDTM domains such as CE for events, DS for disposition and death, and DM for arm and dates
+      - ADSL with population flags and treatment, then ADTTE with STARTDT, ADT, AVAL, and CNSR
+      - Censoring reasons coded, and source variables for traceability
+      - define.xml, double programming and validation, then TLFs from ADaM
+
+  - type: laptop
+    title: Build a tiny SDTM → ADaM pipeline
+    repo_path: 04-clinical-trials-survival/
+    task: |
+      Create `04-clinical-trials-survival/src/make_adam.py`. Simulate SDTM-like DM (USUBJID, ARM,
+      RFSTDTC), CE (stroke events), and DS (completion, death) tables for 300 subjects as pandas
+      DataFrames. Derive ADSL (ITTFL, TRT01P, TRTSDT) and an ADTTE with PARAMCD = "TTRSTR", STARTDT,
+      ADT, AVAL, CNSR (0 = stroke, 1 = completed, 2 = death), and SRCDOM/SRCSEQ. Write a pytest that
+      asserts one ADSL row per USUBJID, CNSR in {0, 1, 2}, and AVAL > 0, then fit KM with
+      `event_observed=(CNSR == 0)`.
+
+  - type: recap
+    points:
+      - "The chain: **CDASH** (collect) → **SDTM** (tabulate) → **ADaM** (analyse) → **TLFs** (report)"
+      - The FDA requires standardized data for most marketing applications; XPT v5 explains the 8-character names
+      - "SDTM: `USUBJID`, domain-prefixed variables, ISO 8601 dates; know DM, AE, LB, VS, EX, CM, DS"
+      - Findings domains are long; use `--STRESN` for numeric analysis, not `--ORRES`
+      - ADSL has one row per subject; BDS has one row per subject, parameter, and timepoint (PARAMCD, AVAL)
+      - "In ADTTE, **CNSR = 0 is the event** and CNSR ≥ 1 is censored, so flip it for survival software"
+      - Traceability plus **define.xml** let a reviewer rebuild any result from the collected data

@@ -1,0 +1,472 @@
+id: m11-03-evaluation-and-use
+title: Evaluating and using clinical NLP
+summary: Span, mention, and patient-level metrics, error analysis, phenotypes validated against chart review
+  with correct sampling, embeddings and retrieval over notes, and stigmatizing language as a bias source.
+minutes: 28
+status: authored
+why_it_matters: NLP outputs enter models and decisions. You need to evaluate them at the unit that matters
+  and know that the language in notes can itself carry bias, because "our extractor has F1 0.88" is an
+  answer to a question nobody is asking until you say which F1.
+objectives:
+  - Choose span, mention, and patient-level metrics, and explain why the same predictions score differently
+  - Write a correct one-to-one span matcher and see how overlap and aggregation rules inflate scores
+  - Do error analysis by category and keep the development and test sets separate
+  - Validate a computable phenotype against chart review, including the sampling needed for sensitivity
+  - Use note embeddings and retrieval responsibly, with deduplication, time filters, and access control
+  - Recognize stigmatizing language and documentation bias, and audit a notes-based model for them
+key_points:
+  - Exact-match span F1 penalizes acceptable boundary differences, so report strict and relaxed, and the feature-level result
+  - Patient-level aggregation trades precision for recall, and copy-forward correlates errors
+  - Chart-review validation (PPV and sensitivity) is the standard evidence, and sensitivity needs reviewed negatives with sampling weights
+  - Documentation patterns differ by race, language, and site, so audit the NLP and the model by subgroup
+  - For generation-based tasks, continue in the LLM evaluation module (Module 05)
+tags: [nlp, evaluation, phenotyping, bias, interview]
+steps:
+  - type: text
+    title: Two F1 scores, one system
+    text: |
+      One team reports that its note extractor reaches **F1 0.75**. Another team, using the very same
+      predictions, reports **F1 0.88**. Neither made an arithmetic mistake.
+
+      The difference is a choice that is easy to skip over: what counts as a match. Does
+      `infarct` match the gold span `acute left MCA infarct`? Does a correct span with the wrong assertion
+      count? Does a patient count once or once per mention?
+
+      Lesson 2 built the extractor. This lesson is about judging it, in a way that matches how the output
+      will be used.
+
+  - type: text
+    title: Three units of evaluation
+    text: |
+      - **Token or span level**: did the system mark the right words? Research on named entity
+        recognition lives here, and it is where you debug.
+      - **Mention level**: given a matched span, is the **attribute** right (negated, family, past) and
+        is the concept ID right? Score these on matched spans, so a boundary miss does not get counted twice.
+      - **Patient-time level**: did the **feature** come out right, for example "AF documented before
+        time zero"? This is the only unit the downstream model or phenotype ever sees.
+
+      A system can look fine at one level and poor at the next. Averages matter too. **Micro** averaging
+      pools every mention and is dominated by common concepts, while **macro** averaging weights each
+      concept equally, so rare but important ones show up.
+
+      Span metrics need a gold span. For generated free text (summaries, answers), there is no gold span,
+      and Module 05 covers claim-level support, citation checks, and judge validation instead.
+
+  - type: text
+    title: What counts as a match
+    text: |
+      Pick the rule before you look at results:
+
+      - **Strict**: exact boundaries and the right type.
+      - **Relaxed** (overlap): any overlap, with the right type.
+      - **Usable**: relaxed **and** the assertion (negated, uncertain, family) is right. This is the
+        rule closest to what a feature needs.
+
+      Boundary differences are common and often harmless: `infarct` versus `acute left MCA infarct`. They are
+      not always harmless. If laterality or acuity is the feature, the modifiers matter, so relaxed matching
+      would hide real errors.
+
+      Shared-task evaluations commonly report both an exact and a lenient score, so report both and say which
+      your use case needs. Also match **one to one**: a single prediction must not be credited against two
+      gold spans.
+
+  - type: image
+    image: m11-03-span-errors.png
+    caption: |
+      A small simulated evaluation with 200 gold spans and 194 predictions. The same output scores F1 0.75
+      under strict matching, 0.88 under relaxed overlap, and 0.80 if the assertion must also be right (16 of
+      the 174 matched spans had the wrong assertion). Invented data, fixed random seed.
+
+  - type: quiz
+    question: |
+      Using the figure: 200 gold spans, 194 predictions, 147 exact matches, 27 boundary-only overlaps with the
+      right type, 4 wrong-type, 22 missed, 16 spurious. What is the **relaxed** (overlap, right type) recall?
+    options:
+      - About 0.73
+      - About 0.87
+      - About 0.90
+      - About 0.93
+    answer: 1
+    explanation: |
+      Relaxed true positives are 147 + 27 = 174 out of 200 gold spans, so recall is 174/200 = 0.87. The
+      relaxed precision is 174/194 = 0.90, and 0.73 is the strict recall (147/200). Quoting the 0.90 as recall
+      is the usual slip: precision divides by predictions, recall by gold spans.
+
+  - type: code
+    language: python
+    title: Matching is where scores get inflated
+    text: |
+      Spans are `(start, end, type)` with `end` exclusive. A one-to-one greedy matcher:
+    code: |
+      def match(gold, pred):
+          """Return (TP, FP, FN) with one-to-one matching by overlap and type."""
+          used, tp = set(), 0
+          for g in gold:
+              for j, p in enumerate(pred):
+                  if j not in used and p[2] == g[2] and p[0] < g[1] and g[0] < p[1]:
+                      used.add(j)
+                      tp += 1
+                      break
+          return tp, len(pred) - tp, len(gold) - tp
+
+      gold = [(0, 10, "PROB"), (11, 20, "PROB")]
+      pred = [(0, 20, "PROB")]          # one span covers "left MCA and PCA infarcts"
+      print(match(gold, pred))
+
+  - type: quiz
+    question: |
+      What does the last line print?
+    options:
+      - (2, 0, 0)
+      - (0, 1, 2)
+      - (1, 1, 0)
+      - (1, 0, 1)
+    answer: 3
+    explanation: |
+      The merged prediction overlaps both gold spans, but it can be credited only once (`used`), so TP is 1,
+      FP is 0, and one gold span is a false negative. Without the `used` set, this would report (2, 0, 0) and
+      hide a coordination error. The strict `<` comparisons are deliberate too: with exclusive ends, adjacent
+      spans such as (10, 18) and (18, 25) share no characters, and `<=` would count them as overlapping.
+
+  - type: text
+    title: Error analysis drives the work
+    text: |
+      An F1 score says how much, not why. Sort every error into a category and, where you can, a cause:
+
+      - **Boundary**: modifiers dropped or added, abbreviations, coordination.
+      - **Type confusion**: a drug labeled as a problem.
+      - **Missed**: abbreviations, rare terms, unusual sections.
+      - **Spurious**: templated text, eponyms ("Wallenberg syndrome"), headers.
+      - **Assertion**: span right, attribute wrong. Score it on matched spans only.
+      - **Linking**: span and attribute right, concept wrong.
+
+      Count each category, fix the largest one, and re-measure. Slice by **note type, site, and time**, because
+      an aggregate hides a failure that lives in one slice.
+
+      Keep a **development** set for error analysis and a **test** set you rarely touch. Once you have read
+      the errors on a set, it is no longer a clean estimate.
+
+  - type: quiz
+    question: |
+      After error analysis on your development notes, you fix abbreviation handling and F1 rises from 0.75 to
+      0.80 on those same notes. What do you do before claiming the improvement?
+    options:
+      - Re-score on an untouched test set or fresh notes, because the fix was designed after reading these errors
+      - Report 0.80, since the same data shows a real gain
+      - Keep fixing errors on the same notes until F1 reaches 0.90
+      - Average 0.75 and 0.80 to be conservative
+    answer: 0
+    explanation: |
+      Every rule or prompt change made while reading a set is tuned to that set, so its score is optimistic.
+      The honest number comes from data you did not look at. The same applies to LLM prompts: iterate on dev,
+      report on a held-out test set, and use Module 08's bootstrap, resampling **patients** rather than
+      mentions, for the interval.
+
+  - type: text
+    title: From mentions to patients
+    text: |
+      A patient-level feature is usually an OR over mentions across many notes ("any documented AF before time
+      zero"). That changes the error rates in both directions:
+
+      - **Recall rises.** If each of six notes mentions a true finding and each mention is caught 80% of the
+        time, the chance of catching it at least once is 1 - 0.2^6, which is over 99.9% (if the misses were
+        independent).
+      - **Precision falls.** If a patient without the finding has six notes and each produces a false
+        mention 5% of the time, the chance of at least one is 1 - 0.95^6, about 26%.
+
+      Two cautions. Copy-forward makes errors **correlated**: a wrong sentence is copied into every later
+      note, so the independence assumption flatters you in both directions. And the clinically meaningful
+      error is the patient-level one, so report **patient-level PPV and sensitivity**, not just mention F1.
+
+  - type: quiz
+    question: |
+      A patient with no atrial fibrillation has six notes. The extractor makes a false AF mention in any given
+      note with probability 0.05, independently. What is the probability the patient is wrongly flagged by an
+      "any mention" rule?
+    options:
+      - 5%
+      - About 13%
+      - About 26%
+      - About 74%
+    answer: 2
+    explanation: |
+      The chance of no false mention in six notes is 0.95^6 = 0.735, so at least one has probability about
+      0.265. This is why mention-level precision of 95% does not give patient-level precision of 95%. It also
+      shows why asking for a second supporting mention, or a section requirement, is a common fix.
+
+  - type: text
+    title: Computable phenotypes
+    text: |
+      A **computable phenotype** is a rule that flags patients with a condition using structured data and text:
+      diagnosis codes, medications, labs, and note-derived concepts. The eMERGE network published lessons on
+      validating EHR phenotype algorithms (Newton et al., _JAMIA_ 2013), and the approach is the same
+      everywhere: write a rule, then test it against chart review.
+
+      For "ischemic stroke during the index admission" you might combine:
+
+      - an inpatient `I63.%` code (Module 01's cohort logic),
+      - a signed radiology report with an acute infarct, asserted present,
+      - a neurology note that documents the diagnosis.
+
+      The combinations behave differently:
+
+      - **Code OR note**: higher sensitivity, lower PPV. Good for screening or finding candidates.
+      - **Code AND note**: higher PPV, lower sensitivity. Good for a clean cohort.
+
+      Choose by use. An outcome label for a model wants balanced error. A trial-screening list wants
+      sensitivity. A cohort for a causal study (Module 04) wants PPV.
+
+  - type: text
+    title: Chart review, and the trap in sensitivity
+    text: |
+      Chart review is the usual reference standard, imperfect but defensible. Do it properly:
+
+      - Clear written criteria, **blinded** reviewers, and adjudication, with agreement reported.
+      - **PPV** is easy: review a random sample of the algorithm's positives.
+      - **Sensitivity is hard.** It needs true cases among the algorithm's **negatives**, and those are rare.
+        Reviewing only positives gives you no sensitivity at all.
+
+      So sample from both groups and **weight by the sampling fractions**. If you review 100 of 18,000 negatives
+      and find 2 cases, each reviewed negative stands for 180 patients, and the estimate of missed cases is
+      18,000 x 2/100 = 360.
+
+      Sample size matters more than people expect, and a small negative sample gives a very wide interval.
+      Stratified or enriched sampling of negatives (for example, patients with stroke-related text but no
+      code) improves precision, but then the weights must reflect the design.
+
+  - type: code
+    language: python
+    title: Weighted sensitivity from two reviewed samples
+    code: |
+      import numpy as np
+
+      def wilson(k, n, z=1.96):
+          p, d = k / n, 1 + z**2 / n
+          c = p + z**2 / (2 * n)
+          h = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))
+          return (c - h) / d, (c + h) / d
+
+      N_pos, N_neg = 2_000, 18_000     # algorithm-positive / algorithm-negative patients
+      k_pos, n_pos = 90, 100           # reviewed positives confirmed true
+      k_neg, n_neg = 2, 100            # reviewed negatives found to be true cases
+
+      tp = N_pos * k_pos / n_pos       # estimated true positives
+      fn = N_neg * k_neg / n_neg       # estimated missed cases
+      lo, hi = wilson(k_neg, n_neg)    # uncertainty in the miss rate
+      print("PPV", k_pos / n_pos, "sensitivity", round(tp / (tp + fn), 3))
+      print("range", round(tp / (tp + N_neg * hi), 2), "to", round(tp / (tp + N_neg * lo), 2))
+    after: |
+      Output: PPV 0.9, sensitivity 0.833, and a plausible range of about 0.59 to 0.95 from the negative sample
+      alone. Pooling the 200 reviewed charts gives a naive "sensitivity" of 90/92 = 0.98, which is wrong
+      because it ignores that negatives were sampled at a tiny fraction.
+
+  - type: quiz
+    question: |
+      2,000 patients are flagged by the algorithm, and 18,000 are not. You review 100 random flagged patients
+      (90 true cases) and 100 random unflagged patients (2 true cases). What is the estimated sensitivity?
+    options:
+      - About 0.83
+      - About 0.98
+      - About 0.90
+      - It cannot be estimated from these two samples
+    answer: 0
+    explanation: |
+      Estimated true positives: 2,000 x 0.90 = 1,800. Estimated missed cases: 18,000 x 0.02 = 360. Sensitivity =
+      1,800 / (1,800 + 360) = 0.83. The 0.98 comes from ignoring sampling fractions, and 0.90 is the PPV. It
+      can be estimated, but with wide uncertainty, which is why the negative sample size is the design
+      decision that matters.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We built a rule that flags ischemic stroke admissions using codes plus radiology reports. How would you
+      validate it, and what would you report?"
+    model_answer: |
+      I'd validate against blinded chart review with written criteria and adjudication. For PPV I'd review a
+      random sample of the flagged patients. For sensitivity I need the negatives, so I'd sample from the
+      unflagged group too, stratified to include the likely misses, such as patients with stroke-like text or
+      imaging but no code, and I'd weight by the sampling fractions. I'd report PPV and sensitivity with
+      confidence intervals, plus the same numbers for code-only and code-or-note versions so the added value of
+      the text is explicit. I'd slice by site and year because note templates and coding practices change,
+      and I'd check reviewer agreement. Then I'd choose the variant by use: a sensitive version for screening,
+      a high-PPV version for a causal cohort. Finally I'd record the phenotype definition and code versions so
+      it can be reproduced and re-validated.
+    key_points:
+      - Uses blinded chart review with criteria and adjudication, and reports reviewer agreement
+      - Estimates PPV from sampled positives and sensitivity from sampled negatives with sampling weights
+      - Reports intervals and compares code-only, note-only, and combined versions
+      - Slices by site and time and picks the variant by intended use
+      - Versions the definition for reproducibility
+
+  - type: text
+    title: Embeddings and retrieval over notes
+    text: |
+      Note embeddings are useful for retrieval, clustering, and cohort discovery. They inherit every problem
+      from Lesson 1 and add a few:
+
+      - **Copies crowd the results.** Copy-forward means the top-k is often five copies of one paragraph. Deduplicate
+        near-identical chunks at index time, or diversify results.
+      - **Chunk by section**, and store the section, note type, and **signing time** as metadata, so a
+        filter can enforce "signed before time zero".
+      - **Negation and hedging may not survive.** "No hemorrhage" and "hemorrhage" can land close together in
+        embedding space. How badly depends on the model, so test yours with a probe set of (statement,
+        paraphrase, negation) triples and count how often the paraphrase is closer than the negation.
+      - **Scope by patient** and apply access control. A vector store built from notes is PHI-derived data and
+        needs the same protection (Module 06).
+
+      How to evaluate retrieval (gold relevance sets, precision@k, recall@k, hard negatives) and grounded
+      generation is in Module 05, Lessons 2 to 4, so it is not repeated here.
+
+  - type: quiz
+    question: |
+      A patient-scoped search over 40 notes returns five results that are all the same past-medical-history
+      paragraph, copied forward across days 2 to 6. What is the best fix?
+    options:
+      - Increase k to 20
+      - Deduplicate near-identical chunks at index time, or diversify the ranking, and keep the source and signing time of the one you keep
+      - Switch to a larger embedding model
+      - Lower the generation temperature
+    answer: 1
+    explanation: |
+      The embeddings are doing their job: identical text has identical vectors. Raising k (A) just returns more
+      copies, a bigger model (C) will still embed copies the same, and temperature (D) acts after retrieval.
+      Deduplication or diversification fixes the cause, and keeping provenance lets you cite the right note.
+
+  - type: text
+    title: Stigmatizing language is data
+    text: |
+      Notes are written by people, and what they write reflects habit and bias. Several studies make this
+      concrete:
+
+      - **Goddu et al.** (_J Gen Intern Med_ 2018): in a randomized vignette of 413 physicians-in-training, the
+        same hypothetical patient with sickle cell disease was described with stigmatizing or neutral
+        language. The stigmatizing note led to more negative attitudes (scale score 20.6 versus 25.6) and less
+        aggressive pain management (5.56 versus 6.22 on a composite, residents).
+      - **Himmelstein, Bates, and Zhou** (_JAMA Netw Open_ 2022): NLP on 48,651 admission notes found 2.5%
+        contained stigmatizing language. Notes about Black patients had a 0.67 percentage point greater
+        probability than notes about White patients (95% CI 0.15 to 1.18).
+      - **Sun et al.** (_Health Affairs_ 2022): in 40,113 history and physical notes, Black patients had 2.54
+        times the odds of at least one negative descriptor (such as "resistant" or "noncompliant")
+        compared with White patients.
+
+      The effect sizes differ and each has limits (single centers, particular word lists). The consistent
+      message is that note language varies by patient group, and readers respond to it.
+
+  - type: text
+    title: What that means for models
+    text: |
+      Note-derived features inherit this. A few practical consequences:
+
+      - A model may learn descriptors such as "noncompliant" as predictive features. Whether the signal reflects
+        risk or a **documentation habit**, you cannot tell from the model alone.
+      - **Who has notes at all**, and how long they are, also varies by language, site, and care setting.
+        That is informative missingness (Module 09).
+      - NLP tools can perform differently across note types, sites, and patient groups, so the **extractor**
+        needs subgroup evaluation, not just the downstream model.
+
+      An audit that works:
+
+      1. Score the **NLP** (recall, assertion accuracy) per note type, site, and group where labels allow.
+      2. Inspect the top features or tokens the model uses, looking for descriptors and proxies.
+      3. **Ablate** note features by subgroup and compare performance and calibration (Module 02's subgroup
+         lesson).
+      4. Decide deliberately whether to mask or exclude certain lexicons, and document the trade-off.
+
+  - type: quiz
+    question: |
+      A notes-based readmission model has nearly identical AUROC in every recorded race group. Does that settle
+      the documentation-bias question?
+    options:
+      - Yes, equal AUROC means the model treats groups equally
+      - Yes, because the model never sees the race column
+      - Only if the notes are de-identified
+      - No. Equal AUROC can coexist with reliance on descriptors that reflect documentation habits, or with unequal NLP recall, so inspect top features, ablate by subgroup, and score the extractor per group
+    answer: 3
+    explanation: |
+      AUROC measures ranking within each group and says nothing about which features drove the ranking, or
+      whether the extractor is equally accurate across groups. Text can carry signals about group membership
+      and clinician attitudes even without a race column, and removing identifiers does not necessarily remove
+      them. The audit has to look at the features and at the NLP itself.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A team reports a micro-averaged F1 of 0.91 across 30 concept types and ships the extractor. Nobody slices
+      it. Buried inside is `intracranial hemorrhage`, which is rare and the one you most need to get right, at 0.62.
+      Micro-averaging weights concepts by frequency, so common ones such as hypertension drown it out.
+
+      The same pooling hides other failures: radiology reports worse than discharge summaries, or one hospital's
+      notes worse than another's.
+
+      Habits that prevent it:
+
+      - Report **per concept, per note type, and per site**, with macro and micro side by side.
+      - Put the clinically dangerous confusions (hemorrhage versus infarct, present versus absent) in their own
+        table.
+      - Bootstrap by **patient** for intervals (Module 08), since notes from one patient are not independent.
+      - Finish with the **feature-level** result against chart review, which is what the model actually consumes.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your extractor scores 0.75 F1 with exact match and 0.88 with relaxed matching. Which do you report, and how do
+      you decide if it is good enough?"
+    model_answer: |
+      Both, with the rule stated, and then I'd move to the unit that matters downstream. Exact match penalizes
+      boundary differences that are often harmless, such as `infarct` versus `acute left MCA infarct`, so relaxed
+      shows what the system finds. But if the feature depends on modifiers like laterality, strict is the honest
+      number. I'd also report the assertion-aware score, because a correct span with a wrong negation is useless
+      for a feature. Then I'd do error analysis by category on a dev set, and report final numbers on a held-out
+      test set with patient-level bootstrap intervals. Whether it is good enough depends on the use. I'd
+      compare to inter-annotator agreement as a ceiling, and I'd evaluate the feature at the patient level
+      against chart review, reporting PPV and sensitivity, since mention-level errors get amplified or
+      damped by aggregation.
+    key_points:
+      - Reports strict and relaxed with the matching rule stated, and explains when boundaries matter
+      - Adds an assertion-aware score because attributes decide usability
+      - Uses error analysis on dev and a held-out test set with patient-level bootstrap intervals
+      - Compares with inter-annotator agreement as a ceiling
+      - Evaluates at the patient feature level against chart review
+
+  - type: think
+    interview: true
+    prompt: |
+      "We added note-derived features to a readmission model, and it improved overall. How would you check whether it
+      introduced or amplified bias?"
+    model_answer: |
+      I'd separate the NLP from the model. First, evaluate the extractor by note type, site, language, and recorded
+      race or ethnicity where I have labels: recall and assertion accuracy, not just F1 overall. Then look at the
+      model: top features and tokens, specifically descriptors like "noncompliant" or "refused", and proxies such
+      as note length or number of notes, which reflect who gets documented. I'd ablate the note features by subgroup
+      and compare discrimination, calibration, and the error rates at the operating threshold, since equal AUROC
+      is not enough. If descriptors drive performance, I'd consider masking them at feature time and report the
+      cost. I'd involve clinicians, because some descriptors carry real clinical meaning. Finally I'd document
+      the audit and monitor it after deployment, because note templates and clinician habits shift.
+    key_points:
+      - Separates NLP subgroup evaluation from downstream model evaluation
+      - Inspects top features for stigmatizing descriptors and documentation proxies
+      - Ablates note features by subgroup and compares calibration and thresholded errors, not only AUROC
+      - Weighs masking descriptors against clinical meaning, with clinician input
+      - Documents and monitors over time
+
+  - type: laptop
+    title: An honest span evaluator
+    repo_path: 11-clinical-nlp/src/evaluate_spans.py
+    task: |
+      Create `11-clinical-nlp/src/evaluate_spans.py` with the one-to-one `match` function from this lesson, and compute
+      strict, relaxed, and assertion-aware precision, recall, and F1 over 40 invented notes that have gold spans and
+      predictions you write by hand. Include a merged span, an adjacent pair, and a wrong assertion. Add a
+      bootstrap over notes (resample whole notes, not spans) for a 95% interval, and a pytest for the adjacent-span
+      case. Optional: write ten (statement, paraphrase, negation) triples and, if you have an embedding model
+      available locally, count how often the paraphrase is closer than the negation.
+
+  - type: recap
+    points:
+      - Say which F1. Strict, relaxed, and assertion-aware scores answer different questions
+      - Match one to one, and use strict comparisons with end-exclusive spans
+      - Do error analysis by category and slice, and keep development and test sets separate
+      - Patient-level aggregation raises recall and lowers precision, and copy-forward correlates errors
+      - Validate phenotypes against blinded chart review, and sample negatives with weights to estimate sensitivity
+      - Deduplicate, filter by signing time, and scope by patient when retrieving over notes
+      - Note language varies by patient group, so audit the extractor and the model by subgroup
+      - For generated text, use the evaluation methods in Module 05

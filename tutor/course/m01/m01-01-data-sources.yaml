@@ -1,0 +1,456 @@
+id: m01-01-data-sources
+title: Clinical data sources and coding systems
+summary: EHR vs claims vs registries, the tables they turn into, and the code systems (ICD-10-CM,
+  CPT/HCPCS, NDC/RxNorm, LOINC) that tie them together.
+minutes: 25
+status: authored
+why_it_matters: You cannot write correct SQL on data you do not understand. Interviewers probe whether
+  you know what a claim, an encounter, or a diagnosis code really means, because that is where real
+  projects go wrong.
+objectives:
+  - "Contrast EHR, claims, and registry data: what each captures and what each misses"
+  - Name the grain of each table (encounters, diagnoses, procedures, meds, labs, coverage, claims)
+  - Read ICD-10-CM, CPT/HCPCS, NDC/RxNorm, and LOINC codes and use their hierarchies in SQL
+  - Explain why diagnosis codes are billing artifacts, not ground truth
+  - Walk the repo's synthetic schema and its intentional edge cases
+key_points:
+  - Claims exist to get paid; the EHR exists to document care; registries exist to answer a question
+  - Diagnosis codes are billing artifacts shaped by coding rules and incentives, not ground truth
+  - Enrollment/coverage defines when a patient is observable
+  - "ICD-10-CM is a prefix hierarchy: LIKE 'I63%' is ischemic stroke, LIKE 'I6%' is not"
+  - Always ask for the grain of a table before joining it
+tags: [ehr, claims, icd10, schema]
+steps:
+  - type: text
+    title: Two teams, two stroke counts
+    text: |
+      A health system and the insurer it contracts with both count "ischemic stroke patients in
+      2023" for the same county. The hospital's EHR team finds **1,240**. The insurer's claims
+      team finds **1,610**. Both queries are correct.
+
+      The gap has nothing to do with SQL. Each source sees a different slice of reality:
+
+      - The hospital sees only patients who came to _its_ hospitals, and it sees them in rich detail.
+      - The insurer sees every bill it paid, at any hospital, but only for people it covered.
+
+      Before you write a single join, you need to know **what process generated each table**.
+      That is what this lesson is about.
+
+  - type: text
+    title: Three families of clinical data
+    text: |
+      **EHR (electronic health record)** exists to _document care_. It has vitals, lab values,
+      medication orders, problem lists, and notes. Its weakness is that it's **leaky**: care at
+      another health system is invisible, and there is no roster of who "belongs" to the system.
+
+      **Claims** exist to _get paid_. They cover every billed service across all providers while
+      the person is **enrolled**, and pharmacy claims show what was actually **dispensed**. But
+      claims carry codes, not results: you learn that an LDL was ordered, not what it was. They
+      also arrive late, since adjudication takes weeks to months.
+
+      **Registries** exist to _answer a question_. Trained abstractors collect a fixed set of
+      variables for one condition or procedure (for example AHA's Get With The Guidelines–Stroke,
+      or NCI's SEER for cancer). They're high quality and include things like treatment times or
+      stroke severity, but they're narrow and cover only participating sites.
+
+      Our repo's synthetic data is a **hybrid**: EHR-like encounters, labs, and meds, plus a
+      simplified `claims` table and a `coverage` table.
+
+  - type: quiz
+    question: |
+      You need to know whether stroke patients **actually picked up** a statin within 30 days
+      of discharge. Which source answers this best?
+    options:
+      - The EHR medication list at discharge
+      - Pharmacy claims (dispensing records)
+      - A stroke registry's "statin at discharge" field
+      - Diagnosis codes for hyperlipidemia
+    answer: 1
+    explanation: |
+      Pharmacy claims record a **fill**: the drug left the pharmacy. The EHR discharge list and
+      the registry field both record that a statin was **prescribed**. That's a quality measure,
+      but it tells you nothing about adherence, since many patients never fill. A hyperlipidemia
+      code says nothing about treatment at all.
+
+  - type: text
+    title: Observability comes from coverage
+    text: |
+      Here's the most important idea in claims-style data: **absence of a record only means
+      something while the patient is observable**.
+
+      If a patient has no diabetes code during a year of continuous enrollment, you can
+      reasonably say no diabetes care was billed. If they were uninsured for half that year,
+      "no code" might just mean "no data."
+
+      That is why the repo has a `coverage` table, and why the cohort query requires coverage
+      from `index_date - 365 days` through `index_date`. The EHR has no equivalent roster. That's
+      one reason EHR studies often require "at least one visit in the prior year" as a rough
+      substitute for enrollment.
+
+      Lesson m01-04 builds the eligibility logic. For now, remember that **coverage defines the
+      denominator of what you could have seen**.
+
+  - type: image
+    image: m01-01-schema.png
+    caption: |
+      The repo's eight tables. Patient-level tables (blue) hang off patient_id. Encounter-level
+      tables (green) hang off encounter_id. Labs and medications have no encounter_id at all, so
+      you attach them to an encounter by date, not by key.
+
+  - type: text
+    title: First question for any table is its grain
+    text: |
+      The **grain** is what one row represents. Get it wrong and every join after it is wrong.
+
+      - `patients`: one row per patient.
+      - `coverage`: one row per **enrollment period**. Some patients have two, with a gap.
+      - `encounters`: one row per visit or stay (outpatient, ED, inpatient).
+      - `diagnoses`: one row per code per encounter, plus some injected **duplicate rows**.
+      - `procedures`: one row per procedure performed in an encounter.
+      - `medications`: one row per **exposure period** (start and end date).
+      - `labs`: one row per result. Some `result_value`s are missing.
+      - `claims`: one row per encounter **in this repo**. Real data has many: a hospital stay
+        produces a facility claim plus separate professional claims from each physician.
+
+      Say the grain out loud before joining. "Diagnoses are many-per-encounter" is the sentence
+      that saves you from double-counting in the next lesson.
+
+  - type: quiz
+    question: |
+      You want the LDL value measured **during** each patient's index stroke encounter. How do
+      you connect `labs` to `encounters` in this schema?
+    options:
+      - "`labs.encounter_id = encounters.encounter_id`"
+      - Join on `patient_id` and require `lab_date` to fall between `encounter_start` and `encounter_end`
+      - "Join through `claims`, which links labs to encounters"
+      - "It's impossible, since labs cannot be linked to patients"
+    answer: 1
+    explanation: |
+      `labs` has no `encounter_id` column, so the first option doesn't exist. You link by
+      patient plus a **date window**. That's common in real extracts too, and it has traps:
+      `encounter_end` is sometimes missing, and date-level timestamps make same-day attribution
+      ambiguous. Claims don't carry lab results.
+
+  - type: text
+    title: Diagnosis codes are billing artifacts
+    text: |
+      An ICD-10-CM code on a record means a coder or clinician chose that code for a claim or a
+      problem list. It does **not** mean the patient has the disease. Some reasons the two
+      diverge:
+
+      - **Coding rules differ by setting.** For inpatient stays, a diagnosis still "probable" or
+        "suspected" at discharge is coded _as if confirmed_. In outpatient settings it must not
+        be. There, you code the symptom instead.
+      - **Rule-out testing.** Tests and referrals are sometimes billed under the condition being
+        ruled out, even though the rules discourage it, so a lone code can mark a suspicion.
+      - **Incentives.** Codes drive payment (for example inpatient DRGs and risk adjustment), so
+        documentation and coding intensity vary by hospital and over time.
+      - **Carry-forward.** A stroke coded years ago can be copied onto later visits.
+      - **Under-coding.** Conditions that don't affect payment are often left off.
+
+      So treat a code as a **noisy measurement**. Real phenotypes combine the code with the
+      **setting** (ED or inpatient), **position** (principal diagnosis), **timing**, and
+      supporting evidence (imaging, meds). Validation studies compare them to chart review.
+
+  - type: quiz
+    question: |
+      A patient has an **outpatient** neurology visit 3 months after a stroke admission, and the
+      visit carries code `I63.9`. How should a stroke-incidence pipeline treat it?
+    options:
+      - As a new ischemic stroke, since I63.9 is the ischemic stroke code
+      - As a data error that should be deleted
+      - As an unspecified hemorrhagic stroke
+      - As follow-up care for the earlier stroke, not a new event
+    answer: 3
+    explanation: |
+      Acute stroke is treated in the ED or hospital. An outpatient visit with an I63 code is
+      almost always follow-up, even though stricter coding would use a history or sequela code.
+      This is exactly why the repo's cohort requires `encounter_type IN ('ED', 'inpatient')`.
+      Deleting it would be wrong too, because it's real information about follow-up care.
+
+  - type: text
+    title: How an ICD-10-CM code is built
+    text: |
+      ICD-10-CM (the US clinical modification, used for diagnoses since **October 1, 2015**) codes
+      are 3–7 characters:
+
+      - The **first letter** roughly marks the chapter: `I` is circulatory, `E` is endocrine,
+        `N` is genitourinary, `Z` is factors influencing health status.
+      - The **first three characters** are the **category**: `I63` is cerebral infarction.
+      - Characters after the dot add **etiology, site, laterality, severity**: `I63.4` is due to
+        embolism, and `I63.411` is embolism of the right middle cerebral artery.
+      - Some chapters use a **7th character** for encounter type (for injuries, `A` initial,
+        `D` subsequent, `S` sequela).
+
+      Only the most specific codes are **billable**, so a valid claim never carries the bare
+      category `I63`. That makes the hierarchy a **prefix tree**, and `LIKE 'I63%'` selects a whole
+      subtree.
+
+      Two neighbours to know: **ICD-10-PCS** is a separate system for _inpatient procedures_, and
+      data before October 2015 is **ICD-9-CM**. Any pipeline spanning 2015 needs a mapping (CMS
+      published General Equivalence Mappings for this), and the mapping is imperfect.
+
+  - type: image
+    image: m01-01-icd10-tree.png
+    caption: |
+      The stroke neighbourhood of ICD-10-CM. I63 (ischemic) sits beside I60/I61 (hemorrhagic) and
+      I69 (sequelae, meaning late effects of a past stroke). A too-short prefix silently mixes
+      them.
+
+  - type: quiz
+    question: Which filter selects acute ischemic stroke diagnosis rows?
+    code: |
+      -- A
+      WHERE icd10_code = 'I63'
+      -- B
+      WHERE icd10_code LIKE 'I6%'
+      -- C
+      WHERE icd10_code LIKE 'I63%'
+      -- D
+      WHERE icd10_code IN ('I63.9')
+    options:
+      - A
+      - B
+      - C
+      - D
+    answer: 2
+    explanation: |
+      C selects the whole I63 subtree. A returns **zero rows**: the category itself isn't
+      billable, so clean records don't carry exactly `I63`. B pulls in hemorrhagic strokes (I60–I62) and
+      **I69 sequelae**, which are late effects of old strokes. D happens to work on this synthetic
+      data, which only uses I63.9, but on real data it misses every specific code like I63.4.
+
+  - type: code
+    title: Treat value sets as data, not string literals
+    text: |
+      Real projects keep code lists in a table (a **value set**) so they can be reviewed,
+      versioned, and reused. A DuckDB sketch against the repo:
+    code: |
+      WITH stroke_value_set(code_prefix, concept) AS (
+          VALUES ('I63', 'ischemic stroke'),
+                 ('I61', 'intracerebral hemorrhage')
+      )
+      SELECT v.concept,
+             COUNT(*)                   AS dx_rows,
+             COUNT(DISTINCT d.patient_id) AS patients
+      FROM diagnoses d
+      JOIN stroke_value_set v
+        ON REPLACE(d.icd10_code, '.', '') LIKE v.code_prefix || '%'
+      GROUP BY v.concept;
+    after: |
+      Two habits are shown here. `REPLACE(..., '.', '')` makes the match work whether a source
+      stores `I63.9` or `I639`, since claims files often drop the dot. And counting both rows and
+      distinct patients exposes the gap between them (exercise tasks 4 and 5). In the repo, only
+      the I63 row will return results.
+
+  - type: text
+    title: Codes change every year
+    text: |
+      ICD-10-CM gets its main update every **October 1** (the start of the US federal fiscal
+      year), plus an occasional smaller April 1 update. Codes get added, split, and occasionally
+      deleted.
+
+      The repo uses `N18.3` for chronic kidney disease stage 3. Real data from October 2020 onward
+      doesn't: that code was split into `N18.30`, `N18.31` (stage 3a), and `N18.32` (stage 3b).
+      A pipeline that tests `icd10_code = 'N18.3'` would show CKD prevalence **dropping to zero**
+      in late 2020, which looks like a clinical trend but is really a coding change.
+
+      Defenses: use prefix matching where the hierarchy allows it, version your value sets, and
+      plot code counts over time. A sudden step change is almost always coding, not biology.
+      m01-06 turns this into a data-quality check.
+
+  - type: text
+    title: CPT and HCPCS describe what was done
+    text: |
+      Diagnosis codes say _why_. Procedure codes say _what was done_, and they drive payment.
+
+      - **CPT** (maintained by the AMA) is HCPCS Level I: 5-digit codes for physician and
+        outpatient services. Category II codes (ending in `F`) track quality measures, and
+        Category III codes (ending in `T`) cover emerging technology.
+      - **HCPCS Level II** (maintained by CMS) is a letter plus 4 digits, covering supplies,
+        ambulance rides, and drugs given in the clinic (the `J` codes).
+
+      In the repo, `procedures.cpt_hcpcs_code` uses `70450` (CT head without contrast), `70551`
+      (MRI brain without contrast), `93000` (ECG), and `93306` (transthoracic echo). The
+      `claims.primary_hcpcs` column uses `99213` (established office visit) and `99285`
+      (high-complexity ED visit).
+
+      One simplification to know: the repo bills inpatient stays as `99285`. Real inpatient
+      **facility** payment runs through **DRGs** built from ICD-10-CM and ICD-10-PCS codes.
+      Physicians bill their inpatient services separately with CPT.
+
+  - type: quiz
+    question: |
+      A colleague defines "stroke patients" as anyone with a claim or procedure for CPT `70450`
+      (CT head). What's the biggest problem?
+    options:
+      - CT head is ordered for headache, falls, trauma, and suspected stroke alike, so it marks a workup, not a diagnosis
+      - CPT codes never appear on claims
+      - "`70450` is a HCPCS Level II drug code"
+      - CT head is only done after the diagnosis is confirmed
+    answer: 0
+    explanation: |
+      Imaging is **supporting evidence**, not a phenotype. Almost every suspected stroke gets a
+      CT head, but so do many patients who never had a stroke. Combining an I63 code in an ED or
+      inpatient setting with imaging raises confidence. Using imaging alone gives a cohort full of
+      rule-outs. CPT codes are precisely what professional claims carry.
+
+  - type: text
+    title: Drugs use NDC and RxNorm
+    text: |
+      **NDC** (National Drug Code, from the FDA) identifies a specific **package**, broken into
+      labeler, product, and package segments. It is 10 digits in labeling, and billing uses an
+      11-digit 5-4-2 format. Atorvastatin 40 mg has dozens of NDCs across manufacturers and pack
+      sizes.
+
+      **RxNorm** (from the National Library of Medicine) normalizes drugs into concepts, each
+      identified by an **RxCUI**. It links an ingredient (atorvastatin) to clinical drugs
+      (atorvastatin 40 mg oral tablet) and branded forms. The standard analytic path is
+      **NDC → RxNorm → ingredient → drug class**.
+
+      Also know _which event_ a drug record describes: an EHR **order**, a pharmacy **fill**
+      (claims), or an inpatient **administration** (the MAR). They answer different questions.
+
+      The repo's `medications` table has already been rolled up to `medication_name` and
+      `drug_class` (for example apixaban/anticoagulant), with start and end dates. Real data
+      makes you do that roll-up yourself.
+
+  - type: text
+    title: Labs use LOINC and carry units
+    text: |
+      **LOINC** (from the Regenstrief Institute) identifies _what was measured_ along six axes:
+      component, property, timing, specimen system, scale, and method. For example, `2160-0` is
+      creatinine, mass per volume, in serum or plasma. The digit after the hyphen is a check digit.
+
+      The repo simplifies this to `test_name` values like `'LDL'`. In a real EHR, "LDL" might be
+      several LOINC codes (calculated vs directly measured), each with local names like
+      "LDL-C CALC" or "LDL DIRECT", and sometimes different **units** (mg/dL vs mmol/L).
+
+      So selecting a lab reliably means a curated list of LOINC codes, a check on the units, and a
+      plausibility range. Lab **values** also live only in the EHR (or in lab-results feeds).
+      Claims only record that a test was billed.
+
+  - type: quiz
+    question: |
+      In a real EHR extract, what's the most robust way to select LDL cholesterol **results**?
+    options:
+      - "`WHERE test_name LIKE '%LDL%'`"
+      - Claims with CPT `80061` (lipid panel)
+      - A curated set of LOINC codes, plus unit harmonization and a plausibility range
+      - Patients with a hyperlipidemia diagnosis code
+    answer: 2
+    explanation: |
+      LOINC identifies the measurement itself, and units and ranges catch mapping errors. A text
+      match catches things like "LDL/HDL ratio" and misses unusual local names. `80061` is a real
+      lipid-panel CPT code, but a claim only shows the test was billed, not the value. A
+      diagnosis code isn't a lab result at all.
+
+  - type: think
+    interview: true
+    prompt: |
+      "You have both EHR data and claims data for the same stroke population. What does each
+      give you, where does each fail, and how would you use them together?"
+    model_answer: |
+      I'd frame it by what each source was built for. Claims exist for payment, so they're
+      complete across providers while the patient is enrolled. Enrollment gives me a real
+      denominator and lets me trust that "no claim" means "no billed care." Pharmacy claims
+      also show fills, which I need for adherence. But claims have no lab values or vitals, they
+      lag by weeks or months, and the codes reflect billing rules. The EHR exists to document
+      care, so it has lab results, vitals, notes, and exact timing. But it's leaky: anything
+      that happened at another system is invisible, and there's no enrollment roster, so absence
+      of a record is ambiguous. Together, I'd use claims to define the population and
+      observability windows and to capture out-of-network events like readmissions elsewhere.
+      I'd use the EHR for clinical severity and lab-based features. The hard parts are patient
+      linkage (a shared ID or privacy-preserving record linkage) and reconciling dates and codes
+      between the two, so I'd check agreement on a few overlapping fields first.
+    key_points:
+      - Claims are complete across providers during enrollment and have a denominator, but lack results and arrive late
+      - The EHR has clinical detail and timing but misses care delivered elsewhere
+      - Absence of a record means different things in each source
+      - Linking the two lets claims define observability and outside events while the EHR supplies clinical features
+      - Linkage and reconciliation are real work that needs validation
+
+  - type: text
+    title: The repo's deliberate traps
+    text: |
+      The synthetic generator (`src/clinical_data_engineering/generator.py`) plants realistic
+      problems on purpose. Here's where each one bites:
+
+      - **Duplicate diagnosis rows** under new `diagnosis_id`s cause join fan-out and
+        double-counting (m01-02, m01-06).
+      - **Diagnosis dates shifted 30 days late** create look-ahead leakage (m01-05).
+      - **Missing `encounter_end`** (about 1.5% of encounters) breaks length of stay and
+        discharge-anchored readmission (m01-03, m01-05).
+      - **Two coverage periods with a 30–180 day gap** (about 12% of patients) break lookback
+        eligibility (m01-03, m01-04).
+      - **Multiple stroke encounters** for some patients make you pick an index event (m01-03,
+        m01-04).
+      - **Missing lab values** (about 3%) need filtering before "latest value" logic.
+
+      One more quirk the codebook doesn't mention: `paid_amount` is populated even when
+      `claim_status = 'denied'`. Real denied claims pay nothing, so filter on status when you sum
+      payments.
+
+  - type: quiz
+    question: |
+      To find clinical duplicate diagnoses, why must you **leave out** `diagnosis_id` when you
+      group rows?
+    options:
+      - It is a string, and GROUP BY only works on dates and numbers
+      - It's a technical key that is unique per row by construction, so including it makes every group size 1
+      - It's the encounter's key, so it would merge different encounters
+      - Including it would double the number of duplicates
+    answer: 1
+    explanation: |
+      A surrogate key identifies a **row**, not a clinical fact. The injected duplicates are the
+      same patient, encounter, date, and code under a fresh ID. So grouping by the clinical
+      columns (patient_id, encounter_id, diagnosis_date, icd10_code, diagnosis_name) and keeping
+      `HAVING COUNT(*) > 1` finds them. Adding `diagnosis_id` hides every one.
+
+  - type: laptop
+    title: Meet the data (exercise tasks 1–5 and 9)
+    repo_path: 01-clinical-data-engineering/exercises/01_getting_started.md
+    task: |
+      Follow the setup in the exercise file to generate the data and load `data/clinical.duckdb`.
+      Then write your own SQL for tasks 1–5 and 9:
+
+      - Row counts per table, and encounters by type. Does the mix look like 70% outpatient,
+        16% ED, 14% inpatient, with strokes pushing ED and inpatient a bit higher?
+      - For I63 rows, compare `COUNT(*)` to `COUNT(DISTINCT patient_id)` and explain the gap.
+      - Total and mean `paid_amount` by `place_of_service`, once with all claims and once with
+        `claim_status = 'paid'` only.
+
+      In your notes, answer exercise question 5 (payments vs encounter counts) in three sentences.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Leadership wants to know whether stroke patients use more healthcare in the year before
+      their stroke. Would you measure that with encounter counts or with paid amounts?"
+    model_answer: |
+      They measure different things, so I'd report both and say which question each answers.
+      Encounter counts measure contact volume: how often the patient touched the system. Paid
+      amounts measure resource intensity multiplied by price. One inpatient stay can cost more
+      than thirty office visits, and prices vary with the payer contract and plan type
+      (Medicare rates differ from commercial ones) and with place of service. Paid also excludes
+      the patient's cost sharing. If I want total resource use, allowed amount is usually the
+      better measure. I'd drop denied claims from spending and use the observed coverage period
+      as the denominator, reporting per member per month. Costs are heavily right-skewed, so I'd
+      show medians or trimmed means alongside the mean. Finally, in real claims one encounter can
+      generate several claims, so I'd define a visit or episode before counting.
+    key_points:
+      - Counts measure volume of contact, while payments measure intensity times price
+      - Prices vary by payer, plan type, and place of service, and paid excludes cost sharing (allowed is often better)
+      - Exclude denied claims and normalize by enrolled time, for example per member per month
+      - Cost distributions are skewed, so report robust summaries
+      - Real claims are not one-per-encounter, so define the unit before counting
+
+  - type: recap
+    points:
+      - "**EHR** documents care, **claims** get paid, **registries** answer a question, and each one has blind spots"
+      - Coverage defines when "no record" means "nothing happened"
+      - State each table's **grain** before joining; labs and meds link by date, not encounter
+      - Diagnosis codes are **billing artifacts**, so combine code, setting, position, and timing
+      - "ICD-10-CM is a prefix tree: `I63%` is ischemic stroke, `I6%` adds hemorrhage and sequelae"
+      - CPT/HCPCS say what was done, NDC→RxNorm normalizes drugs, and LOINC plus units identifies labs
+      - Keep code lists as versioned value sets, and watch for yearly code changes

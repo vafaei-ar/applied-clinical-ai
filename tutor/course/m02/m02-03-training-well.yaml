@@ -1,0 +1,583 @@
+id: m02-03-training-well
+title: "Training well: optimizers, schedules, checkpoints, AMP, and reproducibility"
+summary: AdamW and weight decay, warmup and schedules, early stopping, resumable checkpoints, mixed
+  precision, seeds, GPU memory, profiling, and the idea behind DDP.
+minutes: 28
+status: authored
+why_it_matters: A training loop that runs is not the same as one a team can trust. Resumable,
+  reproducible, efficient training is what senior ML interviews probe, and what regulated clinical work
+  requires when someone asks "how exactly was this model produced?"
+objectives:
+  - Choose AdamW with sensible weight decay and a warmup-plus-decay schedule
+  - Implement early stopping on a validation metric and restore the best weights
+  - Write checkpoints that resume training exactly (model, optimizer, scheduler, scaler, epoch)
+  - Explain mixed precision, bf16 vs fp16, and when GradScaler is needed
+  - Control randomness for reproducibility and know its limits
+  - "Reason about GPU memory: weights, gradients, optimizer state, activations, gradient accumulation"
+  - Explain what DDP does and what changes when you add GPUs
+key_points:
+  - Save optimizer + scheduler + epoch (+ scaler), not just weights
+  - Early-stop on validation, restore the best checkpoint, and keep the test set separate
+  - "bf16: fp32 range, no GradScaler needed; fp16: needs loss scaling"
+  - Seeds give repeatability on fixed hardware, and seed variance should be reported
+  - Profile before optimizing
+  - "DDP: one process per GPU, gradients all-reduced during backward"
+tags: [pytorch, mlops, interview]
+steps:
+  - type: text
+    title: Epoch 38 of 50
+    text: |
+      Your readmission model has been training overnight on a shared GPU node. At epoch 38 the
+      job is preempted. You restart it from `model.pt`, the weights you saved each epoch.
+
+      The loss spikes, and it takes ten epochs to recover. The final validation AUROC is 0.02
+      lower than the run your colleague reported last week from the same code, and neither of
+      you can reproduce the other's number.
+
+      Nothing here is a modelling problem. The checkpoint was missing the optimizer and
+      scheduler state, and nobody controlled randomness. This lesson covers the engineering
+      that makes training **resumable, reproducible, and efficient**. m02-02 built the loop, and
+      this lesson makes it trustworthy.
+
+  - type: text
+    title: AdamW and decoupled weight decay
+    text: |
+      **Adam** keeps two running averages per parameter: the gradient (momentum) and the squared
+      gradient. It divides each step by the square root of the second, so every parameter gets
+      its own effective step size. That makes it forgiving of poorly scaled problems, and it is
+      the default choice for most networks.
+
+      The subtlety is regularization. Classic **L2 regularization** adds `λ·w` to the gradient.
+      In Adam, that term then gets divided by the adaptive denominator, so parameters with large
+      gradients are barely regularized. **AdamW** (Loshchilov & Hutter, ICLR 2019) decouples
+      the two: it shrinks weights directly, `w ← w − lr·λ·w`, separately from the adaptive
+      step.
+
+      In PyTorch, `torch.optim.Adam(weight_decay=...)` is the coupled L2 version, and
+      `torch.optim.AdamW` is the decoupled one. Use AdamW. Common starting points are
+      `lr=1e-3` for small MLPs and `weight_decay` between 0.01 and 0.1. Usually biases and
+      normalization parameters are not decayed.
+
+  - type: code
+    title: AdamW with parameter groups
+    language: python
+    code: |
+      decay, no_decay = [], []
+      for name, p in model.named_parameters():
+          if not p.requires_grad:
+              continue
+          # weight matrices are 2-D; biases and norm scales are 1-D
+          (decay if p.ndim >= 2 else no_decay).append(p)
+
+      optimizer = torch.optim.AdamW(
+          [{"params": decay, "weight_decay": 0.05},
+           {"params": no_decay, "weight_decay": 0.0}],
+          lr=1e-3,
+          betas=(0.9, 0.999),
+      )
+    after: |
+      Parameter groups let one optimizer apply different settings to different parameters. The
+      same mechanism gives a pretrained backbone a lower learning rate than a new head when you
+      fine-tune.
+
+  - type: quiz
+    question: |
+      A colleague says `torch.optim.Adam(params, weight_decay=0.01)` and
+      `torch.optim.AdamW(params, weight_decay=0.01)` are the same thing. What's the actual
+      difference?
+    options:
+      - AdamW applies weight decay directly to the weights, while Adam adds it to the gradient, where the adaptive scaling distorts it
+      - There is none; AdamW is an alias kept for backward compatibility
+      - AdamW turns off momentum to make weight decay work
+      - Adam decays weights more strongly because it uses a larger default learning rate
+    answer: 0
+    explanation: |
+      In Adam, the L2 term joins the gradient and is divided by the per-parameter RMS, so the
+      effective regularization is weaker for parameters with large or noisy gradients. AdamW
+      applies `lr·λ·w` directly, separate from the adaptive step, which matches true weight
+      decay and usually generalizes better. They are different optimizers with the same
+      default learning rate of 1e-3.
+
+  - type: text
+    title: Learning rate schedules and warmup
+    text: |
+      The learning rate is usually the most important hyperparameter to tune. A **schedule** changes it
+      over training. The common shape is:
+
+      - **Warmup**: start small and ramp up linearly over the first few percent of steps.
+        Early on, Adam's second-moment estimates are based on very few gradients, and the
+        weights are random. Large steps at that stage can push training somewhere it never
+        recovers from. Warmup matters most for transformers, large batches, and fine-tuning.
+      - **Decay**: after the peak, reduce the rate, often with a cosine curve, so late training
+        makes small refinements instead of bouncing around a minimum.
+
+      Other options include step decay (cut by 10× at fixed epochs), `OneCycleLR`, and
+      `ReduceLROnPlateau`, which lowers the rate when a validation metric stalls and is called
+      as `scheduler.step(val_loss)`.
+
+      For a small tabular MLP, a constant rate with early stopping is often good enough. Learn
+      the full pattern anyway, because it is standard for anything bigger.
+
+  - type: image
+    image: m02-03-lr-schedule.png
+    caption: |
+      Linear warmup from 10% of the peak over the first 10% of steps, then cosine decay toward
+      zero. The x-axis is optimizer steps (batches), not epochs.
+
+  - type: code
+    title: Warmup + cosine in PyTorch
+    language: python
+    code: |
+      from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+      total_steps = max_epochs * len(train_loader)
+      warmup_steps = int(0.1 * total_steps)
+
+      scheduler = SequentialLR(
+          optimizer,
+          schedulers=[
+              LinearLR(optimizer, start_factor=0.1, total_iters=warmup_steps),
+              CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps),
+          ],
+          milestones=[warmup_steps],
+      )
+
+      # inside the batch loop, right after optimizer.step():
+      scheduler.step()
+
+  - type: quiz
+    question: "Find the bug. The model trains, but slowly, and never seems to reach its full learning rate."
+    code: |
+      # 50 epochs, 100 batches per epoch
+      scheduler = SequentialLR(optimizer, schedulers=[
+          LinearLR(optimizer, start_factor=0.1, total_iters=500),
+          CosineAnnealingLR(optimizer, T_max=4500)], milestones=[500])
+
+      for epoch in range(50):
+          train_one_epoch(model, train_loader, loss_fn, optimizer, device)
+          scheduler.step()
+    language: python
+    options:
+      - LinearLR cannot be combined with cosine annealing
+      - start_factor should be 0
+      - The schedule is defined in batches but stepped once per epoch, so after 50 steps warmup is only 10% done
+      - scheduler.step() must be called before optimizer.step()
+    answer: 2
+    explanation: |
+      `total_iters` and `T_max` count **calls to `scheduler.step()`**. Stepping once per epoch
+      means only 50 calls in the whole run, so the learning rate climbs from 10% to only about
+      19% of its peak and the cosine phase never starts. Either step inside the batch loop or
+      define the schedule in epochs. Calling `scheduler.step()` before `optimizer.step()` is
+      also wrong, and PyTorch warns about it.
+
+  - type: text
+    title: Early stopping on the validation metric
+    text: |
+      Training loss keeps falling, but validation performance eventually stops improving and
+      then gets worse as the model starts fitting noise. **Early stopping** monitors a
+      validation metric each epoch, saves the best checkpoint, and stops after `patience` epochs
+      without improvement (by at least `min_delta`). You then **restore the best weights**. The
+      last epoch is not the best one.
+
+      Which metric to monitor?
+
+      - **Validation loss (BCE)** is smooth and rewards calibrated probabilities. It's a good
+        default.
+      - **AUPRC or AUROC** match what you'll report, but with few events they are noisy from
+        epoch to epoch, so use more patience.
+
+      One statistical point: the validation set is now **used for model selection**, so its
+      score is optimistically biased. Report final performance on a test set that played no
+      part in stopping, tuning, or thresholds.
+
+  - type: image
+    image: m02-03-learning-curve.png
+    caption: |
+      Simulated run. Validation loss bottoms out at epoch 19 while training loss keeps falling.
+      With patience 8, training stops at epoch 27, and the epoch-19 checkpoint is restored. The
+      dotted lines show what would have happened without stopping.
+
+  - type: quiz
+    question: |
+      In the figure, early stopping fires at epoch 27. Which weights should you evaluate on the
+      test set?
+    options:
+      - Epoch 27, the weights in memory when training stopped
+      - Epoch 40, because it has the lowest training loss
+      - Epoch 19, the saved best-validation checkpoint
+      - An average of the last 8 epochs
+    answer: 2
+    explanation: |
+      The weights in memory at the stopping point are `patience` epochs **past** the best one and
+      already overfitting. Early stopping works only if you saved the best checkpoint and reload
+      it. The lowest training loss is the most overfit point. Weight averaging (SWA/EMA) is a real
+      technique, but it is a separate method, not what early stopping means.
+
+  - type: text
+    title: What a checkpoint must contain
+    text: |
+      A weights-only file is enough for **inference**, but not for **resuming training**. To
+      continue exactly where you stopped, you need:
+
+      - `model.state_dict()`: the weights.
+      - `optimizer.state_dict()`: Adam's moment estimates for every parameter. Without them the
+        optimizer restarts cold, which causes the loss spike in the opening story.
+      - `scheduler.state_dict()`: where you are in the schedule. Without it, warmup restarts or
+        the rate jumps back to its peak.
+      - `scaler.state_dict()` if you use fp16 (see below).
+      - `epoch`, the best validation value so far, and the early-stopping counter.
+      - The **config** (hyperparameters, feature list) and ideally RNG states.
+
+      For a clinical model, also version the **preprocessing** (the fitted imputer and scaler,
+      and the feature order) together with the weights. A model served in Module 03 without its
+      exact preprocessing is a different model. Write checkpoints atomically: save to a
+      temporary file, then `os.replace`, so a crash mid-write doesn't corrupt your only copy.
+
+  - type: code
+    title: Save and resume
+    language: python
+    code: |
+      import os
+
+      import torch
+
+
+      def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best, cfg):
+          tmp = f"{path}.tmp"
+          torch.save({
+              "model": model.state_dict(),
+              "optimizer": optimizer.state_dict(),
+              "scheduler": scheduler.state_dict(),
+              "scaler": scaler.state_dict(),
+              "epoch": epoch,
+              "best_val": best,
+              "cfg": cfg,                      # plain dict: lr, features, seed, ...
+              "torch_rng": torch.get_rng_state(),
+          }, tmp)
+          os.replace(tmp, path)                 # atomic on the same filesystem
+
+
+      ckpt = torch.load("last.pt", map_location=device, weights_only=True)
+      model.load_state_dict(ckpt["model"])
+      optimizer.load_state_dict(ckpt["optimizer"])
+      scheduler.load_state_dict(ckpt["scheduler"])
+      scaler.load_state_dict(ckpt["scaler"])
+      start_epoch, best = ckpt["epoch"] + 1, ckpt["best_val"]
+    after: |
+      `weights_only=True` (the default since PyTorch 2.6) refuses to unpickle arbitrary Python
+      objects, which protects you from malicious checkpoint files. State dicts, tensors, and
+      plain dicts of numbers and strings load fine. Keep two files: `last.pt` for resuming and
+      `best.pt` for early stopping.
+
+  - type: quiz
+    question: |
+      You resume a preempted AdamW + warmup/cosine run by loading **only** `model.state_dict()`.
+      What goes wrong?
+    options:
+      - Nothing, because the weights contain everything the model learned
+      - The model loads on CPU instead of GPU
+      - Batch norm statistics are lost
+      - Adam's moment estimates reset and the schedule restarts, so the next steps are too large and the loss spikes
+    answer: 3
+    explanation: |
+      The weights are what the model has learned, but not the optimizer's position. With fresh
+      Adam moments and a scheduler back at step 0, you get a cold optimizer, possibly a second
+      warmup to the peak rate, and the wrong epoch count for early stopping. BatchNorm running
+      statistics are buffers, and they **are** in `model.state_dict()`. Device placement is
+      handled by `map_location`.
+
+  - type: text
+    title: "Mixed precision: bf16 vs fp16"
+    text: |
+      **Automatic mixed precision** (AMP) runs matrix multiplies and convolutions in 16-bit
+      floats while keeping the master weights in fp32. On modern GPUs, 16-bit math uses tensor
+      cores (often 2× or more faster for large matmuls) and halves activation memory.
+      `torch.autocast` chooses the precision per operation: matmuls in 16-bit, and numerically
+      sensitive operations (reductions, softmax, most losses) in fp32.
+
+      There are two 16-bit formats:
+
+      - **fp16**: 5 exponent bits and 10 mantissa bits. It has more precision but a narrow
+        range (max about 65,504), so small gradients **underflow to zero**. It needs **loss
+        scaling**: `GradScaler` multiplies the loss before backward, unscales before the step,
+        and skips steps that produced inf or NaN.
+      - **bf16**: 8 exponent bits (the **same range as fp32**) and only 7 mantissa bits. It
+        rarely underflows, so **no GradScaler** is needed. It is supported on NVIDIA Ampere
+        (A100, RTX 30-series) and newer, and on TPUs.
+
+      Use bf16 where the hardware supports it, and fp16 with a scaler otherwise. A small MLP on
+      a few hundred patients gains nothing from AMP. AMP matters for transformers and imaging
+      models.
+
+  - type: code
+    title: An AMP training step (current torch.amp API)
+    language: python
+    code: |
+      bf16_ok = torch.cuda.is_bf16_supported(including_emulation=False)   # Ampere or newer
+      amp_dtype = torch.bfloat16 if bf16_ok else torch.float16
+      scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
+
+      for X, y in train_loader:
+          X, y = X.to(device), y.to(device)
+          optimizer.zero_grad()
+          with torch.autocast(device_type="cuda", dtype=amp_dtype):
+              logits = model(X)
+              loss = loss_fn(logits, y)          # BCEWithLogitsLoss is autocast-safe
+          scaler.scale(loss).backward()          # no-op scaling when disabled (bf16)
+          scaler.unscale_(optimizer)             # so clipping sees true gradients
+          torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+          scaler.step(optimizer)                 # skips the step if grads are inf/NaN
+          scaler.update()
+          scheduler.step()
+    after: |
+      `torch.cuda.amp.autocast` and `torch.cuda.amp.GradScaler` are the deprecated spellings.
+      Use `torch.autocast(device_type=...)` and `torch.amp.GradScaler("cuda")`. Only the
+      forward pass and loss go inside `autocast`. Backward runs outside it. Note
+      `including_emulation=False`: by default `is_bf16_supported()` also returns True on
+      pre-Ampere GPUs (T4, V100) where bf16 is emulated and slow, and there fp16 with the
+      scaler is the better choice.
+
+  - type: quiz
+    question: |
+      You train on an A100 with `torch.autocast(device_type="cuda", dtype=torch.bfloat16)`. Do
+      you need `GradScaler`?
+    options:
+      - Yes, every mixed-precision run needs a scaler
+      - No; bf16 has fp32's exponent range, so gradients rarely underflow
+      - Yes, because bf16 has less mantissa precision than fp16
+      - No, because autocast runs the backward pass in fp64
+    answer: 1
+    explanation: |
+      Loss scaling exists to fight **underflow**, which is a range problem. bf16 keeps fp32's 8
+      exponent bits, so its range matches fp32 and scaling is unnecessary. Its lower mantissa
+      precision is real, but scaling doesn't fix precision, and autocast keeps sensitive
+      operations and master weights in fp32 anyway. fp16's 5-bit exponent is why it needs the
+      scaler.
+
+  - type: text
+    title: Seeds and determinism
+    text: |
+      Randomness enters training through weight initialization, data shuffling, dropout, data
+      augmentation, DataLoader worker processes, and some GPU kernels that are
+      **nondeterministic** (atomic adds in some backward passes, and cuDNN autotuning that
+      picks different algorithms).
+
+      To make a run repeatable:
+
+      - Seed Python, NumPy, and PyTorch at the start.
+      - Pass a seeded `torch.Generator` to the `DataLoader`, and seed each worker.
+      - Call `torch.use_deterministic_algorithms(True)` and turn off
+        `torch.backends.cudnn.benchmark`. Some CUDA operations also need the
+        `CUBLAS_WORKSPACE_CONFIG` environment variable set before CUDA initializes.
+
+      Know the limits. Determinism holds on the **same hardware, driver, and library
+      versions**. Across GPUs or PyTorch releases, bit-for-bit identity is not guaranteed.
+      Deterministic kernels can also be slower.
+
+      The more important habit is to **report variance across seeds**. On a small clinical
+      dataset, AUROC can move by a few hundredths between seeds, which is often more than the
+      gap between two models you are comparing.
+
+  - type: code
+    title: seed_everything
+    language: python
+    code: |
+      import os
+      import random
+
+      import numpy as np
+      import torch
+
+
+      def seed_everything(seed: int = 42, deterministic: bool = True) -> torch.Generator:
+          random.seed(seed)
+          np.random.seed(seed)
+          torch.manual_seed(seed)                    # CPU and all CUDA devices
+          if deterministic:
+              os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"   # before CUDA init
+              torch.use_deterministic_algorithms(True)
+              torch.backends.cudnn.benchmark = False
+          return torch.Generator().manual_seed(seed)
+
+
+      def seed_worker(worker_id):
+          s = torch.initial_seed() % 2**32           # differs per worker, derived from base seed
+          np.random.seed(s)
+          random.seed(s)
+
+
+      g = seed_everything(42)
+      train_loader = DataLoader(train_ds, batch_size=64, shuffle=True, num_workers=4,
+                                worker_init_fn=seed_worker, generator=g)
+
+  - type: think
+    interview: true
+    prompt: |
+      "A colleague can't reproduce the AUROC you reported for the readmission model. How do you
+      make training reproducible, and what are the limits?"
+    model_answer: |
+      First I'd check that we're running the same thing: the same data snapshot (a hash of the
+      feature table), the same git commit, the same config, and the same library versions,
+      ideally from a lockfile or container image. Most "can't reproduce" cases are really
+      different data or code. Then I'd control randomness. That means seeding Python, NumPy, and
+      torch, using a seeded generator and worker seeding in the DataLoader, turning on
+      deterministic algorithms, and turning off cuDNN benchmarking. With that, the same hardware
+      and software stack should give identical results. The limit is that bit-level
+      determinism doesn't survive a change of GPU model, driver, or PyTorch version, and
+      deterministic kernels can be slower. So the stronger answer is statistical. I'd rerun
+      with five or so seeds and report the mean and spread, plus a bootstrap CI on the test
+      set. If the reported number sits within that spread, the result reproduces in the sense
+      that matters. I'd log all of this in the experiment tracker, which is the subject of
+      m02-07.
+    key_points:
+      - Verifies that data version, code commit, config, and environment match first
+      - Seeds all RNGs, including DataLoader workers, and enables deterministic algorithms
+      - Knows that determinism doesn't hold across hardware or library versions and can cost speed
+      - Reports variance across seeds and CIs rather than a single number
+      - Logs lineage in an experiment tracker
+
+  - type: text
+    title: Where GPU memory goes
+    text: |
+      When you hit `CUDA out of memory`, list what lives on the GPU:
+
+      - **Weights**: 4 bytes per parameter in fp32.
+      - **Gradients**: another 4 bytes per parameter.
+      - **Optimizer state**: Adam keeps two moments, so 8 more bytes per parameter.
+      - **Activations** saved for backward. They scale with **batch size** × sequence length (or
+        image size) × depth, and for large models they usually dominate.
+
+      Levers, roughly from cheapest to most involved:
+
+      - A smaller batch plus **gradient accumulation**, to keep the effective batch size.
+      - **AMP**, which roughly halves activation memory.
+      - **Activation checkpointing** (`torch.utils.checkpoint`), which recomputes activations
+        in backward, trading compute for memory.
+      - Sharding weights, gradients, and optimizer state across GPUs (**FSDP**).
+
+      Measure rather than guess: `torch.cuda.max_memory_allocated()` after a few steps tells you
+      the peak.
+
+  - type: quiz
+    question: |
+      A 100M-parameter model trains in fp32 with AdamW. Before counting activations, roughly how
+      much GPU memory do weights, gradients, and optimizer state need?
+    options:
+      - About 400 MB
+      - About 800 MB
+      - About 1.2 GB
+      - About 1.6 GB
+    answer: 3
+    explanation: |
+      That's 4 bytes for weights, 4 for gradients, and 8 for Adam's two moments, so 16 bytes per
+      parameter. At 100M parameters that is 1.6 GB before a single activation is stored. 400 MB
+      counts only the weights, which is the usual mistake. This arithmetic is why large-model
+      training shards optimizer state.
+
+  - type: code
+    title: Gradient accumulation
+    language: python
+    code: |
+      accum_steps = 4                      # effective batch = 4 x loader batch size
+      optimizer.zero_grad()
+      for i, (X, y) in enumerate(train_loader):
+          X, y = X.to(device), y.to(device)
+          loss = loss_fn(model(X), y) / accum_steps   # average over micro-batches
+          loss.backward()                              # grads add up in .grad
+          if (i + 1) % accum_steps == 0:
+              optimizer.step()
+              scheduler.step()
+              optimizer.zero_grad()
+    after: |
+      This is the "bug" from m02-02 used on purpose: skip `zero_grad` for a few batches and the
+      gradients sum. Dividing by `accum_steps` keeps the scale equal to one large batch. Two
+      caveats: BatchNorm still sees micro-batch statistics, and you need to handle a leftover
+      partial group at the end of the epoch.
+
+  - type: text
+    title: Profile before optimizing
+    text: |
+      Guessing at bottlenecks wastes days. Common findings:
+
+      - **The GPU is idle, waiting for data.** `nvidia-smi` shows low utilization. Fix the
+        input pipeline with `num_workers`, `pin_memory=True`, preprocessing done once rather
+        than per batch, and a faster file format (Parquet rather than CSV).
+      - **Many tiny kernels.** For small models, Python and kernel-launch overhead dominate.
+        Larger batches or `torch.compile` help.
+      - **Host-device syncs.** Calling `.item()` or printing inside the loop forces the CPU to
+        wait for the GPU every step.
+
+      `torch.profiler.profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])` around
+      a few dozen steps, followed by
+      `prof.key_averages().table(sort_by="cuda_time_total")`, shows where time goes.
+
+      For the readmission MLP, the honest result is that a laptop CPU trains it in seconds, and
+      a GPU may be **slower** because of transfer overhead. Knowing when not to use the GPU is
+      part of the skill.
+
+  - type: text
+    title: "DDP: the idea"
+    text: |
+      **DistributedDataParallel** is PyTorch's standard way to train on several GPUs:
+
+      - **One process per GPU**, launched with `torchrun --nproc_per_node=4 train.py`. Each
+        process holds a full copy of the model.
+      - A `DistributedSampler` gives each process a different slice of the data. Call
+        `sampler.set_epoch(epoch)` so the shuffle changes every epoch.
+      - During `backward()`, DDP **all-reduces** (averages) gradients across processes, in
+        buckets that overlap with computation. After the step, every replica holds identical
+        weights.
+      - The effective batch size is the per-GPU batch × the number of GPUs, which usually means
+        retuning the learning rate and warmup.
+      - Only rank 0 saves checkpoints and writes logs. Metrics computed on each shard must be
+        gathered before you compute AUROC.
+
+      If the model itself doesn't fit on one GPU, DDP won't help. You need sharding (FSDP) or
+      model parallelism. Clinical tabular models never need any of this. Imaging and language
+      models do, and interviews ask about it.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Training takes 10 hours on one GPU. You're given four. What do you do, and what changes?"
+    model_answer: |
+      I'd profile first. If the GPU sits at 40% utilization because the data loader is the
+      bottleneck, more GPUs just give me four idle GPUs. I'd also try the cheap single-GPU wins
+      first, like bf16 autocast, a larger batch if memory allows, and torch.compile. Then I'd move
+      to DDP with torchrun, one process per GPU, and a DistributedSampler with set_epoch each
+      epoch. DDP all-reduces gradients during backward, so each step processes four times the
+      data. The effective batch size quadruples, so I'd either keep the global batch fixed by
+      shrinking the per-GPU batch or scale the learning rate, roughly linearly as a starting
+      point, with warmup, and check that validation curves match the single-GPU run. On the
+      practical side, only rank 0 writes checkpoints and logs, evaluation metrics need all-gather
+      before computing AUROC, and seeds are set per rank. I'd expect less than a 4x speedup
+      because of communication and any data-loading or synchronization overhead, so I'd measure
+      the actual scaling rather than assume it. If memory rather than speed were the problem,
+      I'd look at FSDP instead.
+    key_points:
+      - Profiles first and tries single-GPU wins (AMP, batch size, data loading)
+      - Uses DDP with one process per GPU, DistributedSampler, and set_epoch
+      - Recognizes that the effective batch grows and adjusts LR and warmup, then verifies the curves
+      - Handles rank-0 checkpointing, metric gathering, and seeding
+      - Expects sublinear speedup and knows FSDP is for memory limits
+
+  - type: laptop
+    title: Make train_mlp.py resumable
+    repo_path: 02-pytorch-clinical-ml/src/train_mlp.py
+    task: |
+      Extend `02-pytorch-clinical-ml/src/train_mlp.py` from m02-02. Switch to AdamW with
+      warmup + cosine stepped per batch, add early stopping on validation loss with `best.pt`
+      and `last.pt`, and add a `--resume` flag. Then test it. Kill the run at epoch 10, resume,
+      and check that the loss curve continues smoothly. Run 5 seeds and report the mean and SD
+      of validation AUROC next to your GBM baseline.
+
+  - type: recap
+    points:
+      - Use AdamW (decoupled weight decay) and skip decay on biases and norm parameters
+      - Warmup then decay. Step the scheduler in the unit its length is defined in
+      - Early-stop on validation, restore the best checkpoint, and report on an untouched test set
+      - Checkpoints for resuming need model, optimizer, scheduler, scaler, epoch, and config. Version the preprocessing too
+      - "bf16: fp32 range, no scaler. fp16: GradScaler. Use torch.autocast and torch.amp.GradScaler"
+      - Seed everything for repeatability, and report variance across seeds
+      - "Memory = weights + grads + optimizer state + activations. Accumulate, use AMP, checkpoint activations, shard"
+      - Profile first. DDP means one process per GPU, with gradients all-reduced during backward

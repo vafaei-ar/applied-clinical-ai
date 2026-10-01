@@ -12,6 +12,8 @@ We generate 5,000 synthetic adults with longitudinal encounters, diagnoses, proc
 
 The synthetic data intentionally includes edge cases: duplicate diagnosis rows, missing encounter end times, interrupted insurance coverage, multiple possible stroke encounters, missing lab values, and implausibly late diagnosis timestamps.
 
+It also includes **30-day readmissions** after the index stroke, added as a final step on their own random stream (see `_add_readmissions` in `generator.py`). About 10% to 12% of index strokes are followed by an inpatient readmission, with risk that rises with age, prior atrial fibrillation, hypertension, diabetes, and prior ED and inpatient use, so later modelling modules have a modest real signal to find. The step only appends rows, so everything else (including the cohort) is identical with or without it. Pass `readmission_rate=None` to `generate_dataset` to get the earlier data, in which readmissions are almost nonexistent. For more events, raise `n_patients`; the cohort and its counts will change.
+
 ## Skills covered
 
 - relational clinical schema design

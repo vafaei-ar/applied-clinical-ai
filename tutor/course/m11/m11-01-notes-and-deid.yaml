@@ -1,0 +1,493 @@
+id: m11-01-notes-and-deid
+title: Clinical notes and de-identification
+summary: How notes are structured, copied, and timestamped, why those details create leakage, and how
+  de-identification is built and evaluated by recall rather than accuracy.
+minutes: 27
+status: authored
+why_it_matters: Notes hold the richest signal and the highest privacy risk, and they are the easiest
+  place to leak the future into a model. Interviewers for clinical NLP roles expect you to talk about
+  signing time, copy-forward, and PHI recall before you say the word "transformer".
+objectives:
+  - Describe note types, sections, and templated versus free text, and why section decides meaning
+  - Explain copy-forward and note bloat and how they distort features and splits
+  - Choose the timestamp that makes a note legal at prediction time (signing, not service date)
+  - Compare rule-based, trained, and LLM de-identification and their failure modes
+  - Evaluate de-identification by PHI recall and residual risk, not overall accuracy
+  - Connect de-identification to HIPAA Safe Harbor and Expert Determination without over-claiming
+key_points:
+  - A missed PHI token is worse than a false alarm, so set the operating point by recall
+  - Copy-forward makes notes appear to contain fresh information that is old
+  - Notes have several clocks; the signing (filed) time of the version you use decides legality
+  - De-identified text can still be re-identified in context, so it stays controlled data
+tags: [nlp, deid, privacy, leakage, interview]
+steps:
+  - type: text
+    title: The notes score that was too good
+    text: |
+      A team adds one feature to the stroke readmission model from Module 02: an embedding of the
+      **discharge summary**. Validation AUROC jumps well above every structured-data baseline. (An
+      invented illustration, but a very common story.)
+
+      The model is scored at discharge, so this looks legal. It is not. The summary was **signed**
+      two days after the patient went home, and its hospital-course and disposition paragraphs
+      describe how the stay ended.
+
+      Notes are the richest data in the chart and the easiest place to leak the future, expose
+      identifiers, and double-count old information. This lesson is about those three problems. The
+      next lesson turns text into features; the last one evaluates them.
+
+  - type: text
+    title: "\"Notes\" is many data sources"
+    text: |
+      A single stroke stay produces very different documents:
+
+      - **ED and triage notes**: hours after arrival. Last-known-well time, first NIHSS, the story
+        as told by family or EMS.
+      - **Neurology consult / H&P**: day 0 or 1. Full history, exam, plan.
+      - **Radiology reports**: non-contrast CT, CTA, MRI. A structured skeleton (technique,
+        comparison, findings, impression) with hedged language. Often a preliminary read, then a
+        final read.
+      - **Progress notes**: daily, and the most copy-forward-heavy of all.
+      - **Therapy and nursing notes**: PT/OT/speech, swallow screens, function.
+      - **Discharge summary**: written at the end, often by a trainee, signed later.
+
+      They differ in author, timing, template, and reliability. "We have notes" is not a data
+      description. "We have signed final radiology reports and discharge summaries for index
+      stays" is.
+
+  - type: image
+    image: m11-01-annotated-note.png
+    caption: |
+      An invented discharge summary. Section headers set the default meaning. Only two of the
+      boxed mentions are current and present; the rest are negated, uncertain, hypothetical,
+      family history, or past history. Lesson 2 shows how software decides which is which.
+
+  - type: text
+    title: Section decides meaning
+    text: |
+      The same words mean different things in different sections:
+
+      - `stroke` under **Family History** is someone else's stroke.
+      - `atrial fibrillation` under **Past Medical History** is a chronic condition, not a new event.
+      - `aspirin` under **Allergies** is a reaction, not a treatment.
+      - `warfarin` under **Home Medications** and again under **Discharge Medications** may say
+        "STOPPED".
+
+      A lot of note text is also **templated**: review-of-systems blocks ("denies fever, chest
+      pain, dyspnea") pasted in bulk, checkbox macros, and smart phrases that pull in a med list
+      or an NIHSS from structured fields. Two consequences:
+
+      - A negative in a template may have been **clicked, not examined**.
+      - Some text duplicates data already in your structured tables, so counting it again is
+        double-counting.
+
+  - type: quiz
+    question: |
+      You want a feature "on aspirin at discharge" from discharge summaries. Which mention is the
+      safest to count, before any further checks?
+    options:
+      - "Allergies: aspirin (hives)"
+      - "Home medications: aspirin 81 mg daily"
+      - "Discharge medications: aspirin 81 mg daily"
+      - "Hospital course: aspirin was held before the procedure"
+    answer: 2
+    explanation: |
+      The discharge-medication list is the section that states what the patient leaves on. The
+      home list (B) says what they took before, which may have been stopped. The hospital course (D)
+      describes an event, and the allergy list (A) is the opposite of a treatment. Even the best
+      option still needs a status check, since a list entry can read "aspirin: STOPPED".
+
+  - type: text
+    title: Copy-forward and note bloat
+    text: |
+      Clinicians copy text from earlier notes, their own or a colleague's, to save time. It is
+      common: a systematic review (Tsou et al., _Applied Clinical Informatics_ 2017) reports that
+      66% to 90% of clinicians routinely use copy and paste.
+
+      It makes text highly redundant. Wrenn et al. (_JAMIA_ 2010) measured, in 100 admissions, that
+      sign-out notes and progress notes averaged 78% and 54% information duplicated from earlier
+      documents. Cohen et al. (_BMC Bioinformatics_ 2013) found roughly 30% redundancy in an EHR
+      corpus and showed it can hurt text-mining results.
+
+      What that does to your project:
+
+      - **Stale facts**: yesterday's exam, today's date.
+      - **Inflated counts**: a finding appears in 40 notes, but only one was written fresh.
+      - **Misleading timestamps**: the note is new, the sentence is old.
+      - **Near-duplicates** that leak across train and test splits.
+      - **Crowded retrieval**: copies of one paragraph fill your top-k.
+
+  - type: quiz
+    question: |
+      The admission note says "NIHSS 12". The day-5 progress note also says "NIHSS 12", but the
+      structured flowsheet shows an NIHSS of 3 that morning. What is the best reading?
+    options:
+      - The patient worsened and improved back in the same range
+      - The flowsheet is wrong because notes are the clinician's judgment
+      - Both are valid, so average them
+      - The text was probably copied forward and is stale, so prefer the timestamped structured value
+    answer: 3
+    explanation: |
+      Identical text days apart is the signature of copy-forward. The note's date says when it was
+      written, not when the NIHSS was measured. Prefer a source that records the measurement time, or
+      extract a value from a note only when it appears with its own exam context, and keep the
+      source and note type so you can audit it.
+
+  - type: text
+    title: A note has several clocks
+    text: |
+      Module 01 taught two clocks for structured data (event time and recorded time). Notes have
+      more:
+
+      - **Date of service**: the encounter the note is about.
+      - **Created**: when the author opened it.
+      - **Signed / filed**: when it became visible to other readers.
+      - **Amended**: addenda and corrected versions, each with its own signing time.
+
+      Field names vary by EHR vendor, so ask the data team which is which, and get the signing time
+      for **every version**.
+
+      For leakage, the legal time is the **signing time of the version you use**. Delayed
+      documentation is normal: an ED visit note may be signed days later, and a discharge summary is
+      often signed after the patient has left. Radiology adds another layer: a preliminary read can
+      differ from the final, so "what the radiologist said" depends on when you ask.
+
+  - type: text
+    title: Which timestamp? Public datasets show the pattern
+    text: |
+      MIMIC-IV-Note, the credentialed-access note set many people learn on, has 331,794
+      discharge summaries and 2,321,355 radiology reports (version 2.2). Its discharge table keeps two
+      times per note, and the documentation describes them well:
+
+      - `charttime`: when the note was charted. "Usually the most relevant time for interpreting the
+        content of the note, but it is not necessarily when the note was fully written."
+      - `storetime`: when it was stored. "Usually when the note was completed and signed."
+
+      For a prediction-time filter you want the second one. A `charttime` before time zero does not
+      prove anyone could read the note yet.
+
+      Researchers have also enforced time by **section**. van Aken et al. (EACL 2021) built
+      admission-time notes from MIMIC-III discharge summaries by keeping only sections known at
+      admission (chief complaint, present illness, medical history, admission medications, allergies,
+      physical exam, family and social history), to "hide information about the further hospital
+      course and discharge". Sections are a time signal, which is why section detection comes before
+      extraction.
+
+  - type: code
+    language: sql
+    title: A note window that respects signing time
+    text: |
+      A sketch for a future `notes` table (not in the Module 01 repo), joined to the cohort's
+      `index_date`, in DuckDB:
+    code: |
+      -- notes(note_id, patient_id, note_type, version, signed_time, note_text)
+      WITH visible AS (
+          SELECT n.*
+          FROM cohort c
+          JOIN notes n
+            ON n.patient_id = c.patient_id
+           AND CAST(n.signed_time AS DATE) <  c.index_date
+           AND CAST(n.signed_time AS DATE) >= c.index_date - INTERVAL '365 days'
+      )
+      SELECT *
+      FROM visible
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY note_id ORDER BY version DESC) = 1;
+    after: |
+      Two details carry the weight. The window filters on `signed_time` for each **version**, and
+      only then picks the latest visible version. Picking the latest version first and filtering
+      after would keep an addendum signed after time zero. And the strict `<` is Module 01's
+      index-day policy again.
+
+      For a discharge-time model you would replace `c.index_date` with the index encounter's end,
+      which the repo says is sometimes missing.
+
+  - type: quiz
+    question: |
+      A prior ED visit 3 weeks before the index stroke has a note whose `service_date` is before
+      `index_date`, but which was signed 2 days **after** `index_date`. The filter is
+      `WHERE service_date < index_date`. What happens?
+    options:
+      - The note is correctly included, since the visit was before the stroke
+      - The note is dropped because the signing time is after the index
+      - The note is included even though nobody could read it at time zero
+      - The query fails because the two dates disagree
+    answer: 2
+    explanation: |
+      Filtering on the service date lets a late-signed note into the feature window, the same
+      look-ahead leak as the repo's late diagnosis timestamps. The note describes a real earlier
+      visit, so it feels legitimate. But if a clinician could not open it at time zero, the model
+      should not read it either.
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      A team splits **60,000 notes** 80/20 at random and trains a classifier on note text. The
+      same patient's day-2, day-3, and day-4 progress notes are nearly identical, so near-copies land
+      on both sides of the split. The model learns to recognize patients, not disease. Test AUROC
+      is excellent. On new patients it collapses.
+
+      Copy-forward turns the rule "split by patient" from good practice into a requirement.
+
+      Guard rails:
+
+      - Split by **patient**, then by time, before any feature work.
+      - Measure near-duplicate rate across the split (for example, share of test sentences that
+        appear verbatim in train).
+      - Deduplicate inside training data so repeated paragraphs do not dominate the loss.
+      - Report performance at the unit you deploy: patient or stay, not note.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We want note-derived features in our discharge-time readmission model. What could go wrong
+      with time, and how would you prevent it?"
+    model_answer: |
+      First I'd fix the prediction time, say the moment the discharge order is entered, and treat
+      it like time zero in the cohort work. Then I'd ask which timestamp each note carries. Service
+      date isn't enough, I need the signing time of each version, because discharge summaries and
+      many ED notes are signed after the patient leaves, and radiology reports go from preliminary to
+      final. So the feature window is "signed before prediction time, latest visible version", and
+      I'd assert that in a test. Beyond timing, copy-forward can make stale text look fresh, so I'd
+      dedupe and prefer values with their own measurement times. And I'd split by patient, because
+      near-duplicate notes across a split inflate results. Finally I'd run a temporal holdout and
+      look at top features: if "discharge disposition" text is doing the work, that's a leak.
+    key_points:
+      - Defines the prediction time first, as with time zero in the cohort
+      - Uses the signing time of each note version, not service date
+      - Mentions late-signed discharge summaries, addenda, or preliminary versus final reads
+      - Handles copy-forward with dedupe and patient-level splits
+      - Adds a test and a temporal holdout, and inspects top features for outcome-describing text
+
+  - type: text
+    title: Why notes must be de-identified
+    text: |
+      In a table you drop the `name` column. In a note, identifiers sit inside prose:
+
+      _"Mr. Lee's daughter Jane (cell 555-0100) drove him in from Harbor Town on March 4."_
+      (Invented.)
+
+      HHS's de-identification guidance makes no distinction between standardized fields and free
+      text: a listed identifier has to go wherever it appears, if it is recognizable as one. The
+      Module 06 privacy lesson has the 18 Safe Harbor identifiers, including relatives' and employers'
+      names, every date element except the year, and ages over 89.
+
+      Notes also hold context no list captures. HHS's own example is a note that says the patient is an
+      executive of the state university, which has to be removed. "The retired county sheriff" is the
+      same kind of problem.
+
+      One limit to state plainly: HHS's guidance, as far as I could find, says nothing about automated
+      tools. A tool does the work, but the organization still has to meet Safe Harbor or obtain an
+      Expert Determination. A recall figure is evidence for that decision, not a substitute for it.
+      Check with your privacy office, and check the current guidance.
+
+  - type: text
+    title: Three ways to find PHI in text
+    text: |
+      **Rules and dictionaries.** Regexes for phone numbers, dates, and record numbers, plus name and
+      place lists and context rules. Philter (UCSF; Norgeot et al., _npj Digital Medicine_ 2020) and
+      the MIT `deid` tool (Neamatullah et al., 2008) are examples. Transparent and tunable, strong on
+      patterned PHI, and more brittle on names in context and on formats they have not seen.
+
+      **Trained sequence models.** Fine-tuned transformers that label PHI spans from context (for
+      example Johnson et al., CHIL 2020; Chambon et al., _JAMIA_ 2023, for radiology reports). Strong
+      on names, but they need annotated notes and transfer imperfectly. In Johnson et al., a model
+      trained on the i2b2 2014 corpus and tested on the 2006 corpus fell to about 73% sensitivity for
+      names.
+
+      **LLM prompting.** Flexible, needs no training set. But it is non-deterministic, costs tokens, and
+      must run somewhere PHI is allowed (a business associate agreement, or locally). One rule helps:
+      ask for **spans**, verify them against the text, and mask in code. Never accept the model's
+      "cleaned" text, because it can silently rewrite clinical content.
+
+      **Hybrids win on recall.** MIMIC-IV-Note used the union of a rule-based system and a neural
+      network, replacing each PHI instance with three underscores. A union flags more, which is the
+      right direction when misses are the expensive error.
+
+  - type: quiz
+    question: |
+      Which kind of PHI is hardest for a purely rule-based (regex and dictionary) system?
+    options:
+      - Telephone numbers in a fixed format
+      - Medical record numbers with a known prefix and length
+      - Dates written as 03/04/2025
+      - "Personal names in prose, such as \"Mr. Lee said Lee's daughter Jane will drive him\""
+    answer: 3
+    explanation: |
+      Patterned identifiers are what rules do well. Names in prose depend on context: "Lee" can be a
+      surname, a hospital, or a drug company, and a dictionary cannot tell which. That is why trained
+      sequence models, or hybrids of rules plus a model, are common. Rules also fail on formats they
+      have never seen, such as a new MRN layout after an EHR change.
+
+  - type: text
+    title: "Recall is the metric, accuracy is not"
+    text: |
+      Count by **identifier instance**, from hand-labeled notes:
+
+      - **Recall**: of the PHI instances annotators marked, what share did the tool mask?
+      - **Precision**: of the spans it masked, what share were PHI?
+
+      The costs are not symmetric. A **miss** leaves an identifier in data you will share, and you
+      cannot take it back. A **false alarm** hides a useful word: "Wallenberg", "Parkinson", a brand
+      name that looks like a surname. That is a modeling cost you can work around.
+
+      Real tools choose recall. Philter reported recall 99.46% at precision 78.28% on 2,000 UCSF notes,
+      and 99.92% at 78.58% on the i2b2 2014 test set. Even the best numbers leave a tail: at 99.5% recall,
+      one identifier in 200 survives.
+
+      Report **per category** (names, dates, IDs, places, contact details), and count a half-masked name
+      as a miss. Recall alone is gameable, since masking every token gives recall 1.0, so always report
+      precision next to it.
+
+  - type: image
+    image: m11-01-deid-tradeoff.png
+    caption: |
+      A simulated de-identifier (invented scores, 3% of tokens are PHI), not any real tool.
+      Sliding the threshold trades leaked identifiers for over-masked useful text. The dashed line is
+      an example recall bar, not a rule. A miss is hard to undo once text is shared; an over-mask
+      is a modeling cost you can often fix by improving the tool.
+
+  - type: quiz
+    question: |
+      A vendor says its de-identification tool is "99.5% accurate at the token level". About 3% of
+      tokens in clinical notes are PHI. Why is that number nearly useless on its own?
+    options:
+      - A system that masks nothing would already score about 97%, so it hides the miss rate
+      - Token accuracy is only defined for images
+      - Accuracy cannot be computed without a ROC curve
+      - It is fine, because 99.5% means 0.5% of PHI leaks
+    answer: 0
+    explanation: |
+      Non-PHI tokens dominate, so accuracy is inflated by the easy majority. A system that leaves every
+      token untouched scores about 97% here while leaking every identifier. Ask for **recall on PHI**,
+      per identifier category, with confidence intervals, measured on notes like yours. Option D
+      confuses the two: 99.5% accuracy says nothing about the share of PHI that leaks.
+
+  - type: code
+    language: python
+    title: What "99% recall" means at scale
+    code: |
+      import numpy as np
+
+      notes, phi_per_note = 150_000, 10
+      total_phi = notes * phi_per_note
+      for recall in (0.95, 0.99, 0.999):
+          leaked = total_phi * (1 - recall)
+          p_note = 1 - recall ** phi_per_note       # assumes independent misses
+          print(f"recall {recall}: {leaked:,.0f} leaked, {p_note:.1%} of notes leak >=1")
+    after: |
+      Output: 75,000 leaked at 0.95, 15,000 at 0.99, and 1,500 at 0.999, with about 40.1%, 9.6%, and
+      1.0% of notes leaking at least one identifier. Misses are not independent (rare names cluster
+      in the same notes), so treat the last column as a rough guide only.
+
+  - type: quiz
+    question: |
+      Your test set of hand-annotated notes has 3,000 PHI instances and the tool misses **none**. What
+      can you claim with about 95% confidence?
+    options:
+      - The tool has 100% recall
+      - "The miss rate is about 0.1% or lower (the \"rule of three\": roughly 3 divided by 3,000)"
+      - The miss rate is exactly 0.033%
+      - Nothing, because zero misses proves nothing
+    answer: 1
+    explanation: |
+      With zero misses in n independent trials, the 95% upper bound on the miss rate is about 3/n, so
+      3/3,000 = 0.1%. It is an upper bound, not "100%". A single miss changes the bound and the
+      story, and real notes are not independent draws. But this is why a serious evaluation needs
+      thousands of annotated identifiers, not a hundred.
+
+  - type: text
+    title: Surrogates and date shifting
+    text: |
+      After detection, you choose what replaces each identifier.
+
+      - **Tags** (`[NAME]`, `___`): safe and obvious, but they can confuse models and erase information.
+      - **Realistic surrogates**: fake names and dates. Carrell et al. (_JAMIA_ 2013), in a small
+        pilot on 81 notes, found that about 90% of _missed_ identifiers could be concealed this way,
+        because a real leak blends in with the fakes ("hiding in plain sight"). The authors call it a
+        pilot that needs further evaluation.
+      - **Date shifting**: one random offset per patient keeps intervals intact. You need that for
+        "last known well to arrival" and "day 3 of stay". It is not a Safe Harbor method (Module 06
+        privacy lesson), so the privacy office decides whether it is acceptable.
+
+      Whichever you choose, apply it to **every source with the same rule**, including dates written
+      inside note text. Shifting also erases calendar effects such as season or a guideline change
+      date, so keep an unshifted year if the privacy office allows it.
+
+  - type: quiz
+    question: |
+      Notes are de-identified with a random per-patient date shift, but the structured tables keep the
+      true dates. What breaks first?
+    options:
+      - Named-entity recognition accuracy
+      - HIPAA compliance, automatically
+      - Any join that orders note events against structured events, such as "note signed before the
+        stroke", because the clocks no longer agree
+      - Nothing, since shifts are small
+    answer: 2
+    explanation: |
+      Time-zero logic needs one clock. If notes are shifted and tables are not, "signed before index" is
+      computed across two different calendars. Shift **all** sources with the same per-patient offset
+      or none. (Whether shifting is acceptable for release is a separate privacy question, covered in
+      the Module 06 privacy lesson.)
+
+  - type: text
+    title: De-identified is not anonymous
+    text: |
+      HHS's guidance says both de-identification methods leave some risk of identification: very
+      small, but not zero. In notes, the residue is usually context: a rare event, an unusual job, a
+      story that only one person lived.
+
+      So treat scrubbed notes as **controlled data**:
+
+      - Access controls, logging, and a data use agreement. MIMIC-IV-Note is de-identified, yet it
+        needs credentialed access, CITI training, and a signed DUA.
+      - **No third-party LLM APIs by default.** PhysioNet's statement on MIMIC (24 September 2025) says
+        its DUA prohibits sharing the data with third parties, including through APIs, that the data
+        must not be retained by third-party services, and that local deployment is the safest route.
+        If cloud is unavoidable, it asks you to verify zero retention, no training on your data, and
+        no human review. Check the current version before relying on this.
+      - For real PHI, a hosted LLM vendor is a business associate and needs a BAA (Module 06).
+      - Models trained on notes can memorize rare records, so treat the model files as sensitive too.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We have five million notes and a de-identification tool that a vendor says is state of the art.
+      How would you decide whether it is good enough to use?"
+    model_answer: |
+      I'd treat the vendor claim as a hypothesis and test it on our data. I'd have clinicians or trained
+      annotators label PHI in a stratified sample of our notes, covering every note type and site, and
+      oversampling the hard cases: unusual names, initials, phone numbers in prose, and radiology and
+      nursing text, which read differently from discharge summaries. Then I'd report recall per identifier
+      category with confidence intervals, plus precision, because heavy over-masking removes clinical
+      terms like eponyms or drug names. I'd set the release bar by risk. Names and record numbers get the
+      strictest bar, and I'd look at the residual leaks by hand. I'd check that there are enough PHI
+      instances to support the bar. The tool's output doesn't by itself make the data de-identified under
+      HIPAA, so I'd bring the results to the privacy office and consider Expert Determination or keeping
+      the notes in a controlled environment under a data use agreement.
+    key_points:
+      - Tests the tool on the organization's own notes, stratified by note type and site
+      - Reports recall per PHI category with confidence intervals, and precision as the secondary cost
+      - Sets the bar by risk, with the strictest standard for direct identifiers, and reviews residual leaks
+      - Notes that a tool's output is not automatically HIPAA de-identification, and involves the privacy office
+      - Keeps controlled access even after scrubbing
+
+  - type: laptop
+    title: Build the signing-time test for notes
+    repo_path: 11-clinical-nlp/tests/test_note_windows.py
+    task: |
+      Create `11-clinical-nlp/` and write a tiny synthetic `notes.csv` for five cohort patients: note type,
+      `service_time`, `signed_time`, `version`, and an invented sentence. Include one discharge summary
+      signed after the index date and one addendum signed after it. Write the DuckDB query from this lesson
+      against `stroke_cohort` and a pytest asserting that no returned note has `signed_time` on or after
+      `index_date`, and that the late addendum's earlier version is returned instead. Then change `<` to
+      `<=` and watch a test fail.
+
+  - type: recap
+    points:
+      - Notes are many sources; section, template, and note type change what a mention means
+      - Copy-forward makes old text look new, so dedupe, prefer values with measurement times, and split by patient
+      - The legal time for a note is the signing time of the version you use, not its service date
+      - De-identification is found by rules, trained models, or LLMs, and all three are judged the same way
+      - Judge de-identification by PHI recall per category with a large enough test set, never token accuracy
+      - Shift dates for all sources or none, and keep de-identified notes as controlled data

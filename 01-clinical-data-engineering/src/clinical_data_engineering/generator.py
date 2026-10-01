@@ -24,19 +24,175 @@ def _random_dates(rng: np.random.Generator, start: str, end: str, n: int) -> pd.
     return start_ts + pd.to_timedelta(offsets, unit="D")
 
 
+DATA_END = pd.Timestamp("2025-12-15")
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _add_readmissions(
+    rng: np.random.Generator,
+    patients: pd.DataFrame,
+    encounters: pd.DataFrame,
+    diagnoses: pd.DataFrame,
+    claims: pd.DataFrame,
+    *,
+    rate: float,
+    encounter_counter: int,
+    diagnosis_counter: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Append 30-day inpatient readmissions after each patient's index stroke encounter.
+
+    The base generator places encounter types at random, so it yields almost no readmissions and
+    none that depend on the patient. This step runs last, on its own random stream, and only
+    appends rows, so every row generated before it (and therefore the stroke cohort) is unchanged.
+
+    Risk depends on the same pre-index quantities that ``02_features.sql`` builds (age, prior
+    atrial fibrillation, hypertension, diabetes, and ED and inpatient use in the prior 365 days),
+    so a model can learn real, modest signal. The intercept is solved so that the expected share
+    of index strokes with a readmission equals ``rate``. Readmissions that would start after the
+    end of the data are not created, so strokes near the end have less chance of one.
+    """
+    dx = diagnoses.assign(dx_day=pd.to_datetime(diagnoses["diagnosis_date"]).dt.normalize())
+    enc = encounters.assign(day=pd.to_datetime(encounters["encounter_start"]).dt.normalize())
+
+    stroke_encounter_ids = set(dx.loc[dx["icd10_code"].str.startswith("I63"), "encounter_id"])
+    qualifying = enc[
+        enc["encounter_id"].isin(stroke_encounter_ids) & enc["encounter_type"].isin(["ED", "inpatient"])
+    ]
+    # Same rule as the cohort SQL: earliest qualifying stroke by calendar date, ties by encounter_id.
+    index = (
+        qualifying.sort_values(["patient_id", "day", "encounter_id"])
+        .groupby("patient_id", as_index=False)
+        .head(1)
+    )
+    if index.empty:
+        return encounters, diagnoses, claims
+
+    birth = patients.set_index("patient_id")["birth_date"]
+    enc_by_patient = {pid: group for pid, group in enc.groupby("patient_id")}
+    dx_by_patient = {pid: group for pid, group in dx.groupby("patient_id")}
+
+    day_30 = pd.Timedelta(days=30)
+    year = pd.Timedelta(days=365)
+    linear, already = [], []
+    for row in index.itertuples():
+        e = enc_by_patient[row.patient_id]
+        d = dx_by_patient.get(row.patient_id)
+        prior = e[(e["day"] < row.day) & (e["day"] >= row.day - year)]
+        codes = set()
+        if d is not None:
+            codes = set(d[(d["dx_day"] < row.day) & (d["dx_day"] >= row.day - year)]["icd10_code"])
+        readmitted = e[
+            (e["encounter_id"] != row.encounter_id)
+            & (e["encounter_type"] == "inpatient")
+            & (e["day"] > row.day)
+            & (e["day"] <= row.day + day_30)
+        ]
+        age = (row.day - pd.Timestamp(birth[row.patient_id])).days / 365.25
+        linear.append(
+            0.04 * (age - 70)
+            + 0.8 * any(c.startswith("I48") for c in codes)
+            + 0.5 * any(c.startswith("E11") for c in codes)
+            + 0.3 * ("I10" in codes)
+            + 0.25 * min(int((prior["encounter_type"] == "ED").sum()), 4)
+            + 0.35 * min(int((prior["encounter_type"] == "inpatient").sum()), 3)
+        )
+        already.append(len(readmitted) > 0)
+    linear_arr = np.array(linear)
+    already_arr = np.array(already)
+
+    def expected_rate(intercept: float) -> float:
+        p = _sigmoid(intercept + linear_arr)
+        return float(np.mean(already_arr + (~already_arr) * p))
+
+    low, high = -12.0, 8.0
+    for _ in range(60):
+        mid = (low + high) / 2
+        low, high = (mid, high) if expected_rate(mid) < rate else (low, mid)
+    probability = _sigmoid((low + high) / 2 + linear_arr)
+
+    new_encounters: list[dict[str, object]] = []
+    new_diagnoses: list[dict[str, object]] = []
+    new_claims: list[dict[str, object]] = []
+    chronic = [("I10", "Hypertension", 0.32), ("I48.91", "Atrial fibrillation", 0.10),
+               ("E11.9", "Type 2 diabetes", 0.18), ("N18.3", "Chronic kidney disease", 0.09)]
+    chronic_p = np.array([c[2] for c in chronic]) / sum(c[2] for c in chronic)
+
+    for row, p, was_readmitted in zip(index.itertuples(), probability, already_arr, strict=True):
+        offset = int(rng.integers(6, 29))  # after even the longest index stay, inside the window
+        if was_readmitted or rng.random() >= p:
+            continue
+        start = row.day + pd.Timedelta(days=offset)
+        if start > DATA_END:
+            continue
+        encounter_id = f"E{encounter_counter + len(new_encounters) + 1:08d}"
+        end = start + pd.Timedelta(hours=int(rng.integers(2, 120)))
+        new_encounters.append(
+            {
+                "encounter_id": encounter_id,
+                "patient_id": row.patient_id,
+                "encounter_start": start,
+                "encounter_end": pd.NaT if rng.random() < 0.015 else end,
+                "encounter_type": "inpatient",
+                "facility_id": rng.choice(["HOSP_A", "HOSP_B"]),
+            }
+        )
+        code, label, _ = chronic[int(rng.choice(len(chronic), p=chronic_p))]
+        new_diagnoses.append(
+            {
+                "diagnosis_id": f"D{diagnosis_counter + len(new_diagnoses) + 1:09d}",
+                "patient_id": row.patient_id,
+                "encounter_id": encounter_id,
+                "diagnosis_date": start + pd.Timedelta(days=int(rng.integers(0, 3))),
+                "icd10_code": code,
+                "diagnosis_name": label,
+            }
+        )
+        allowed = float(np.round(rng.lognormal(mean=5.4, sigma=0.8), 2))
+        new_claims.append(
+            {
+                "claim_id": f"CLM{len(claims) + len(new_claims) + 1:09d}",
+                "patient_id": row.patient_id,
+                "encounter_id": encounter_id,
+                "service_date": start,
+                "place_of_service": "inpatient",
+                "primary_hcpcs": "99285",
+                "allowed_amount": allowed,
+                "paid_amount": float(np.round(allowed * rng.uniform(0.55, 0.95), 2)),
+                "claim_status": rng.choice(["paid", "denied"], p=[0.94, 0.06]),
+            }
+        )
+
+    return (
+        pd.concat([encounters, pd.DataFrame(new_encounters)], ignore_index=True),
+        pd.concat([diagnoses, pd.DataFrame(new_diagnoses)], ignore_index=True),
+        pd.concat([claims, pd.DataFrame(new_claims)], ignore_index=True),
+    )
+
+
 def generate_dataset(
     output_dir: str | Path,
     n_patients: int = 5_000,
     seed: int = 20260908,
+    readmission_rate: float | None = 0.12,
 ) -> dict[str, pd.DataFrame]:
     """Generate a reproducible longitudinal synthetic clinical dataset.
 
     The generator intentionally creates several edge cases for later SQL exercises:
     duplicate diagnosis rows, interrupted coverage, missing encounter end times,
     multiple stroke encounters, and diagnoses recorded after the encounter start.
+
+    ``readmission_rate`` is the approximate share of index strokes followed by an inpatient
+    readmission within 30 days, added after everything else with risk that depends on age and
+    comorbidity (see ``_add_readmissions``). Pass ``None`` to skip it and get the earlier,
+    purely random data, in which readmissions are almost nonexistent.
     """
     if n_patients < 100:
         raise ValueError("n_patients must be at least 100 so edge cases are represented.")
+    if readmission_rate is not None and not 0 < readmission_rate < 1:
+        raise ValueError("readmission_rate must be between 0 and 1, or None to skip it.")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -283,6 +439,18 @@ def generate_dataset(
             }
         )
     claims = pd.DataFrame(claim_rows)
+
+    if readmission_rate is not None:
+        encounters, diagnoses, claims = _add_readmissions(
+            np.random.default_rng([seed, 30]),
+            patients,
+            encounters,
+            diagnoses,
+            claims,
+            rate=readmission_rate,
+            encounter_counter=encounter_counter,
+            diagnosis_counter=diagnosis_counter,
+        )
 
     tables = {
         "patients": patients,

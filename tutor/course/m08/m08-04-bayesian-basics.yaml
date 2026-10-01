@@ -1,0 +1,545 @@
+id: m08-04-bayesian-basics
+title: Bayesian thinking for clinical work
+summary: Beta-binomial updating, credible intervals, partial pooling for small hospitals and subgroups, Bayesian adaptive trials and their type I error, and how to answer "frequentist or Bayesian?".
+minutes: 27
+status: authored
+why_it_matters: Bayesian methods are common in adaptive trials, device studies, and site-level modelling.
+  Interviewers probe whether you understand what a prior does, not whether you prefer a camp, and
+  regulators ask for simulated operating characteristics whichever camp you are in.
+objectives:
+  - Update a Beta prior with binomial data and interpret the posterior
+  - Explain what a credible interval says and how it differs from a CI
+  - Use partial pooling to stabilize small-subgroup and small-site estimates
+  - Describe a Bayesian adaptive trial (predictive probability, stopping rules) and its type I error considerations
+  - Choose priors responsibly and run prior sensitivity analyses
+key_points:
+  - Priors matter most when data are sparse; a Beta(a, b) prior is worth a + b patients
+  - A credible interval answers "where is the parameter, given data and prior", which is what clinicians think a CI says
+  - Hierarchical models shrink extreme subgroup and site estimates toward the mean, most for the smallest units
+  - Shrinkage lowers average error but can pull a truly exceptional small unit the wrong way
+  - Bayesian stopping rules applied repeatedly inflate frequentist type I error unless calibrated by simulation
+  - Regulators accept Bayesian designs when operating characteristics are simulated and the prior is justified
+  - Report the prior, the posterior, and a sensitivity analysis
+tags: [statistics, bayesian, hierarchical, interview]
+steps:
+  - type: text
+    title: The best hospital has nine patients
+    text: |
+      A regional league table ranks hospitals by 30-day readmission after stroke. The best
+      performer, with **0%**, is a small hospital that discharged 9 stroke patients. The worst, at
+      **30%**, discharged 10. The newspaper runs both stories.
+
+      You know what happened: small denominators produce extreme rates by chance. Spiegelhalter's
+      funnel plots (Statistics in Medicine 2005) made this visible by drawing control limits that
+      narrow as the hospital gets bigger, so the extremes of a league table are disproportionately
+      the small units.
+
+      The Bayesian answer is to stop reporting the raw rate and report a **posterior**: what we
+      believe about each hospital's true rate after combining its data with what we know about
+      hospitals in general. This lesson builds that up from a single Beta update, to a hierarchy of
+      hospitals, to adaptive trials, with interview-ready language throughout.
+
+  - type: text
+    title: Beta-binomial in one screen
+    text: |
+      For a binary outcome with unknown rate θ:
+
+      - **Prior**: θ ~ Beta(a, b). Its mean is a/(a+b).
+      - **Data**: k events in n patients, `k ~ Binomial(n, θ)`.
+      - **Posterior**: θ | data ~ **Beta(a + k, b + n − k)**. (Conjugacy: the posterior stays in
+        the Beta family, so no sampling is needed.)
+
+      Read `a` and `b` as **pseudo-counts**: a prior events and b prior non-events. So `a + b` is
+      the prior's **effective sample size**.
+
+      The posterior mean is a weighted average of the prior mean and the raw rate:
+
+      `(a + k) / (a + b + n) = [(a+b)/(a+b+n)] · prior mean + [n/(a+b+n)] · k/n`
+
+      The weights are the prior sample size and the data sample size. With 12 patients and a prior
+      worth 40, the prior holds 77% of the weight. With 240 patients, it holds 14%.
+
+  - type: quiz
+    question: |
+      The system-wide readmission rate is about 10%, encoded as a Beta(4, 36) prior (worth 40
+      patients). A small hospital has 3 readmissions in 12 stroke patients. What is the posterior
+      mean for that hospital?
+    options:
+      - 0.25, the raw rate, since the data come from this hospital
+      - 0.10, the prior mean, since the sample is tiny
+      - About 0.135
+      - About 0.175
+    answer: 2
+    explanation: |
+      The posterior is Beta(4 + 3, 36 + 9) = Beta(7, 45), with mean 7/52 ≈ **0.135**. It sits
+      between the prior mean 0.10 and the raw rate 0.25, much closer to the prior because the
+      prior is worth 40 patients and the data only 12. The raw rate ignores everything we know
+      about hospitals in general, and the prior mean ignores the data entirely.
+
+  - type: image
+    image: m08-04-beta-update.png
+    caption: |
+      Same Beta(4, 36) prior, two hospitals with the same raw rate of 25%. Top: 12 patients. The
+      flat-prior posterior is wide and centred near 0.29, while the informed posterior is pulled
+      to 0.13. Bottom: 240 patients. Both posteriors are narrow, near 0.25 and 0.23. The prior
+      matters when data are sparse, and washes out when they aren't.
+
+  - type: code
+    title: A prior sensitivity table in six lines
+    language: python
+    text: |
+      For the small hospital, vary the prior and watch the posterior. Sampling from the posterior
+      gives credible intervals without any special library.
+    code: |
+      import numpy as np
+
+      rng = np.random.default_rng(1)
+      k, n = 3, 12                  # one small hospital: 3 readmissions in 12 stroke patients
+
+      priors = {"flat Beta(1, 1)": (1, 1), "weak Beta(2, 18)": (2, 18), "system Beta(4, 36)": (4, 36)}
+      for label, (a, b) in priors.items():
+          post = rng.beta(a + k, b + n - k, size=200_000)       # conjugate update
+          lo, hi = np.percentile(post, [2.5, 97.5])
+          print(f"{label:<19} mean {post.mean():.3f}   95% CrI {lo:.3f} to {hi:.3f}")
+    after: |
+      Output:
+
+      ```
+      flat Beta(1, 1)     mean 0.285   95% CrI 0.091 to 0.538
+      weak Beta(2, 18)    mean 0.156   95% CrI 0.054 to 0.298
+      system Beta(4, 36)  mean 0.135   95% CrI 0.057 to 0.239
+      ```
+
+      Three reasonable priors give three different answers for the same 12 patients, from "maybe
+      half of them are readmitted" to "probably 6% to 24%". That's the honest summary when data
+      are sparse: the conclusion depends on the prior, so you show the table. (A flat Beta(1, 1)
+      is not "no prior": it says every rate from 0 to 1 is equally likely, which is itself a
+      claim.)
+
+  - type: text
+    title: Credible intervals versus confidence intervals
+    text: |
+      A **95% credible interval** is a range that contains θ with 95% posterior probability,
+      **given the data, the model, and the prior**: `P(θ in [0.057, 0.239] | data) = 0.95`.
+
+      A **95% confidence interval** is a statement about the procedure: across repeated samples,
+      95% of intervals built this way cover the true θ. Once computed, a given interval either
+      contains θ or it doesn't.
+
+      Clinicians almost always read a CI as if it were a credible interval. That is why the
+      Bayesian statement is attractive for communication. The price is the prior and the model:
+      a credible interval is only as good as both.
+
+      Two more points that come up in interviews:
+
+      - With plenty of data and a weak prior, the two intervals are **numerically close**. They
+        diverge when data are sparse, which is exactly when the prior matters.
+      - Credible intervals can be **equal-tailed** (2.5th to 97.5th percentiles, as above) or
+        **highest posterior density** (the shortest interval with 95% mass). They differ for
+        skewed posteriors.
+
+  - type: quiz
+    question: |
+      A report says: "Hospital 7: posterior mean readmission rate 13.5%, 95% credible interval
+      5.7% to 23.9%." Which statement is justified?
+    options:
+      - Given the model and the prior used, there is a 95% probability that Hospital 7's true rate lies between 5.7% and 23.9%
+      - If we repeated the study many times, 95% of the intervals would contain the true rate
+      - The true rate is 13.5%, with a margin of error of about 9 points
+      - 95% of Hospital 7's patients have risk between 5.7% and 23.9%
+    answer: 0
+    explanation: |
+      That is the defining property of a credible interval, conditional on the prior and model.
+      The second option is the confidence-interval reading (a property of repeated sampling). The
+      third treats the point estimate as the truth. The fourth confuses uncertainty about a
+      hospital's average rate with spread among its individual patients.
+
+  - type: text
+    title: Choosing a prior without embarrassing yourself
+    text: |
+      Reasonable categories:
+
+      - **Flat or vague**: sounds neutral, often isn't. A flat prior on a probability is not flat on
+        the log-odds scale, and on a hazard ratio or a variance a "flat" prior can be strongly
+        informative about the wrong things.
+      - **Weakly informative**: rules out absurd values and stabilizes estimation without claiming
+        much. For log-odds coefficients, a Normal with SD around 1 to 2 is a common choice. This
+        is the default for most applied work.
+      - **Informative**: built from previous trials, registries, or earlier hospitals. Best
+        practice discounts external data (for example by down-weighting it, or by using a
+        mixture with a vague component that takes over if the new data disagree).
+      - **Skeptical or enthusiastic**: centred on no effect, or on a hoped-for effect, used to
+        test whether a conclusion survives a critic with a different view.
+
+      In regulated work, the prior is a **design element**: specified in advance, justified with
+      sources, and its influence quantified. FDA's CDRH issued final guidance on Bayesian statistics
+      in medical device trials in 2010, and FDA published draft guidance on Bayesian methodology for
+      drugs and biologics in January 2026. **Check the current status**, since the latter may
+      have been revised or finalized. Its central themes are explicit success criteria, justified
+      priors (especially when borrowing external information), and prospective evaluation of
+      operating characteristics, often by simulation.
+
+  - type: quiz
+    question: |
+      A reviewer says "your conclusion depends on the prior you chose". What is the strongest
+      response?
+    options:
+      - Reply that the prior is subjective, but so are many frequentist choices, so there is no issue
+      - Switch to a flat prior, since flat priors are objective
+      - Remove the prior and report the raw rate
+      - Show the posterior under several justified priors (skeptical, weakly informative, enthusiastic) and report whether the conclusion changes
+    answer: 3
+    explanation: |
+      A prior sensitivity analysis answers the question directly: either the conclusion is stable
+      across defensible priors, or you report that it depends on the prior and say by how much.
+      "Subjective" is a debating point, not a response. A flat prior is not objective, it is a
+      different prior. Removing the prior gives the raw rate, which is the most extreme and least
+      stable summary when data are sparse.
+
+  - type: text
+    title: Partial pooling
+    text: |
+      Back to the league table. Two extreme positions:
+
+      - **No pooling**: each hospital gets its own raw rate. Unbiased, but very noisy for small
+        hospitals.
+      - **Complete pooling**: everyone gets the system rate. Stable, but it ignores real
+        differences.
+
+      **Partial pooling** sits between them. Model each hospital's rate as a draw from a shared
+      population distribution whose center and spread are **learned from all hospitals**:
+      `θ_j ~ Beta(a, b)`, or on the log-odds scale `logit θ_j ~ Normal(μ, τ²)`. Each hospital's
+      posterior is then its own data combined with the population distribution.
+
+      With the Beta form, the estimate for hospital j is the weighted average from earlier, where
+      the prior weight `a + b` is itself estimated. A small hospital leans mostly on the
+      population, and a large one mostly on its own data. The size of τ (the **between-hospital
+      SD**) controls everything: if hospitals truly differ a lot, pooling is light, and if they
+      barely differ, it's heavy.
+
+      This is the same idea as the classic Efron and Morris example of baseball batting
+      averages (JASA 1975), where shrunken estimates had less than half the mean squared error of
+      the raw averages.
+
+  - type: image
+    image: m08-04-partial-pooling.png
+    caption: |
+      Simulated: 12 hospitals with true readmission rates near 10% and sizes from 8 to 600
+      patients. Hollow circles are raw rates, orange dots are partially pooled estimates (an
+      empirical-Bayes beta-binomial fit), black diamonds are the simulated truth. Small hospitals
+      move the most. Note the hospital with n = 15: its raw rate (20%) was actually closer to
+      the truth (26%) than the pooled estimate.
+
+  - type: quiz
+    question: |
+      The system rate is 10%, encoded as a prior worth 30 patients (Beta(3, 27)). Hospital A has 2
+      readmissions in 10 patients, Hospital B has 200 in 1,000. Both have a raw rate of 20%. What
+      are the partially pooled estimates?
+    options:
+      - Both stay at 0.20, since they have the same raw rate
+      - A about 0.125 and B about 0.197
+      - A about 0.15 and B about 0.15, since pooling equalizes them
+      - A about 0.197 and B about 0.125
+    answer: 1
+    explanation: |
+      A: (3 + 2) / (30 + 10) = 0.125. B: (3 + 200) / (30 + 1,000) ≈ 0.197. Hospital A's data have a
+      weight of 10/40 = 25% and Hospital B's 1,000/1,030 = 97%, so A is pulled most of the way to
+      10% while B barely moves. Pooling shrinks by **amount of information**, not by the raw rate,
+      so the same raw rate gives different estimates.
+
+  - type: text
+    title: What shrinkage buys, and what it costs
+    text: |
+      **What it buys.** Across 300 simulated datasets like the figure (12 hospitals, true rates near
+      10% with moderate variation), the mean squared error of the pooled estimates was about
+      **25%** of the raw rates' error, and about **18%** for the hospitals with 30 or fewer
+      patients. Shrinkage is most valuable exactly where the raw numbers are least reliable. (With
+      more true heterogeneity between hospitals, the gain is smaller.)
+
+      **What it costs.**
+
+      - It **helps on average, not everywhere**. A small hospital that truly is an outlier gets
+        pulled toward the mean (the n = 15 hospital in the figure).
+      - It assumes units are **exchangeable**. If hospitals differ in case mix, include covariates,
+        or you will shrink toward the wrong center.
+      - In a **fairness audit**, shrinking a small group's metric toward the overall value can hide
+        a real gap. Show raw counts and the shrunken estimate together, and never read "no
+        difference after shrinkage" as "fair".
+      - With few groups, the between-group SD is poorly determined. Gelman (Bayesian Analysis 2006)
+        recommends weakly informative half-t priors for it when the number of groups is small
+        (half-Cauchy and half-normal are the limiting cases), rather than "noninformative"
+        inverse-gamma priors.
+
+      Link to Lesson 2: Gelman, Hill, and Yajima (2012) argue that multilevel models with partial
+      pooling address most of the multiple-comparisons problem for many group-level estimates, by
+      shrinking the noisy extremes instead of widening every interval.
+
+  - type: code
+    title: The same idea as a hierarchical model in PyMC
+    language: python
+    text: |
+      In practice you fit this with a probabilistic programming library. A logistic-normal
+      hierarchy in PyMC, using the non-centered parameterization, for the 12 hospitals in the figure:
+    code: |
+      import numpy as np
+      import pymc as pm
+
+      events = np.array([114, 20, 37, 10, 9, 7, 1, 0, 4, 3, 1, 2])
+      n_pat = np.array([600, 400, 250, 150, 90, 60, 45, 30, 20, 15, 12, 8])
+
+      with pm.Model():
+          mu = pm.Normal("mu", 0.0, 1.5)                   # overall log-odds of readmission
+          tau = pm.HalfNormal("tau", 1.0)                  # between-hospital SD (log-odds)
+          z = pm.Normal("z", 0.0, 1.0, shape=len(n_pat))   # standardized hospital effects
+          pm.Binomial("y", n=n_pat, logit_p=mu + tau * z, observed=events)
+          idata = pm.sample(1000, tune=1000, chains=4, random_seed=1)
+
+      post = idata.posterior
+      theta = 1 / (1 + np.exp(-(post["mu"] + post["tau"] * post["z"])))
+      print(theta.mean(("chain", "draw")).values.round(3))   # pooled rate per hospital
+    after: |
+      Why `mu + tau * z` instead of a Normal with mean `mu` and SD `tau`? That is the
+      **non-centered parameterization**: it makes the sampler's job easier when data per hospital
+      are sparse or `tau` is small, and avoids the "funnel" that causes divergent transitions.
+
+      After sampling, check diagnostics before trusting anything: `R-hat` near 1, adequate
+      effective sample size, and no divergences (ArviZ's `az.summary` shows R-hat and effective
+      sample size, and divergences are recorded in `idata.sample_stats`). The numbers
+      will be close to, but not identical to, the empirical-Bayes figure, because this version
+      also carries the uncertainty in `mu` and `tau`.
+
+  - type: quiz
+    question: |
+      In the model above, the posterior for `tau` piles up close to zero. What does that tell you?
+    options:
+      - The sampler failed, because a between-group SD can't be that small
+      - The hospitals differ enormously, so pooling is light
+      - The prior on tau was too strong
+      - After accounting for sampling noise, hospitals look nearly identical, so estimates are pooled heavily toward the overall rate
+    answer: 3
+    explanation: |
+      `tau` is the SD of the true hospital log-odds. A posterior near zero says the observed
+      spread of raw rates is about what binomial noise alone would produce, so each hospital's
+      estimate is pulled strongly toward `mu`. It's a finding, not an error, though with few or
+      small hospitals a posterior piled at zero is also partly a product of the prior, which is
+      another reason to run a sensitivity analysis on the prior for `tau`.
+
+  - type: text
+    title: Bayesian adaptive trials
+    text: |
+      In a **Bayesian adaptive trial** the design uses posterior quantities to make decisions while
+      the trial runs:
+
+      - **Efficacy or futility stopping**: stop if `P(treatment better | data) > 0.99`, or if the
+        **predictive probability** of eventual success is under 5%.
+      - **Sample-size re-estimation**: keep enrolling until the posterior is precise enough.
+      - **Response-adaptive randomization**: shift allocation toward arms that look better.
+      - **Platform trials**: add and drop arms under one master protocol, sharing a control.
+
+      A well-known example is REMAP-CAP, an adaptive platform trial in critically ill COVID-19
+      patients. Its IL-6 receptor antagonist report (REMAP-CAP Investigators, NEJM 2021) gave a
+      90-day survival hazard ratio of 1.61 (95% credible interval 1.25 to 2.08) with a
+      **posterior probability of superiority above 99.9%**.
+
+      The **predictive probability** of success answers a forward-looking question: given the
+      interim data, what is the chance that the final analysis will meet the success criterion?
+      You simulate the remaining patients from the posterior predictive distribution and apply the
+      final rule. In a simulation with Beta(1, 1) priors, 250 of 500 patients per arm enrolled,
+      and success defined as a final posterior probability above 0.975: 50/250 events on control
+      versus 38/250 on treatment gives an interim posterior probability of 0.92 (not yet enough)
+      but a predictive probability of success of about **50%**.
+
+  - type: code
+    title: Operating characteristics by simulation
+    language: python
+    text: |
+      A Bayesian stopping rule has frequentist behaviour too. Simulate it: control 20% events,
+      treatment 14%, up to 500 patients per arm, Beta(1, 1) priors, stop for efficacy when the
+      posterior probability that treatment is better exceeds a threshold.
+    code: |
+      import numpy as np
+
+      def simulate(p_c, p_t, thr, looks=(100, 200, 300, 400, 500), n_sims=2000, seed=0):
+          rng = np.random.default_rng(seed)
+          wins = 0
+          for _ in range(n_sims):
+              xc = np.cumsum(rng.random(looks[-1]) < p_c)        # control events so far
+              xt = np.cumsum(rng.random(looks[-1]) < p_t)        # treatment events so far
+              for n in looks:                                    # each interim or final look
+                  pc = rng.beta(1 + xc[n - 1], 1 + n - xc[n - 1], 2000)
+                  pt = rng.beta(1 + xt[n - 1], 1 + n - xt[n - 1], 2000)
+                  if (pt < pc).mean() > thr:                     # P(treatment better) > thr
+                      wins += 1
+                      break
+          return wins / n_sims
+
+      for label, looks, thr in [("one final look, 0.975", (500,), 0.975),
+                                ("five looks, 0.975", (100, 200, 300, 400, 500), 0.975),
+                                ("five looks, 0.993", (100, 200, 300, 400, 500), 0.993)]:
+          t1 = simulate(0.20, 0.20, thr, looks)                  # no true difference
+          pw = simulate(0.20, 0.14, thr, looks, seed=1)          # 20% vs 14% events
+          print(f"{label:<22} type I {t1:.3f}   power {pw:.3f}")
+    after: |
+      Output:
+
+      ```
+      one final look, 0.975  type I 0.029   power 0.693
+      five looks, 0.975      type I 0.069   power 0.777
+      five looks, 0.993      type I 0.021   power 0.596
+      ```
+
+      (Monte Carlo error with 2,000 simulations is roughly ±1 point.) The same 0.975 rule has about
+      a 3% false-success rate with one look and about **7%** with five looks. The "look often and
+      stop when it looks good" behaviour inflates the frequentist type I error. Raising the
+      threshold to about 0.993 restores roughly 2.5%, at the price of power, which falls from 78% to
+      60%. Real designs use boundaries that are stricter early and relaxed later to recover power.
+
+  - type: quiz
+    question: |
+      Predict first. A trial checks, at five equally spaced looks, whether the posterior
+      probability that treatment is better exceeds 0.975, and stops if so. There is no true
+      difference. Roughly how often will it declare success?
+    options:
+      - About 2.5%, because the threshold is 0.975
+      - About 1%, because Bayesian methods are more conservative
+      - About 7%
+      - About 25%
+    answer: 2
+    explanation: |
+      Each look is another chance to cross the threshold, like testing several subgroups. The
+      simulation above gives about 7% for this rule. "2.5%" holds only for one pre-specified look
+      (and then only roughly, since a posterior-probability rule with a flat prior is approximately
+      a one-sided test). A Bayesian posterior statement is valid as a posterior statement at
+      every look, but the **procedure** "stop when it looks good" is a different object, and
+      regulators judge procedures.
+
+  - type: text
+    title: What regulators want, and what to verify
+    text: |
+      The common thread across FDA guidance on Bayesian and adaptive designs is **prospective,
+      simulated operating characteristics**.
+
+      - FDA's final guidance **Adaptive Designs for Clinical Trials of Drugs and Biologics**
+        (2019) covers adaptive designs, including Bayesian ones, and expects a pre-specified
+        adaptation plan and simulations that characterize the design's statistical properties.
+      - CDRH's **Guidance for the Use of Bayesian Statistics in Medical Device Clinical Trials**
+        (final, February 2010) is the long-standing device-side reference. Devices often borrow
+        prior information from earlier versions.
+      - FDA's **Use of Bayesian Methodology in Clinical Trials of Drug and Biological Products**
+        appeared as draft guidance in January 2026. ICH E20 on adaptive designs was released for
+        consultation in June 2025. These are moving targets: check the current versions and
+        whether they have been finalized.
+
+      Practically: write down the success criterion, the prior and its justification, the decision
+      thresholds, and the simulation plan **before** the trial. Show type I error, power, expected
+      sample size, and bias across plausible scenarios. If you borrow external information, also
+      show what happens when the external data turn out to be wrong (prior-data conflict).
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      - **"Uninformative" priors.** A default "flat" prior can be highly informative on another
+        scale. Plot what it implies about quantities people care about.
+      - **Hiding the prior.** Reporting a posterior with no prior and no sensitivity analysis.
+      - **Peeking freely.** "Bayesian inference doesn't care about stopping rules" is true of the
+        posterior and false of the operating characteristics of a decision procedure.
+      - **Treating MCMC output as truth.** A model that didn't converge gives confident nonsense.
+        Check R-hat, effective sample size, and divergences.
+      - **Shrinking away a real problem.** In a fairness or safety audit, partial pooling can mute
+        a small group's genuine gap.
+      - **Rebranding.** A "Bayesian" analysis with a flat prior and a 0.5 threshold on the
+        posterior probability, presented as confirmatory, is not stronger evidence than the
+        frequentist one.
+
+  - type: text
+    title: '"Frequentist or Bayesian?" in 30 seconds'
+    text: |
+      This is a trap question. The strong answer rejects the framing, shows you know both, and
+      ends with how you'd decide.
+
+      - Both are coherent tools, and with lots of data and weak priors they usually agree.
+      - Use **frequentist** procedures when you need tight error-rate guarantees that regulators
+        and skeptical readers can verify: confirmatory trials, pre-specified primary analyses.
+      - Use **Bayesian** methods when you need to combine sources of information or communicate
+        uncertainty as probabilities: small samples, hierarchical structure (hospitals, subgroups),
+        borrowing from earlier studies, adaptive designs.
+      - Either way: state the assumptions, show sensitivity, and check operating characteristics
+        by simulation. A Bayesian design is judged by frequentist behaviour at the regulator, and a
+        frequentist analysis still relies on a model.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Are you a frequentist or a Bayesian?"
+    model_answer: |
+      The 20-second version: I use whichever fits the question, and I check my work the same way
+      either way. For confirmatory claims I'd lean on pre-specified frequentist error control. For
+      small samples, hierarchical data, or borrowing information, Bayesian methods are the natural
+      tool.
+
+      The deeper version: the real differences are what you condition on and what you promise.
+      Frequentist methods promise long-run error rates regardless of the truth, which is why
+      regulators like them for pivotal trials. Bayesian methods give probability statements about
+      parameters given the data, but they need a prior, and the statements are only as good as the
+      prior and the model. So when I use Bayesian methods I pre-specify the prior and justify it,
+      run a prior sensitivity analysis, and simulate the design's operating characteristics,
+      including type I error if it will be judged on it. A concrete example: estimating
+      readmission rates for small hospitals, where I'd use partial pooling because the raw rates
+      are too noisy, and I'd report both the raw counts and the shrunken estimates. With plenty of
+      data the answers converge, so I don't think the camp matters as much as the discipline.
+    key_points:
+      - Rejects camp loyalty and chooses the method by the question
+      - Identifies regulatory preference for pre-specified error control in confirmatory settings
+      - Names where Bayesian methods shine (small samples, hierarchies, borrowing, adaptivity)
+      - States the discipline of a prior, a sensitivity analysis, and simulated operating characteristics
+      - Gives a concrete applied example
+
+  - type: think
+    interview: true
+    prompt: |
+      "We have readmission data from 12 hospitals, and several have fewer than 30 stroke
+      discharges. How would you estimate each hospital's true rate, or its model AUROC, fairly?"
+    model_answer: |
+      The 20-second version: raw rates for small hospitals are dominated by noise, so I'd use a
+      hierarchical model with partial pooling. Each hospital's estimate is its own data pulled
+      toward the population rate, more strongly when it has fewer patients.
+
+      The deeper version: I'd model hospital log-odds as normal around a system mean, with a
+      weakly informative prior on the between-hospital SD, and include case-mix covariates so
+      that I'm not shrinking toward the wrong center. I'd check convergence and compare to the raw
+      estimates. I'd report posterior intervals and the raw counts, because shrinkage reduces
+      error on average but can hide a real outlier. I'd run a sensitivity analysis on the prior for
+      the SD, since with only 12 groups it's poorly determined. For AUROC by hospital the same idea
+      applies, but with few events per hospital I might instead report the wide intervals and
+      call the small hospitals uninformative, and keep the question of whether the model works at
+      a new hospital for external validation, where leave-one-site-out is the right design.
+    key_points:
+      - Proposes a hierarchical model with partial pooling, stronger for smaller hospitals
+      - Includes case-mix covariates and a weakly informative prior on the between-site SD
+      - Reports raw counts alongside shrunken estimates and notes shrinkage can hide true outliers
+      - Runs prior sensitivity analysis and convergence checks
+      - Distinguishes estimating site rates from validating the model at a new site
+
+  - type: laptop
+    title: Shrink the facility-level readmission rates
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/site_shrinkage.py
+    task: |
+      From `stroke_features` joined to the index encounter's `facility_id`, compute events and
+      patients per facility (a SQL query in `01-clinical-data-engineering/`). Fit the empirical-Bayes
+      beta-binomial prior by maximizing the marginal likelihood, and print raw versus pooled rates
+      with the patient counts.
+
+      Then (1) replace the prior with a PyMC hierarchical model and compare, (2) draw a funnel-style
+      plot of the raw rates against patient counts, and (3) write two sentences on what you would
+      and would not claim about the facility with the highest raw rate.
+
+  - type: recap
+    points:
+      - "Beta(a, b) prior plus k events in n patients gives a **Beta(a + k, b + n − k)** posterior; the prior is worth a + b patients"
+      - Priors matter when data are sparse. Show a prior sensitivity table rather than defending one prior
+      - "A **credible interval** is a probability statement given data, prior, and model; a **confidence interval** is a property of the procedure"
+      - Partial pooling shrinks each unit toward the population in proportion to how little data it has, cutting average error, but it can pull a true outlier the wrong way
+      - Use weakly informative priors for the between-group SD when there are few groups, and keep raw counts visible in audits
+      - A Bayesian stopping rule checked at several looks has inflated frequentist type I error (about 7% in the simulation) unless the threshold is calibrated
+      - Regulators accept Bayesian designs when the prior is justified and operating characteristics are simulated in advance; verify the current guidance
+      - "Answer \"frequentist or Bayesian?\" by matching method to question, and by showing assumptions, sensitivity, and simulation"

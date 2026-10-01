@@ -1,0 +1,579 @@
+id: m06-03-platform-labs
+title: 'Platform mental models: Spark, Terraform, and Kubernetes'
+summary: Just enough Spark and Databricks, infrastructure as code with Terraform, and Kubernetes to
+  discuss them confidently, plus how the big three clouds map onto each other.
+minutes: 25
+status: authored
+why_it_matters: These tools appear in most clinical AI job descriptions. You rarely need to be an expert,
+  but a clear mental model lets you read a codebase, ask the right questions, and answer "have you used
+  X?" honestly and well.
+objectives:
+  - Explain Spark's driver/executor model, lazy evaluation, and jobs, stages, and tasks
+  - Describe what Databricks adds, including Delta Lake and Unity Catalog, at a high level
+  - Describe Terraform providers, resources, plan/apply, state, modules, and remote backends
+  - Explain pods, deployments, services, ingress, and autoscaling in Kubernetes, and when you don't need it
+  - Map equivalent services across Azure, AWS, and GCP
+key_points:
+  - Spark is lazy; actions trigger jobs, shuffles split stages, and each partition is a task
+  - Delta adds ACID transactions and time travel to Parquet; Unity Catalog adds governance
+  - Terraform and Kubernetes are both declarative, describing desired state and letting a tool reconcile it
+  - Terraform state is sensitive (it can hold secrets) and belongs in a locked, encrypted remote backend
+  - You rarely need Kubernetes for one model; serverless containers are usually enough
+tags: [spark, databricks, terraform, kubernetes, cloud, interview]
+steps:
+  - type: text
+    title: Three lines in a job post
+    text: |
+      A typical clinical ML engineer posting: "Experience with **Databricks/Spark**, infrastructure
+      as code (**Terraform**), and container orchestration (**Kubernetes**) preferred."
+
+      You don't need to be a platform engineer to get that job. You need to know what each tool is
+      _for_, the handful of concepts everyone uses when talking about it, and where the sharp edges
+      are. Then you can read a repo, follow a design review, and answer "have you used it?" with
+      something better than "a little".
+
+      This lesson gives you one mental model per tool, anchored in the stroke project: Spark to
+      build `stroke_features` at claims scale, Terraform to create the Azure resources for the
+      Module 03 service, and Kubernetes as one way (often not the best one) to run it.
+
+  - type: text
+    title: When Spark, and when not
+    text: |
+      In Module 01, DuckDB builds the stroke cohort from 5,000 synthetic patients in well
+      under a second. A national claims dataset has hundreds of millions of patients and
+      billions of claim lines, spread over thousands of files. That no longer fits on one
+      machine, which is the problem Spark solves: **split the data into partitions and process
+      them in parallel on many machines**.
+
+      The honest counterpoint: a single modern machine with DuckDB or Polars handles tens to
+      hundreds of gigabytes comfortably. Spark adds cluster startup time, cost, and a new class of
+      bugs. Many health-system teams use it because their data platform (often Databricks) is
+      built on it, not because every query needs a cluster.
+
+      Saying this in an interview ("I'd use DuckDB until the data or the platform requires
+      Spark") sounds senior, not inexperienced.
+
+  - type: text
+    title: Driver and executors
+    text: |
+      A Spark application has two kinds of processes:
+
+      - The **driver** runs your program (the notebook or script). It doesn't touch most of the
+        data. It builds a plan and hands out work.
+      - **Executors** are processes on worker machines. They hold partitions of the data in
+        memory or on disk and run **tasks** on them.
+
+      A **partition** is a chunk of rows. A **task** is one unit of work on one partition, so
+      a table with 200 partitions produces 200 tasks per stage, spread across the executors'
+      cores.
+
+      A cluster manager (Databricks' own, YARN, or Kubernetes) starts the executors. You mostly
+      don't care which one.
+
+  - type: image
+    image: m06-03-spark-cluster.png
+    caption: |
+      The driver plans; executors do the work, one task per partition. Operations that need rows
+      with the same key on the same machine (groupBy, join) force a **shuffle**, which moves data
+      across the network and starts a new stage.
+
+  - type: text
+    title: Lazy evaluation, jobs, stages, tasks
+    text: |
+      Spark operations come in two kinds:
+
+      - **Transformations** (`select`, `where`, `join`, `groupBy`) only add to the plan. Nothing
+        runs yet.
+      - **Actions** (`count`, `collect`, `show`, `write`) make Spark optimize the whole plan and
+        execute it.
+
+      Each action launches a **job**. The job is cut into **stages** at shuffle boundaries. Narrow
+      operations (filter, select) stay within a stage. Wide ones (groupBy, join, distinct) end one.
+      Each stage is made of **tasks**, one per partition.
+
+      Laziness is why a notebook cell with ten transformations returns instantly and the
+      `.write` at the end takes twenty minutes. It's also why errors often appear far from the line
+      that caused them.
+
+  - type: code
+    title: Prior utilization in PySpark
+    language: python
+    text: "A PySpark port of one CTE from `sql/02_features.sql`, reading from Unity Catalog tables:"
+    code: |
+      from pyspark.sql import SparkSession, functions as F
+
+      spark = SparkSession.builder.getOrCreate()
+      c = spark.read.table("clinical.stroke.index_stroke_cohort").alias("c")
+      e = spark.read.table("clinical.raw.encounters").alias("e")
+
+      prior = (
+          c.join(e, F.col("c.patient_id") == F.col("e.patient_id"), "left")
+          .where(
+              (F.to_date("e.encounter_start") < F.col("c.index_date"))
+              & (F.to_date("e.encounter_start") >= F.date_sub("c.index_date", 365))
+          )
+          .groupBy("c.patient_id", "c.index_date")
+          .agg(F.count_distinct("e.encounter_id").alias("encounters_prior_365d"))
+      )
+
+      prior.write.mode("overwrite").saveAsTable("clinical.stroke.prior_utilization")
+
+  - type: quiz
+    question: In the PySpark code above, when does Spark actually read the encounters data?
+    options:
+      - At `spark.read.table(...)`, which loads the table into the driver
+      - At `.join(...)`, because joins are expensive
+      - At `.write...saveAsTable(...)`, the first action
+      - At `.agg(...)`, because aggregation needs the data
+    answer: 2
+    explanation: |
+      Reading, joining, filtering, and aggregating are all transformations that only build a
+      plan. The write is the action that triggers a job. Spark then optimizes the whole plan, for
+      example by pushing filters down into the scan, and runs it. "Loads into the driver" is a
+      common misconception. Data goes to executors, and only `collect()`-style actions bring
+      results back to the driver.
+
+  - type: quiz
+    question: |
+      The code above has a correctness bug you met in Module 01. What is it?
+    options:
+      - "`count_distinct` double-counts encounters with multiple diagnoses"
+      - The `where` after the left join drops cohort patients with no prior encounters
+      - "`date_sub` counts 365 business days, not calendar days"
+      - Spark can't compare a timestamp with a date
+    answer: 1
+    explanation: |
+      For cohort patients with no matching encounters, the `e.*` columns are null, and the
+      `where` condition on them evaluates to null, so those rows are filtered out. The left join
+      silently becomes an inner join and patients with zero prior encounters vanish instead of
+      getting 0. Move the window conditions into the join condition, as `02_features.sql` does in
+      its `ON` clause. The bug is the same in every SQL engine, distributed or not.
+
+  - type: text
+    title: What makes Spark slow
+    text: |
+      Five things explain most Spark performance problems:
+
+      - **Shuffles**: every join and groupBy moves data across the network. Fewer, smaller
+        shuffles mean faster jobs.
+      - **Skew**: one key with far more rows than the others (one hospital, one frequent-flyer
+        patient) makes one task run for an hour while 199 finish in a minute.
+      - **Small tables joined the slow way**: a 50-row code lookup should be **broadcast** to
+        every executor instead of shuffled.
+      - **Pulling data to the driver**: `collect()` or `toPandas()` on a big table crashes the
+        driver with out-of-memory errors.
+      - **Python UDFs**: row-by-row Python functions are much slower than built-in `F.*`
+        functions, which run inside the engine.
+
+      Knowing these five, and that the Spark UI shows stages and task durations, covers most of
+      what an interviewer will probe.
+
+  - type: text
+    title: What Databricks adds
+    text: |
+      Databricks is a managed platform built around Spark, available on Azure, AWS, and GCP.
+
+      - **Compute**: clusters for notebooks and jobs, SQL warehouses for BI-style queries, and
+        serverless options.
+      - **Jobs**: scheduled, multi-task pipelines, such as "rebuild cohort, then features, then
+        retrain".
+      - **Delta Lake**: the table format. It's Parquet files plus a **transaction log**, which
+        gives ACID writes, schema enforcement, `MERGE` for upserts, and **time travel**
+        (`SELECT ... VERSION AS OF 42`).
+      - **Unity Catalog**: governance. A three-level namespace (`catalog.schema.table`), grants
+        on tables, columns, and rows, audit logs, and lineage. It also governs ML models and files.
+      - **MLflow** is built in, and Unity Catalog-registered models use aliases, as in Module 02.
+
+      For clinical data, Unity Catalog is the part that matters most. It's how a platform enforces
+      "only the stroke team can read identified encounters".
+
+  - type: quiz
+    question: |
+      On Databricks, what's the best way to pin the training data for an MLflow run of the stroke
+      model?
+    options:
+      - Log the table name plus its Delta version, and snapshot it if the run must be reproducible long-term
+      - Log the table name `clinical.stroke.stroke_features`
+      - Delta tables never change, so nothing needs to be logged
+      - Copy the table into the MLflow run as a CSV artifact every time
+    answer: 0
+    explanation: |
+      A Delta version identifies the exact rows (`VERSION AS OF n`), which solves the "table names
+      aren't versions" problem from the MLflow lesson. The catch: `VACUUM` deletes old data files
+      after a retention period (7 days by default), so time travel to old versions eventually
+      fails. For models you must be able to rebuild months later, keep a snapshot or a longer
+      retention. Copying identified data into artifacts creates an ungoverned PHI copy.
+
+  - type: text
+    title: Terraform, declarative infrastructure
+    text: |
+      Module 03 deploys the readmission API to Azure. You could click through the portal or write
+      a script of `az` commands. Both are **imperative**: "do this, then this". Run the script
+      twice and you may get two of everything or an error. Nobody can review a click.
+
+      **Terraform** is **declarative**: you write the resources you want to exist, and Terraform
+      works out what to create, change, or delete to get there.
+
+      - **Providers** are plugins that talk to an API (`azurerm`, `aws`, `google`, even
+        `databricks`).
+      - **Resources** are things to manage, such as a resource group, a container registry, or a
+        storage account.
+      - **Data sources** read things that exist but that you don't manage.
+      - **Variables** and **outputs** are the inputs and results.
+      - **Modules** are reusable bundles of resources, such as a "model service" module used for
+        both dev and prod.
+
+      The files live in git, so infrastructure changes get code review like everything else.
+
+  - type: code
+    title: A small Terraform configuration
+    language: hcl
+    code: |
+      terraform {
+        required_providers {
+          azurerm = { source = "hashicorp/azurerm", version = "~> 5.0" }
+        }
+        backend "azurerm" {
+          resource_group_name  = "rg-tfstate"
+          storage_account_name = "sttfstateclinicalai"
+          container_name       = "tfstate"
+          key                  = "stroke-readmit-dev.tfstate"
+        }
+      }
+
+      provider "azurerm" {
+        features {}
+      }
+
+      resource "azurerm_resource_group" "ml" {
+        name     = "rg-stroke-readmit-dev"
+        location = "eastus2"
+      }
+
+      resource "azurerm_container_registry" "acr" {
+        name                = "acrstrokereadmitdev"
+        resource_group_name = azurerm_resource_group.ml.name
+        location            = azurerm_resource_group.ml.location
+        sku                 = "Basic"
+      }
+    after: |
+      The registry refers to `azurerm_resource_group.ml.name`, so Terraform knows to create the
+      group first. References define the dependency graph. The azurerm provider (since 4.0)
+      also needs a subscription ID, usually supplied through the `ARM_SUBSCRIPTION_ID`
+      environment variable. Pin the provider to a major version, and read the upgrade guide
+      before moving to the next one.
+
+  - type: text
+    title: init, plan, apply
+    text: |
+      The everyday loop:
+
+      - `terraform init` downloads providers and connects to the state backend.
+      - `terraform plan` compares your code with the **state** and the real cloud, then prints what
+        it would create (`+`), change (`~`), or destroy (`-`). It changes nothing.
+      - `terraform apply` executes a plan after confirmation.
+      - `terraform destroy` removes everything the configuration manages.
+
+      In a team, `plan` runs in CI on every pull request and its output is part of the review.
+      `apply` runs from CI after merge, not from someone's laptop. The line to look for in a plan
+      review is **"must be replaced"**: some attribute changes force Terraform to destroy and
+      recreate a resource, which for a database or storage account can mean data loss.
+
+  - type: quiz
+    question: |
+      Someone upgrades the registry's SKU from Basic to Standard by hand in the Azure portal. The
+      Terraform code still says `sku = "Basic"`. What does the next `terraform plan` show?
+    options:
+      - No changes, because Terraform only tracks what it created
+      - An error, because the state is corrupted
+      - A change to update the code to Standard
+      - An update to change the SKU back to Basic
+    answer: 3
+    explanation: |
+      Plan refreshes the real resource, notices it differs from the code (**drift**), and proposes
+      to bring reality back to the declared state: SKU back to Basic. Terraform never rewrites
+      your code. If the change was intended, update the code and let plan show "no changes".
+      Manual portal edits on Terraform-managed resources get silently undone, which is a good
+      reason to avoid them.
+
+  - type: text
+    title: State is sensitive
+    text: |
+      Terraform keeps a **state file** that maps each resource in your code to the real object's ID
+      and records its attributes. Without state, Terraform can't tell what it manages.
+
+      Why state needs care:
+
+      - It can contain **secrets in plain text**, such as generated database passwords, storage
+        account keys, and connection strings, even if you marked the variables `sensitive`
+        (that only hides them in CLI output).
+      - It must be **shared** so the whole team, and CI, see the same state.
+      - Two concurrent `apply` runs can corrupt it, so it needs **locking**.
+
+      So: never commit `terraform.tfstate` to git. Use a **remote backend** that supports locking
+      and encryption with tightly restricted access, such as an Azure Storage container (the
+      `azurerm` backend uses blob leases for locking), S3 (with native lock files in recent
+      Terraform versions), or HCP Terraform. Treat access to state like access to production
+      secrets.
+
+      (OpenTofu, a community fork created after HashiCorp's 2023 license change, uses the same
+      core concepts and configuration language.)
+
+  - type: quiz
+    question: |
+      A teammate commits `terraform.tfstate` to the project's git repo "so everyone has it". What's
+      the most serious problem?
+    options:
+      - The file may contain secrets in plain text, now in git history for everyone with repo access
+      - Git can't store JSON files larger than 1 MB
+      - Terraform will refuse to read a state file from git
+      - It makes `terraform plan` slower
+    answer: 0
+    explanation: |
+      State often holds keys and passwords in plain text. Once they're in git history, deleting the
+      file doesn't remove them, so the secrets must be rotated. There's also a coordination
+      problem: two people apply from different copies with no locking. The fix is a remote,
+      encrypted, access-controlled backend with locking, and adding `*.tfstate` to `.gitignore`.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why would you use Terraform for the infrastructure behind a clinical model rather than
+      setting it up in the cloud console?"
+    model_answer: |
+      Three reasons: reproducibility, review, and audit. With Terraform, the registry, the
+      container environment, networking, identities, and Key Vault are code in git, so I can
+      create an identical dev, test, and prod, and rebuild an environment after an incident. Every
+      change goes through a pull request with the plan output attached, so someone sees "this
+      opens the storage account to the public internet" before it happens. That matters a lot in
+      a HIPAA environment, where the git history plus CI logs becomes an audit trail of who changed
+      what and when. Drift detection catches manual changes. The trade-offs are that state has to
+      be protected because it can contain secrets, so a remote encrypted backend with locking is
+      required, and some changes force replacement, so plans need careful reading. For a single
+      throwaway experiment the console is fine. For anything that touches patient data or runs in
+      production, I'd want it in code.
+    key_points:
+      - Reproducible, identical environments (dev, test, prod) and rebuild after incidents
+      - Changes reviewed through pull requests with the plan output
+      - Audit trail and security review, which matter for PHI and HIPAA
+      - Drift detection
+      - Knows the costs, including sensitive state, the need for a locked remote backend, and replacements
+
+  - type: text
+    title: Kubernetes in one idea
+    text: |
+      Kubernetes (K8s) runs containers across a cluster of machines. It uses the same declarative
+      idea as Terraform: you submit YAML describing the desired state ("3 copies of this container,
+      reachable at this name") and **controllers** keep reconciling reality toward it. If a machine
+      dies, its containers are recreated elsewhere.
+
+      The objects you need to know:
+
+      - **Pod**: one or more containers scheduled together, the smallest unit. Pods are
+        disposable and get new IPs when recreated.
+      - **Deployment**: keeps N identical pods running and handles **rolling updates** (replace pods
+        gradually when the image changes) and rollbacks.
+      - **Service**: a stable name and virtual IP that load-balances to the pods matching a
+        **label selector**.
+      - **Ingress**: HTTP(S) routing from outside the cluster to services, implemented by an
+        ingress controller. The newer Gateway API does the same job.
+      - **ConfigMap / Secret**: configuration and credentials injected into pods.
+      - **HorizontalPodAutoscaler (HPA)**: changes a Deployment's replica count based on metrics
+        such as CPU.
+
+  - type: code
+    title: A Deployment for the readmission API
+    language: yaml
+    code: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: stroke-readmit-api
+      spec:
+        replicas: 3
+        selector:
+          matchLabels: {app: stroke-readmit-api}
+        template:
+          metadata:
+            labels: {app: stroke-readmit-api}
+          spec:
+            containers:
+              - name: api
+                image: acrstrokereadmitdev.azurecr.io/stroke-readmit-api:1.4.2
+                ports: [{containerPort: 8000}]
+                env:
+                  - {name: MODEL_URI, value: "models:/stroke-readmit@champion"}
+                resources:
+                  requests: {cpu: 250m, memory: 512Mi}
+                  limits: {memory: 1Gi}
+                readinessProbe:
+                  httpGet: {path: /readyz, port: 8000}
+    after: |
+      Note the pinned image tag (never `:latest` in production), the resource **requests** (the
+      scheduler and the HPA need them), and the readiness probe, which keeps traffic away from a
+      pod until the model has loaded. The `/readyz` endpoint is the one you built in Module 03
+      (`/healthz` is its liveness counterpart).
+
+  - type: quiz
+    question: |
+      You add this Service for the Deployment above. Requests to `stroke-readmit-api` time out.
+      Why?
+    code: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: stroke-readmit-api
+      spec:
+        selector: {app: stroke-readmit}
+        ports: [{port: 80, targetPort: 8000}]
+    language: yaml
+    options:
+      - "`port` and `targetPort` must be the same number"
+      - The selector doesn't match the pods' label, so the Service has no endpoints
+      - A Service needs `type LoadBalancer` to work inside the cluster
+      - Services can't have the same name as a Deployment
+    answer: 1
+    explanation: |
+      Services find pods by label. The pods are labeled `app: stroke-readmit-api`, but the
+      selector says `app: stroke-readmit`, so nothing matches and there's nowhere to send traffic.
+      Mapping port 80 to container port 8000 is normal. The default `ClusterIP` type works inside
+      the cluster, and matching names are fine. `kubectl describe service stroke-readmit-api`
+      would show `Endpoints: <none>` immediately (`kubectl get endpointslices -l
+      kubernetes.io/service-name=stroke-readmit-api` is the current way to inspect them, since
+      the older Endpoints API is deprecated).
+
+  - type: image
+    image: m06-03-k8s-request-path.png
+    caption: |
+      A request enters through the Ingress, reaches the Service's stable name, and is load-balanced
+      across the Deployment's pods. The HPA watches average CPU against its target and changes the
+      replica count. Pods come and go; the names above them stay put.
+
+  - type: text
+    title: Autoscaling and probes
+    text: |
+      The **HPA** (`autoscaling/v2`) adjusts replicas between a minimum and maximum to keep a metric
+      near a target, such as average CPU at 70% of the requested CPU. It needs resource requests
+      and a metrics source (metrics-server) to work. Scaling up takes time (new pods must start and
+      load the model), so set a sensible minimum rather than relying on scaling from 1 during a
+      morning spike.
+
+      Two probes matter for model services:
+
+      - **Readiness**: "can I take traffic?" A failing pod is removed from the Service but not
+        killed. Use it while the model loads.
+      - **Liveness**: "am I stuck?" A failing pod is restarted. Make it cheap and don't make it
+        depend on the database, or one outage restarts every pod at once.
+
+  - type: text
+    title: You probably don't need Kubernetes for one model
+    text: |
+      Kubernetes solves the problems of running **many** services with shared infrastructure. It
+      brings its own work: cluster upgrades, networking, ingress, certificates, RBAC, secrets,
+      security patching, and cost management. Even managed K8s (AKS, EKS, GKE) leaves much of that
+      to you.
+
+      For one readmission API with modest traffic, a **serverless container platform** gives you
+      the same container, HTTPS, autoscaling, and revisions with far less to operate: Azure
+      Container Apps, AWS ECS on Fargate, or Google Cloud Run. Module 03 deploys there.
+
+      Kubernetes makes sense when your organization already runs a platform team and cluster, you
+      have many services, you need GPUs scheduled across teams, or you have specific networking and
+      compliance requirements that the serverless options can't meet. "Use the platform your
+      organization already supports" beats either default.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Would you deploy our stroke readmission model on Kubernetes? Walk me through your reasoning."
+    model_answer: |
+      It depends on the context more than the model. The model itself is a small CPU service:
+      a FastAPI container that loads one model and answers maybe a few requests a second, driven
+      by admissions. For that alone, Kubernetes is more platform than we need. I'd reach for a
+      managed container service like Azure Container Apps or Cloud Run, which gives HTTPS,
+      autoscaling, revisions for rollback, and managed identity, with little to operate. If the
+      organization already runs AKS with a platform team, standard ingress, secrets, monitoring,
+      and a security baseline, I'd deploy there instead, because using the supported platform
+      beats running a one-off. In that case I'd write a Deployment with a pinned image, resource
+      requests, readiness and liveness probes, and an HPA with a sensible minimum. Either way, the
+      clinical requirements shape the design more than the orchestrator: private networking to
+      the EHR integration, no PHI in logs, audit logging, and the model version logged with each
+      prediction.
+    key_points:
+      - Sizes the workload (small, CPU-only, low request rate)
+      - Prefers serverless containers for a single service and names concrete options
+      - Uses existing Kubernetes if the organization has a platform team and cluster
+      - Knows the Kubernetes essentials if used (pinned image, requests, probes, HPA)
+      - Puts clinical requirements (networking, PHI, audit, versioning) ahead of tool choice
+
+  - type: text
+    title: 'Translate between clouds'
+    text: |
+      Job posts name one cloud, but the concepts transfer. The equivalents you'll use most
+      (Azure / AWS / GCP):
+
+      - **Object storage**: Blob Storage (ADLS Gen2) / S3 / Cloud Storage
+      - **Container registry**: Container Registry / ECR / Artifact Registry
+      - **Serverless containers**: Container Apps / ECS on Fargate / Cloud Run
+      - **Managed Kubernetes**: AKS / EKS / GKE
+      - **ML platform**: Azure Machine Learning / SageMaker / Vertex AI
+      - **Analytics warehouse**: Synapse or Fabric / Redshift / BigQuery
+      - **Secrets**: Key Vault / Secrets Manager / Secret Manager
+      - **Identity**: Entra ID with Azure RBAC / IAM / Cloud IAM
+      - **FHIR and health data**: Azure Health Data Services / HealthLake / Cloud Healthcare API
+
+      Databricks runs on all three, and Terraform has a provider for each. In an interview, "I
+      used Container Apps, which is the Azure counterpart of Cloud Run" turns a gap into a
+      strength.
+
+  - type: quiz
+    question: |
+      Your Module 03 service runs on Azure Container Apps, pulling images from Azure Container
+      Registry and secrets from Key Vault. A hospital partner on AWS asks what the equivalent
+      stack would be. Which is closest?
+    options:
+      - EKS, S3, and IAM
+      - SageMaker, ECR, and CloudWatch
+      - Lambda, S3, and KMS
+      - ECS on Fargate, ECR, and Secrets Manager
+    answer: 3
+    explanation: |
+      Container Apps is a serverless container runtime, and its closest AWS match is ECS on
+      Fargate. The registry maps to ECR, and Key Vault's secret storage maps to Secrets Manager.
+      EKS is managed Kubernetes, which is more than you need. SageMaker endpoints can serve models,
+      but they're an ML platform rather than a general container runtime. Lambda is functions,
+      not long-running containers.
+
+  - type: laptop
+    title: Run the feature logic in local Spark
+    repo_path: 01-clinical-data-engineering/src/clinical_data_engineering/spark_features.py
+    task: |
+      Install `pyspark` in a fresh virtual environment (it also needs a Java 17, 21, or 25
+      runtime installed) and create this module. Load the generated
+      `encounters` and `index_stroke_cohort` tables (export them from DuckDB to Parquet first)
+      into a local `SparkSession`, and port the `prior_utilization` CTE from `sql/02_features.sql`
+      with the window conditions in the **join**. Assert that the result matches the DuckDB
+      `stroke_features` columns row for row. Then call `.explain()` and find the exchange
+      (shuffle) steps in the plan.
+
+  - type: laptop
+    title: Plan (don't apply) the Module 03 infrastructure
+    repo_path: 03-production-ml/infra/main.tf
+    task: |
+      Create this file with the resource group and container registry from this lesson (leave
+      out the `backend` block), plus an `outputs.tf` that prints the registry login server. Use
+      local state for this exercise only. Run `terraform init`, `terraform fmt`,
+      `terraform validate`, and `terraform plan` (which needs `az login` and
+      `ARM_SUBSCRIPTION_ID`), and read the plan. Then change the registry `name` and see whether the plan says "must be replaced".
+      Add `*.tfstate*` and `.terraform/` to `.gitignore` before your first commit.
+
+  - type: recap
+    points:
+      - "Spark: the driver plans, executors run one task per partition, actions trigger jobs, and shuffles split stages"
+      - Most Spark pain comes from shuffles, skew, collecting to the driver, and Python UDFs; DuckDB is fine until it isn't
+      - Delta adds ACID and time travel (mind VACUUM); Unity Catalog adds governance with catalog.schema.table
+      - Terraform is declarative; plan in CI, apply after review, and read for "must be replaced"
+      - Terraform **state can hold secrets**, so keep it in a locked, encrypted remote backend and never in git
+      - "Kubernetes: pods are disposable, Deployments keep the count, Services find pods by label, the HPA scales"
+      - One model rarely needs Kubernetes; serverless containers or the org's existing platform usually win
+      - Learn the Azure / AWS / GCP equivalents so your experience transfers

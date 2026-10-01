@@ -1,0 +1,473 @@
+id: m10-03-regulation-deployment
+title: 'Getting imaging AI into the clinic: FDA pathways, workflow, and monitoring'
+summary: CADt, CADe, CADx, and image-processing devices, 510(k) and predicates, PCCPs, PACS and worklist
+  integration, automation bias, and post-market monitoring. FDA facts checked on 30 September 2026.
+minutes: 28
+status: authored
+why_it_matters: Imaging AI is the most heavily cleared category of AI medical device. Understanding the
+  pathway and the workflow is what separates research from product work, and it is the ground interviewers
+  probe when they ask "and then what happens after FDA clearance?"
+objectives:
+  - Distinguish triage, detection, characterization, and image-processing devices and what evidence each needs
+  - Explain predicate-based 510(k) clearance, when De Novo applies, and what clearance does and does not show
+  - Describe a predetermined change control plan for a retrainable imaging model
+  - Design integration with PACS and RIS worklists and DICOM SR, SEG, and secondary capture output
+  - Plan monitoring for drift across scanners and for automation-bias and alert-fatigue effects on readers
+key_points:
+  - The claim (triage, mark, characterize, measure) decides the category, and the category decides the evidence
+  - Triage devices change queue order, so time to review is the outcome to measure
+  - Clearance covers stated indications and the tested data, not your scanners, so validate locally
+  - Vendor and protocol changes are the most common cause of drift
+  - A model that is right but ignored (or over-trusted) has no clinical value
+  - Check current FDA guidance, because this area changes quickly (checked 30 September 2026)
+tags: [imaging, regulation, deployment, fda, stroke, interview]
+steps:
+  - type: text
+    title: Cleared, but is it working?
+    text: |
+      A hospital switches on an FDA-cleared hemorrhage triage tool for non-contrast head CT. Three
+      months later the stroke lead asks two questions:
+
+      - "Is it as accurate here as the brochure says?"
+      - "Did it make anything faster?"
+
+      Nobody can answer either. The vendor says it is cleared. The radiologists say they mostly
+      ignore the flag. IT says the service is up.
+
+      FDA clearance answered a different question: is this device, for its stated intended use and
+      on the evidence in the submission, substantially equivalent to (or as safe and effective as)
+      what is already legally marketed? It did not say the tool works **on your scanners**, **in your
+      queue**, or that it **improves care**.
+
+      This lesson covers how imaging AI is categorized and cleared, how it plugs into a radiology
+      workflow, and what you monitor afterwards. FDA facts below were checked against FDA and CFR
+      pages on **30 September 2026**. Guidance moves, so check the current versions.
+
+  - type: text
+    title: The claim decides the category
+    text: |
+      Regulators look at what the software **claims to do**, not at the network inside. For imaging
+      there is a well-worn family of categories, each a Class II device with special controls:
+
+      - **CADt**, triage and notification (21 CFR 892.2080). Prioritizes studies. By definition it
+        "does not mark, highlight, or direct users' attention to a specific location" and "does not
+        remove cases from a reading queue". Its testing must show **effective triage**, for example
+        improved time to review, plus standalone performance.
+      - **CADe**, detection (892.2070, medical image analyzer). Marks or highlights regions to
+        direct the reader's attention. Not for triage or for recommending diagnosis.
+      - **CADx**, characterization (892.2060). This regulation is for lesions suspicious for cancer.
+        A stroke "diagnosis" claim may not fit an existing classification.
+      - **Image processing and quantification** (892.2050). Perfusion-map software is cleared here
+        under product code LLZ, for example.
+
+      The same hemorrhage algorithm can be a CADt (flag only) or a CADe (draw a box). The claim
+      and labeling differ, so the evidence differs.
+
+  - type: image
+    image: m10-03-fda-pathway.png
+    caption: |
+      A decision sketch. Image analysis makes the software a device function (Module 03's CDS
+      criterion 1). The claim picks the category. The route to market depends on whether a
+      classification and predicate already exist. A PCCP can be added for planned updates.
+      Simplified: regulatory affairs staff and sometimes FDA itself make the real determination.
+
+  - type: quiz
+    question: |
+      A tool flags suspected intracranial hemorrhage on non-contrast head CT, moves the study to the top of
+      the worklist, and texts the stroke team. It shows no location and makes no diagnostic claim. Which
+      category fits best?
+    options:
+      - CADe, because it finds the hemorrhage
+      - CADx, because it decides whether hemorrhage is present
+      - CADt, because it prioritizes and notifies without marking findings or removing cases from the queue
+      - Image processing, because it analyses pixels
+    answer: 2
+    explanation: |
+      Prioritizing and notifying, without marking a location, is the CADt definition. CADe would
+      require marking or highlighting regions. CADx characterizes lesions, and the existing
+      regulation is for cancer. "Analyzes pixels" describes all of them. The tempting answer is CADe
+      because the algorithm does detect, but categories follow the **claim**, not the algorithm.
+
+  - type: text
+    title: Predicates, De Novo, and the state of the list
+    text: |
+      Module 03 covered the pathways. Here is what they look like in imaging.
+
+      **The predicate chain.** In February 2018 FDA granted a De Novo to software that analyzes CT
+      angiograms for suspected large-vessel occlusion and notifies a specialist. FDA's announcement
+      said the evidence included a retrospective study of 300 CT images, comparing the software's
+      standalone performance against two trained neuroradiologists, and that the De Novo created a
+      classification so later triage software could use 510(k). Hemorrhage triage on head CT
+      followed through 510(k) in 2018.
+
+      **Substantial equivalence** means a new device has the same intended use as a predicate and
+      is as safe and effective. Later devices are tested against their own performance claims,
+      not head-to-head against the predicate.
+
+      **The list.** FDA's public list of AI-enabled devices reports over 1,600 authorized devices as
+      of September 2026 (the page was current as of 22 September 2026). Radiology accounts for
+      roughly three quarters of the list, based on trade-press reports of recent updates (about 76%
+      at the end of Q1 2026). I did not find that share stated on FDA's overview page, so treat it
+      as approximate. FDA also notes that devices are identified **mainly by AI-related terms in
+      their public summaries**.
+
+  - type: quiz
+    question: |
+      A company has built CTA large-vessel-occlusion triage software. Which route is most likely today?
+    options:
+      - 510(k), because a triage classification and predicates already exist
+      - De Novo, because AI is new
+      - PMA, because stroke is high risk
+      - No submission, because the tool only notifies and does not diagnose
+    answer: 0
+    explanation: |
+      The 2018 De Novo created the CADt classification (21 CFR 892.2080), so a new triage tool with
+      the same intended use can use 510(k) with a predicate. "AI is new" is not what triggers De
+      Novo (B). The absence of a predicate and a low to moderate risk is. Notification software
+      that analyzes images is still a device (D). Class III PMA is for high-risk devices (C).
+
+  - type: text
+    title: What clearance does and does not show
+    text: |
+      A clearance is tied to its **indications for use** and to the **data in the submission**.
+
+      - **Indications.** Modality, body part, patient population (for example adults 18 and older),
+        and what the output is. Using it on children, on another modality, or for another claim is
+        outside the clearance.
+      - **Compatibility.** CADt labeling must describe compatible imaging hardware and protocol
+        specifications, so your CT vendor, slice thickness, and series selection must fall inside
+        what was tested.
+      - **Evidence.** Often retrospective, from a limited set of sites. Labeling should summarize
+        test methods, dataset characteristics, and triage effectiveness. Read that summary. It is
+        the closest thing to a model card you will get.
+      - **Not shown:** performance at your site, benefit to patients, or safety with your
+        workflow.
+
+      That is why hospitals run **local validation** before go-live: a retrospective check on their
+      own scans, then a silent run (the tool scores live studies but nobody sees it), using the
+      evaluation habits from Lesson 2.
+
+  - type: text
+    title: PCCPs for an imaging model, and what to re-check
+    text: |
+      A retrainable imaging model meets the change-control problem from Module 03. A
+      **predetermined change control plan (PCCP)** authorized with the original submission lets
+      the maker make described changes without a new submission. FDA's page for the final
+      guidance describes three parts: the planned modifications, the methodology to develop,
+      validate, and implement them, and an assessment of their impact. The guidance was first
+      issued in December 2024. FDA's page currently shows August 2025.
+
+      For imaging, a sponsor might plausibly describe retraining on new data from the same
+      scanner vendors and protocols, with acceptance criteria (for example sensitivity and
+      specificity floors by site and vendor, non-inferiority to the current version, subgroup
+      checks), a locked test set, versioning, and rollback.
+
+      Outside such a plan: a new population such as children, a new modality or claim (CTA added to
+      an NCCT tool), or a new kind of input.
+
+      Moving parts I checked on 30 September 2026: FDA's broader draft guidance on lifecycle
+      management of AI-enabled device software functions (January 2025) was still listed as
+      **draft**. FDA's AI-enabled devices page also points to discussion papers on real-world
+      performance measurement and on generative-AI-enabled devices. Check the current status before
+      relying on any of this.
+
+  - type: quiz
+    question: |
+      A cleared NCCT hemorrhage triage tool has a PCCP for "retraining on additional adult non-contrast head
+      CT from the currently supported vendors, meeting the stated performance criteria". Which change most
+      likely falls outside it?
+    options:
+      - Retraining with 20% more adult NCCT from the supported vendors
+      - A quarterly retrain using the same data pipeline and acceptance tests
+      - Both of those, since any retraining needs a new submission
+      - Extending the claim to pediatric patients and to CT angiography
+    answer: 3
+    explanation: |
+      A PCCP covers only the modifications it describes, made per its protocol. More adult NCCT from
+      the same vendors, with the same acceptance tests, is the scenario it is written for. A new
+      population and a new modality change the intended use and the evidence needed, so they need
+      a new submission (or an updated plan that FDA has authorized). Option C is wrong because
+      avoiding a new submission for described retraining is the point of a PCCP.
+
+  - type: text
+    title: Plugging into PACS and the worklist
+    text: |
+      A typical integration:
+
+      - The scanner sends images to PACS. A **router or gateway** forwards selected series by DICOM
+        C-STORE to the AI server.
+      - The AI server runs inference and sends results **back**: a priority change in the RIS or
+        PACS worklist (via HL7 or a vendor API), a **DICOM SR** (structured report) for findings
+        and measurements, a **DICOM SEG** for segmentations, or a **secondary capture** image
+        for viewing, and often a push notification to the stroke team.
+      - IHE has profiles for this: **AI Workflow for Imaging** (AIW-I) and **AI Results** (AIR).
+        Products implement them unevenly, so expect vendor-specific work.
+
+      Design points that matter more than the network:
+
+      - **Series selection** in the router is part of the model (Lesson 1).
+      - **End-to-end latency**, from scan completion to flag, is what triage depends on.
+      - **Fail open.** If the AI service is slow or down, the worklist must continue as usual. A
+        triage tool must never block reading.
+      - Studies get updated: extra series arrive, patients are merged, scans are repeated.
+        Results need idempotent handling and version tags.
+
+  - type: quiz
+    question: |
+      What will go wrong with this routing rule in production?
+    code: |
+      def should_send(ds):
+          return ds.Modality == "CT" and "HEAD" in ds.SeriesDescription.upper()
+    language: python
+    options:
+      - Nothing. A head CT is a head CT
+      - It sends only the thin series, which is what the model wants
+      - It also sends CTA, perfusion, and other "HEAD" series the model was not trained on, and raises an error when SeriesDescription is absent
+      - The .upper() call is not valid for DICOM strings
+    answer: 2
+    explanation: |
+      A substring match on a free-text field catches every series whose description contains HEAD,
+      including CTA, perfusion, and reformats, so the model receives inputs outside its training
+      distribution. SeriesDescription is optional, so direct attribute access can raise an
+      AttributeError that blocks or drops the study. A safer rule tests several structured fields
+      (Modality, ImageType, slice thickness, plane) with `ds.get(...)` defaults and logs each skip.
+
+  - type: text
+    title: Triage changes the queue, so measure the queue
+    text: |
+      A triage tool does not change the image or the diagnosis. It changes **order**. The outcome to
+      measure is **time to review**: time from study completion to a reader opening it. Downstream
+      outcomes are time to notification of the stroke team, door-to-groin time for thrombectomy,
+      and eventually functional outcome.
+
+      Three things to keep in mind:
+
+      - Benefit depends on the **queue**. If readers are idle, there is little to gain.
+      - **False flags** jump the queue too and delay other studies.
+      - **Missed positives** are pushed back by every flagged study ahead of them.
+
+      Meta-analyses of LVO-detection software report shorter treatment times, with pooled
+      reductions of the order of tens of minutes in some reports. Most of that evidence is
+      observational before-and-after studies, and stroke pathways improve for other reasons at
+      the same time, so read those designs critically.
+
+  - type: quiz
+    question: |
+      A triage flag moves suspected positives to the front of one radiologist's queue. When will it shorten
+      the wait for true positives the most?
+    options:
+      - When the radiologist is idle most of the time
+      - When the flag's sensitivity is lowest
+      - When false flags are common
+      - When the radiologist is busy and a backlog builds
+    answer: 3
+    explanation: |
+      With no backlog, every study is opened almost immediately, flagged or not. The bigger the
+      queue, the more a priority jump is worth. Low sensitivity reduces the benefit, and common false
+      flags dilute it, but neither increases it. The next figure shows the effect in a simulation.
+
+  - type: image
+    image: m10-03-triage-queue.png
+    caption: |
+      A simulation, not a forecast: one reader, a priority queue, 10% positives, flag sensitivity 0.90,
+      8% of negatives flagged. Flagged true positives wait only a few minutes at any level of
+      busyness (about 3 to 11 minutes here). Without triage, the average wait climbs from about 4
+      minutes to over an hour as the reader gets busier. The red line is the catch: positives the
+      model misses wait longer than they would have without triage.
+
+  - type: text
+    title: A model that is right but ignored
+    text: |
+      Workflow failures mostly come from people, not the model.
+
+      - **Alert fatigue.** If many flags are false, readers learn to ignore them, including the true
+        ones. At the 5% prevalence example from Lesson 2, half of flags would be false even with
+        0.95 sensitivity and specificity. A model that is right but ignored has no clinical value.
+      - **Automation bias.** Over-trust goes the other way. Readers shown a wrong suggestion are
+        more likely to agree with it (Lesson 2).
+      - **"Not flagged" is not "negative".** A sensitivity of 0.90 means one bleed in ten goes
+        unflagged. Labeling for these devices says they are not for diagnosis. Training should
+        say that the absence of a flag must not shorten a reader's look.
+      - **Who acts on the flag?** Decide before go-live who gets notified, who confirms, and what
+        happens at 3 a.m.
+
+      Track these: override rates, flag-to-open time, and reader feedback on false flags. Not only
+      model metrics.
+
+  - type: quiz
+    question: |
+      A radiologist reasons: "The tool did not flag this head CT, so it is probably fine and I can read it
+      quickly." Why is that a problem?
+    options:
+      - Sensitivity below 1 means some bleeds are not flagged, so an unflagged study is not a verified negative and should get a normal read
+      - It is fine, because triage tools are validated for ruling out hemorrhage
+      - It is fine if the tool's AUROC is above 0.95
+      - It is only a problem for CT angiography, not for hemorrhage
+    answer: 0
+    explanation: |
+      A triage device prioritizes. It is not a rule-out test, and its labeling says it is not for
+      diagnostic use. A high AUROC does not change that: at the locked threshold some
+      positives fall below it. Shortening the read for unflagged studies converts a workflow aid
+      into an unvalidated diagnostic claim, and the simulation shows missed cases already wait
+      longer under triage.
+
+  - type: text
+    title: Monitoring, the imaging version
+    text: |
+      Module 03 covered drift monitoring in general. Imaging adds things you can watch **without
+      waiting for labels**:
+
+      - **Header drift.** Track the mix of manufacturer, model, software version, reconstruction
+        kernel, and slice thickness per site. A new combination you did not validate is the
+        earliest warning. Vendor and protocol changes are the most common cause of drift.
+      - **Output drift.** Flag rate and score distribution by site, scanner, and hour. A doubling
+        of the flag rate after a scanner update is a strong signal.
+      - **Workflow metrics.** Time to open, time to notification, override rate.
+      - **Sampled audits.** Radiologists re-read a random sample of unflagged studies and all
+        flagged ones, to estimate sensitivity and PPV over time. Registries exist for this, such
+        as the American College of Radiology's Assess-AI, which the ACR describes as tracking
+        real-world performance and detecting drift from new scanners and protocols.
+      - **A change-control hook.** Radiology physics, PACS, and IT must tell the AI team before a
+        scanner upgrade or protocol change. Put it in the contract and the runbook.
+
+      Rollback and a kill switch (Module 03) still apply. For a triage tool, "off" must mean the
+      worklist simply reverts to first come, first served.
+
+  - type: code
+    title: A header-drift check
+    language: python
+    text: |
+      A pure-Python sketch. It flags header combinations that were not in the validation data and now
+      make up at least 1% of last week's series.
+    code: |
+      from collections import Counter
+
+      KEYS = ("Manufacturer", "ManufacturerModelName",
+              "SoftwareVersions", "ConvolutionKernel")
+
+      def combo(row):
+          return tuple(row.get(k, "") for k in KEYS)
+
+      def new_combos(baseline_rows, week_rows, min_share=0.01):
+          base = Counter(combo(r) for r in baseline_rows)
+          week = Counter(combo(r) for r in week_rows)
+          n = sum(week.values())
+          return {c: k / n for c, k in week.items()
+                  if c not in base and k / n >= min_share}
+    after: |
+      Each row is one series' header fields (collected as in Lesson 1, at one row per series). If a
+      scanner upgrade changes `SoftwareVersions`, that scanner's whole traffic appears as a new
+      combination and is flagged. It says nothing yet about accuracy. It says **go and look**. A
+      fuller version would also compare distributions of existing combinations.
+
+  - type: quiz
+    question: |
+      The check reports a new combination (same scanner, new software version, same kernel) at 25% of
+      this week's volume. What is the best first response?
+    options:
+      - Nothing yet. Wait for labels to confirm a performance drop
+      - Retrain automatically on the new data
+      - Treat it as a change event. Compare flag rate and score distribution for that scanner, audit a sample with radiologist reads, involve physics or the vendor, and decide under your change-control plan whether it needs validation before continued use
+      - Exclude that scanner permanently from the AI workflow
+    answer: 2
+    explanation: |
+      Header drift is the cheap, early signal. Waiting for labels (A) can take weeks, during which
+      readers may see bad flags. Automatic retraining (B) is what Module 03 warned against, and
+      for a cleared device it could be outside the authorized plan. Permanent exclusion (D) is an
+      overreaction before you know whether performance changed. The middle path is measured
+      investigation first.
+
+  - type: text
+    title: Where people go wrong, the silent upgrade
+    text: |
+      A realistic failure (invented for illustration). An ED scanner gets a software update that
+      enables a different reconstruction. Over the next six weeks the triage tool's flag rate roughly
+      doubles. Radiologists, seeing more false flags, start dismissing alerts. Service dashboards
+      are green (uptime, latency) and no labeled performance data exists yet, so nobody notices
+      until a missed bleed is reviewed.
+
+      What would have caught it in week one:
+
+      - a header-combination alarm on `SoftwareVersions`
+      - a control chart on daily flag rate per scanner
+      - an override-rate trend
+      - a named contact in radiology physics who notifies the AI team about upgrades
+
+      The root cause was a monitoring plan built around the service, not around the **images and
+      the readers**.
+
+  - type: think
+    interview: true
+    prompt: |
+      "A vendor tells us their hemorrhage triage tool is FDA-cleared. What would you still do before
+      clinical go-live?"
+    model_answer: |
+      Clearance tells me the device met FDA's bar for its indications, so first I'd read those
+      indications and the labeling: population, modality, protocol, compatible vendors, the
+      performance summary, and limitations. Then I'd confirm our scanners, slice thickness, and
+      series selection fall inside it. Next local validation: a retrospective check on our own
+      head CTs, stratified by scanner and site, with sensitivity, specificity, and PPV at the
+      vendor's threshold and our prevalence, then a silent run on live studies to measure
+      flags per day, latency, and false flags. I'd test the integration, including series selection,
+      failure behaviour (fail open), and updated studies. Clinically, we'd define the intended use
+      locally, the owner, who is notified and what they do, and train readers that an unflagged
+      study is not a negative. Finally I'd set up monitoring: header drift, flag rate, override
+      rate, time to review, and sampled audits, with a change-control agreement so the vendor and our
+      physics team tell each other about updates, and a kill switch. And I'd define how we'll
+      measure whether it made anything faster.
+    key_points:
+      - Reads indications and labeling, and checks the local scanners and protocols fall inside them
+      - Runs local stratified validation and a silent run before go-live
+      - Tests integration behavior, including series selection, latency, and fail-open
+      - Defines clinical ownership, notification, and training, including "unflagged is not negative"
+      - Sets up monitoring, change control, rollback, and an outcome measure such as time to review
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your company wants to retrain its cleared LVO triage model every quarter on data from customer
+      sites. How do regulatory and engineering handle that?"
+    model_answer: |
+      I'd start from the fact that a significant change to a cleared device can need a new
+      submission, so the clean route is a PCCP authorized up front. Regulatory would describe the
+      modifications: retraining on new data from the same kinds of scanners and protocols,
+      for example, with no change to intended use, population, or modality. Engineering owns the
+      modification protocol: how data is collected and labelled with adjudicated reads, a locked and
+      versioned test set, acceptance criteria such as non-inferiority to the current model and
+      minimum sensitivity by site, vendor, and occlusion location, calibration or threshold
+      checks, and how the update is validated, released, and rolled back. An impact assessment
+      covers the risks, such as label drift, feedback loops, and subgroup regressions. Retraining is
+      automatic candidate generation, never automatic deployment. Anything outside the plan, like a
+      new indication or input, goes back to FDA. I'd also keep customer-side monitoring and
+      release notes, since the hospital has to know which version is running. And I'd check the
+      current FDA guidance status, since it has been moving.
+    key_points:
+      - Recognizes that significant changes can require new submissions and proposes a PCCP
+      - Separates what is described (modifications, protocol, impact) from what falls outside it
+      - Specifies acceptance criteria, locked test sets, per-site or vendor checks, and rollback
+      - Treats retraining as candidate generation with gated deployment and versioned release notes
+      - Keeps post-market monitoring and notes that guidance is still evolving
+
+  - type: laptop
+    title: Header drift monitor and an intended-use statement
+    repo_path: 10-medical-imaging/src/header_drift.py
+    task: |
+      Create `10-medical-imaging/src/header_drift.py` from the lesson's `new_combos` function, and
+      `tests/test_header_drift.py` with hand-made header rows (no images) covering: no change, a
+      software-version change on one scanner, and a new scanner. Extend it to also report any existing
+      combination whose share changed by more than 10 percentage points. Then write
+      `10-medical-imaging/docs/intended_use.md` for an NCCT hemorrhage **triage** tool using five
+      headings: users, population, inputs (modality, protocol, vendors), output and what it does
+      not do, and monitoring and change control. Keep it to claims a CADt labeling would support.
+
+  - type: recap
+    points:
+      - "The **claim** decides the category: CADt (triage), CADe (mark), CADx (characterize), or image processing. Category decides evidence"
+      - A triage device must show **effective triage**, such as improved time to review, plus standalone performance
+      - A 2018 De Novo made a triage classification, so later triage tools use **510(k)** with a predicate. PMA is for high-risk devices
+      - Clearance covers **indications and tested data**, not your scanners or your queue. Validate locally, then run silently
+      - A **PCCP** covers described retraining only. New populations, modalities, or claims fall outside it
+      - Integrate through a router, return results as worklist changes, SR, SEG, or secondary capture, and **fail open**
+      - Triage helps most when there is a queue, and **missed positives wait longer**. "Unflagged" is not "negative"
+      - Monitor header drift, flag rate, overrides, and time to review, with a change-control hook to radiology physics
+      - FDA facts were checked on 30 September 2026 and may have changed, so check the current pages

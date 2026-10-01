@@ -1,0 +1,437 @@
+id: m05-04-generation-eval
+title: 'Evaluating generation: factuality, citations, and abstention'
+summary: Intrinsic vs extrinsic hallucination, claim-level support scoring, citation precision and
+  recall, answer relevance, abstention and risk-coverage, and LLM-as-judge design, biases, and
+  validation with Cohen's kappa.
+minutes: 28
+status: authored
+why_it_matters: Clinical LLM safety depends on measuring hallucination at the level where it hurts,
+  a single wrong drug or dose. LLM-as-judge design and validation is one of the most common topics in
+  clinical LLM evaluation interviews.
+objectives:
+  - Define intrinsic vs extrinsic hallucination and distinguish unfaithful from faithful-but-wrong
+  - Decompose answers into claims and score claim-level support against sources
+  - Compute citation precision and recall, and assess answer relevance and completeness
+  - Measure abstention and selective accuracy with a risk-coverage curve
+  - Design an LLM judge, name its biases, and validate it against human labels with Cohen's kappa
+key_points:
+  - One contradicted dose makes an answer unsafe, so score claims, not whole answers
+  - Intrinsic contradicts the source; extrinsic adds what the source doesn't support
+  - Citation recall asks whether claims are supported by their citations; citation precision asks whether citations are relevant
+  - A correct "I don't know" is a success; over-abstention is a failure too
+  - Risk-coverage curves make the abstention trade-off explicit
+  - Judges have position, verbosity, and self-preference bias
+  - Report judge-human agreement (kappa) and the judge's recall on the failure class
+tags: [evaluation, llm, hallucination, interview]
+steps:
+  - type: text
+    title: A perfect-looking summary
+    text: |
+      The discharge summarizer from Lesson 01 produces this for a stroke patient:
+
+      _"72-year-old admitted with left MCA ischemic stroke, NIHSS 4 on arrival, 1 at
+      discharge. Started on **apixaban 5 mg twice daily** and atorvastatin 80 mg. Follow up
+      with neurology in 4 weeks."_
+
+      It's fluent, well structured, and almost entirely correct. But the note says **aspirin
+      and clopidogrel**, and the patient has no atrial fibrillation. The summary invented an
+      anticoagulant.
+
+      A reviewer rating "overall quality 1–5" might give it a 4. A patient could receive a
+      drug nobody prescribed. That gap between the overall impression and the one claim that
+      matters is why generation evaluation works at the level of **claims**.
+
+  - type: text
+    title: Hallucination, precisely
+    text: |
+      Two standard categories (from the survey by Ji et al., ACM Computing Surveys 2023):
+
+      - **Intrinsic**: the output **contradicts** the source. The note says clopidogrel 75 mg
+        and the summary says 300 mg.
+      - **Extrinsic**: the output **adds** content the source can't verify: "patient counseled
+        on smoking cessation" when the note never mentions it. It might be true. It's still
+        unsupported.
+
+      In RAG, separate two failure modes that look the same to a user:
+
+      - **Unfaithful**: the answer departs from the retrieved context (a generation failure).
+      - **Faithful but wrong**: the answer matches the context and the context was wrong or
+        irrelevant (a retrieval failure, like the 90-day DAPT chunk in Lesson 02).
+
+      For summaries, also track **omissions**. Leaving out a stopped medication isn't a
+      hallucination, but it can be just as dangerous.
+
+  - type: quiz
+    question: |
+      A summary says "LDL target below 70 mg/dL". The discharge note never mentions an LDL
+      target, though that target is consistent with current secondary-prevention guidance.
+      How do you classify it?
+    options:
+      - Not a hallucination, because it's medically correct
+      - Intrinsic hallucination
+      - Extrinsic hallucination, since it is unsupported by the source even if plausibly true
+      - An omission
+    answer: 2
+    explanation: |
+      Faithfulness is judged against the **source**, not against the world. The claim adds
+      content the note doesn't contain, which makes it extrinsic. It isn't intrinsic because
+      nothing in the note contradicts it. "It's correct anyway" is the tempting trap: a
+      summarizer that adds plausible content will also add plausible wrong content, and
+      readers can't tell which is which.
+
+  - type: text
+    title: Claim decomposition
+    text: |
+      Whole-answer ratings hide the one bad sentence. Instead:
+
+      1. **Decompose** the output into **atomic claims**: "started apixaban", "apixaban dose 5
+         mg", "twice daily", "NIHSS 1 at discharge", and so on.
+      2. **Verify** each claim against the sources: **supported**, **contradicted**, or **not
+         found**.
+      3. **Aggregate**.
+
+      This is the idea behind FActScore (Min et al., EMNLP 2023), which reports the fraction of
+      atomic facts supported by a knowledge source. The decomposer and verifier can be an LLM,
+      a natural-language-inference model, or rules for structured fields like doses.
+
+      For clinical use, the headline is often not the average but **the fraction of answers
+      with any contradicted or unsupported claim**, because one is enough to cause harm.
+
+  - type: code
+    language: python
+    title: Claim-level scoring, provider-neutral
+    code: |
+      from dataclasses import dataclass
+      from typing import Literal
+
+      Label = Literal["supported", "contradicted", "not_found"]
+
+      @dataclass
+      class ClaimResult:
+          claim: str
+          label: Label
+          evidence_ids: list[str]
+
+      def score_answer(answer: str, sources: dict[str, str]) -> dict:
+          claims = decompose(answer)                       # LLM or rules
+          results = [verify(c, sources) for c in claims]   # NLI model or LLM judge
+          n = len(results)
+          return {
+              "n_claims": n,
+              "supported_frac": sum(r.label == "supported" for r in results) / n,
+              "any_contradicted": any(r.label == "contradicted" for r in results),
+              "any_unsupported": any(r.label != "supported" for r in results),
+          }
+
+  - type: quiz
+    question: |
+      A summary decomposes into 10 claims: 8 supported, 1 contradicted (the apixaban), and 1
+      not found. What does `score_answer` return?
+    options:
+      - supported_frac 0.9, any_contradicted True, any_unsupported True
+      - supported_frac 0.8, any_contradicted True, any_unsupported True
+      - supported_frac 0.8, any_contradicted True, any_unsupported False
+      - supported_frac 0.8, any_contradicted False, any_unsupported True
+    answer: 1
+    explanation: |
+      8/10 claims are supported, so supported_frac is 0.8. The "not found" claim is not
+      supported, so it doesn't count toward that fraction. A contradicted claim exists, and
+      `any_unsupported` is True because two claims aren't supported. An 80% average sounds
+      decent. The boolean flags say what matters: this summary would fail a medication-safety
+      gate.
+
+  - type: text
+    title: Decomposition has traps too
+    text: |
+      - **The denominator is gameable.** A verbose answer full of trivially true claims ("the
+        patient was admitted") has a high supported fraction. Report claim counts, and weight
+        claims by clinical importance: drug, dose, route, timing, and diagnosis matter more than
+        narrative.
+      - **The decomposer can drop claims.** If it skips the apixaban sentence, the error
+        vanishes from the metric. Audit a sample of decompositions by hand.
+      - **The verifier makes errors.** It's a model too, so it needs validation against human
+        labels (later in this lesson).
+      - **Deterministic checks first.** For structured fields, don't use a model at all: check
+        that every medication name in the output appears in the note's medication section, and
+        that numbers match exactly.
+
+  - type: text
+    title: Citation precision and recall
+    text: |
+      For the guideline assistant, each sentence carries citations like `[G-3.2]`. Two
+      questions, following the ALCE benchmark's definitions (Gao et al., EMNLP 2023):
+
+      - **Citation recall**: of the sentences that need support, what fraction are **fully
+        supported by the sources they cite**? A sentence with no citation, or with citations
+        that don't support it, counts as a miss.
+      - **Citation precision**: of all citations, what fraction are **relevant**, meaning they
+        actually support the sentence they're attached to? Padding every sentence with extra IDs
+        lowers precision.
+
+      Before either, run the free deterministic check from Lesson 02: **every cited ID must
+      have been in the context**. Invented IDs are an automatic failure.
+
+  - type: quiz
+    question: |
+      An answer has 6 sentences. 5 carry citations, and for 4 of those the cited sources
+      fully support the sentence. What is citation recall?
+    options:
+      - "0.67"
+      - "0.80"
+      - "0.83"
+      - "1.00"
+    answer: 0
+    explanation: |
+      4 of the 6 sentences are supported by their citations, so recall = 4/6 ≈ 0.67. The
+      uncited sentence counts as unsupported. The tempting 0.80 (4/5) divides only by cited
+      sentences, which rewards a model for simply leaving risky sentences uncited. Precision
+      would be computed separately, over individual citations.
+
+  - type: text
+    title: Relevant and complete, not just faithful
+    text: |
+      A perfectly faithful answer can still be useless:
+
+      _Q: "What BP must be reached before IV thrombolysis?"_
+      _A: "The guidelines discuss blood pressure management in acute stroke [G-2.1]."_
+
+      Every claim is supported. It just doesn't answer. So also score:
+
+      - **Answer relevance**: does it address the question asked? (Here, the threshold is
+        below 185/110 mmHg.)
+      - **Completeness**: for summaries, use a **required-elements checklist** built with
+        clinicians: diagnosis, new, changed, and stopped medications, follow-up, and pending
+        results. Report an **omission rate** per element.
+
+      Faithfulness, relevance, and completeness trade off against each other. A model can
+      maximize faithfulness by saying very little.
+
+  - type: text
+    title: A correct "I don't know" is a success
+    text: |
+      Some questions have no answer in your guidelines ("What's the tenecteplase dose for a
+      12-year-old?" when the protocol covers adults only). The right output is "Not found in
+      the provided guidelines", not an answer from the model's memory.
+
+      So the eval set needs **answerable and unanswerable** questions (Lesson 03's
+      out-of-scope queries), and you report both sides:
+
+      - On **unanswerable** questions: the **abstention rate** (higher is better).
+      - On **answerable** questions: **coverage** (fraction answered) and **accuracy among
+        answered**.
+
+      **Over-abstention is a failure too.** A system that declines everything never
+      hallucinates and never helps. You need both numbers to see the trade-off.
+
+  - type: text
+    title: Selective prediction and risk-coverage
+    text: |
+      Give each answer a **confidence score**, and answer only above a threshold. Sliding the
+      threshold traces a **risk-coverage curve**:
+
+      - **Coverage**: fraction of questions answered.
+      - **Risk**: error rate among the answered ones.
+
+      A useful confidence score makes risk fall steeply as you abstain more. The area under the
+      curve (AURC, lower is better) summarizes it in one number.
+
+      Candidate confidence signals: agreement across several sampled answers (self-consistency),
+      the verifier's supported-claim fraction, and retrieval scores. A model's **self-reported
+      confidence** ("I'm 90% sure") is often poorly calibrated, so treat it as one weak signal
+      and test it on the curve like the others.
+
+  - type: image
+    image: m05-04-risk-coverage.png
+    caption: |
+      Simulated. Answering everything gives 23% error. With an informative confidence score,
+      answering the 70% most confident questions cuts error to 14%. With a random score,
+      abstaining doesn't help at all. It just answers fewer questions at the same error rate.
+
+  - type: quiz
+    question: |
+      The stroke team says an answered question must be wrong no more than about 5% of the
+      time. Reading the blue curve, roughly what coverage can you offer?
+    options:
+      - About 30%
+      - About 70%
+      - About 95%
+      - 100%, if you lower the temperature
+    answer: 0
+    explanation: |
+      The blue curve reaches 5% risk at roughly 30% coverage, so the system would decline about
+      70% of questions. Whether that's still useful is a product and clinical decision, not a
+      modeling one. The other levers are a better confidence signal (a steeper curve) or a
+      better system (a lower curve). Temperature doesn't move this trade-off in any predictable
+      way.
+
+  - type: text
+    title: Designing an LLM judge
+    text: |
+      Human review of every output doesn't scale, so teams use an **LLM as a judge**. A good
+      judge is a carefully specified measurement instrument:
+
+      - **One criterion per call**: faithfulness, relevance, and completeness are separate
+        prompts.
+      - **Concrete rubric** with a binary or small ordinal scale and written examples of each
+        level. "Rate quality 1–10" is noise.
+      - **Give it the evidence**: the source note or chunks, and a reference answer if you have
+        one.
+      - **Evidence before verdict**: ask it to quote the supporting span, then decide.
+      - **Structured output** (Lesson 01) so verdicts are parseable.
+      - Low temperature, pinned model version, versioned judge prompt.
+
+  - type: text
+    title: Judges are biased in known ways
+    text: |
+      Zheng et al. (NeurIPS 2023, the MT-Bench and Chatbot Arena paper) documented biases that
+      every judge design must handle:
+
+      - **Position bias**: in pairwise comparisons, the judge favors the answer shown in a
+        particular position. **Fix**: run both orders and count a win only when both agree.
+      - **Verbosity bias**: longer answers look better. **Fix**: rubrics that penalize padding,
+        length-matched comparisons, and reporting length alongside scores.
+      - **Self-preference**: a judge tends to favor outputs from its own model family.
+        **Fix**: use a judge from a different family, or at least validate for it.
+
+      Judges are also **lenient** (they under-call subtle errors) and **sensitive to their
+      own prompt wording**. None of these biases is visible unless you measure against humans.
+
+  - type: quiz
+    question: |
+      In a pairwise judge, answer A wins 70% of comparisons when shown first but only 45% when
+      shown second. What is happening, and what's the fix?
+    options:
+      - Verbosity bias; truncate both answers to the same length
+      - Position bias; judge both orders and count only consistent verdicts
+      - Self-preference; switch to a judge from another model family
+      - Nothing; the average of 57.5% is the true win rate
+    answer: 1
+    explanation: |
+      The verdict depends on the order, which is textbook position bias. Evaluating both orders
+      and counting inconsistent pairs as ties (or reporting them) removes it. Averaging the two
+      rates is better than a single order but hides how often the judge simply flipped, which
+      is itself a measure of judge reliability.
+
+  - type: text
+    title: Validate the judge against humans
+    text: |
+      Before a judge's numbers mean anything, sample 150–300 items, have clinicians label them
+      **blind** to the judge's verdict, and compare.
+
+      Raw agreement overstates reliability when one class dominates. Report **Cohen's kappa**,
+      which corrects for chance agreement:
+
+      **κ = (p_o − p_e) / (1 − p_e)**
+
+      - **p_o**: the observed fraction of agreement.
+      - **p_e**: the agreement expected by chance from each rater's label frequencies
+        (Σ over classes of p_judge(c) × p_human(c)).
+
+      Then report the judge's **recall on the failure class**: of the claims humans marked
+      unsupported, how many did the judge catch? Revalidate whenever the judge's prompt or
+      model changes.
+
+  - type: quiz
+    question: |
+      Judge vs clinicians on 100 claims. Both say supported: 60. Both say unsupported: 20. Judge
+      supported / human unsupported: 10. Judge unsupported / human supported: 10. What is
+      Cohen's kappa?
+    options:
+      - "0.80"
+      - "0.58"
+      - "0.52"
+      - "0.20"
+    answer: 2
+    explanation: |
+      p_o = (60 + 20)/100 = 0.80. Each rater says "supported" 70% of the time, so p_e = 0.7 ×
+      0.7 + 0.3 × 0.3 = 0.58. κ = (0.80 − 0.58)/(1 − 0.58) ≈ 0.52. The tempting 0.80 is raw
+      agreement, and 0.58 is chance agreement. Moderate kappa despite 80% agreement is typical
+      when one class dominates.
+
+  - type: text
+    title: Reading that judge honestly
+    text: |
+      80% agreement sounds solid. The judge's κ of about 0.52 is usually called "moderate"
+      (the Landis–Koch bands are a convention, not a law).
+
+      The number a safety reviewer cares about: humans marked **30** claims unsupported, and the
+      judge caught only **20**. Its recall on hallucinations is **67%**, so it misses one in
+      three.
+
+      What to do with that:
+
+      - Improve the judge (better rubric, evidence quoting, a stronger model) and re-measure.
+      - Use it for **trends and triage**, not as the final safety gate.
+      - Correct reported rates for known judge error, or keep a human-reviewed sample in every
+        evaluation run.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Design an LLM-as-judge to score the faithfulness of our discharge summaries. How would
+      you know you can trust it?"
+    model_answer: |
+      I'd make faithfulness a claim-level task, not a 1-to-10 score. The pipeline decomposes
+      each summary into atomic claims, and the judge gets one claim plus the full note and must
+      quote the supporting span before labeling it supported, contradicted, or not found, in
+      structured JSON. Drugs, doses, and numbers get deterministic string checks first; the
+      judge handles the rest. I'd use a strong model from a different family than the
+      summarizer, low temperature, and a pinned version with a versioned prompt. To trust it,
+      I'd have two clinicians label a stratified sample of around 200 claims blind to the judge,
+      oversampling likely errors. I'd report Cohen's kappa and, most importantly, the judge's
+      recall on contradicted and unsupported claims, since missing hallucinations is the
+      costly error. I'd audit the decomposer too, because dropped claims hide errors. If recall
+      is too low, the judge is for triage and trends only, with a human-reviewed sample in every
+      run, and I'd rerun validation whenever the judge or summarizer changes.
+    key_points:
+      - Scores faithfulness at the claim level with a specific rubric and evidence quoting
+      - Uses deterministic checks for structured fields like drugs and doses
+      - Uses a different model family for the judge, low temperature, and pinned versions
+      - Validates against blind clinician labels, reporting kappa and recall on the failure class
+      - Audits the decomposer and revalidates on every change, limiting the judge to triage if it's weak
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why is 'I don't know' a success for a clinical assistant, and how would you measure
+      abstention without ending up with a system that refuses everything?"
+    model_answer: |
+      In clinical use, a confident wrong answer is far more costly than a declined one. The
+      clinician can look it up, but they may act on a wrong answer. So when the guidelines
+      don't cover a question, declining is the correct behavior and should be scored as
+      correct. To measure it, I'd include unanswerable questions in the eval set, like
+      out-of-scope populations and topics the protocol doesn't cover, and report the
+      abstention rate on those. On answerable questions I'd report coverage and accuracy among
+      answered. The trade-off is visible in a risk-coverage curve: I'd plot it for a few
+      confidence signals, such as self-consistency and verifier support, and choose the
+      operating point with clinicians, for example at most 5% error among answered. I'd also
+      track over-abstention on answerable questions as a failure mode, and monitor coverage in
+      production, since a drop there usually means drifting questions or broken retrieval.
+    key_points:
+      - Explains the asymmetric cost of confident errors versus declined answers
+      - Includes unanswerable questions and scores correct abstention as success
+      - Reports coverage and accuracy among answered on answerable questions
+      - Uses a risk-coverage curve and picks the operating point with clinicians
+      - Treats over-abstention as a failure and monitors coverage in production
+
+  - type: laptop
+    title: Judge agreement, the honest way
+    repo_path: 05-clinical-llm-evaluation/eval/judge_agreement.py
+    task: |
+      Create `05-clinical-llm-evaluation/eval/judge_agreement.py` with
+      `agreement_report(human, judge, failure_label="unsupported")` that takes two equal-length
+      label lists and returns raw agreement, Cohen's kappa, the judge's recall and precision on
+      the failure label, and the confusion counts. Test it on the lesson's example (60/20/10/10),
+      asserting κ ≈ 0.524 and failure recall ≈ 0.667. Add a `risk_coverage(conf, correct)`
+      function that returns the curve and AURC.
+
+  - type: recap
+    points:
+      - Score **claims**, not whole answers, since one contradicted dose makes an answer unsafe
+      - Intrinsic contradicts the source, extrinsic adds unsupported content, and omissions matter for summaries
+      - Separate unfaithful answers (a generation failure) from faithful-but-wrong ones (a retrieval failure)
+      - Citation recall asks if claims are supported by their citations; citation precision asks if citations are relevant
+      - Faithful isn't enough, so also score relevance and completeness
+      - A correct "I don't know" is a success; use risk-coverage curves to set the abstention trade-off
+      - Judges have position, verbosity, and self-preference bias, so design around them
+      - Validate judges against blind human labels with **kappa** and **recall on the failure class**

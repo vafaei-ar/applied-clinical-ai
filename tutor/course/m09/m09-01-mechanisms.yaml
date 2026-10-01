@@ -1,0 +1,486 @@
+id: m09-01-mechanisms
+title: 'Why clinical data is missing: MCAR, MAR, MNAR and informative missingness'
+summary: The missingness mechanisms, why real EHR missingness is informative, and why the bias of a
+  complete-case analysis depends on the estimand and not on the label.
+minutes: 28
+status: authored
+why_it_matters: Handling missing data without understanding its mechanism is the most common silent
+  error in clinical ML, and interviewers ask you to defend your choice. Here you will measure the
+  missingness in the running stroke cohort, see what complete-case analysis really does, and learn
+  what the data can and cannot tell you.
+objectives:
+  - Define MCAR, MAR, and MNAR precisely and classify clinical examples, including how the label depends on which variables you keep
+  - Explain why a lab is missing because it was never ordered, and what that says about the patient
+  - Predict the bias of a complete-case analysis for a given mechanism, estimand, and model
+  - Use missingness indicators and know when they help and when they leak
+  - Explain why MAR versus MNAR cannot be verified from the data alone, and what you can test
+key_points:
+  - Tests are ordered when clinicians are worried, so missingness carries signal (informative presence)
+  - Missing values in EHR come from process, not from random noise, and a blank can mean several different things
+  - The percentage missing does not determine bias, the mechanism and the estimand do
+  - Complete-case regression is valid when missingness is independent of the outcome given the covariates in the model
+  - MAR vs MNAR is an assumption about unobserved data, not a testable fact
+  - The repo's synthetic missingness is purely random, which real EHR data is not
+tags: [missing-data, ehr, interview]
+steps:
+  - type: text
+    title: What did dropna just do?
+    text: |
+      You open `stroke_features`, the table you built in Module 01. It has **333 patients**. One
+      feature matters clinically: `latest_ldl_prior_365d`. It is NULL for **275** of them.
+
+      A colleague runs `dropna()` and moves on. What is left is **58 patients**. The cohort has
+      35 readmissions in total, and only **7** of them are among the 58: four in five of your
+      events disappeared with the rows.
+
+      Nothing errored. The model will train. It will just be a model of a smaller, differently
+      selected population, and no validation metric will tell you.
+
+      This lesson is about the question that comes _before_ any imputation method: **why is this
+      value missing?** You already know the acronyms, so we will spend the time on what the
+      data can and cannot tell you, and on the traps.
+
+  - type: text
+    title: Definitions, with the two traps
+    text: |
+      Let R be the indicator that a value is missing. Following Rubin (1976), there are three cases:
+
+      - **MCAR**: R is independent of both the observed and the missing values.
+      - **MAR**: given the _observed_ data, R does not depend on the missing values.
+      - **MNAR**: R still depends on the missing value after conditioning on everything observed.
+
+      Two vocabulary traps:
+
+      1. "Random" in MAR does not mean random. MAR missingness can be strongly patterned. It
+         only says the pattern is explained by data you have.
+      2. MAR is relative to the variables **you keep**. The same clinic process can be MAR with
+         age in your dataset and MNAR without it.
+
+  - type: quiz
+    question: |
+      Older patients are more likely to have an LDL ordered. Given age, the LDL value itself does
+      not influence whether it is ordered. Age is a column in your dataset. What is the mechanism
+      for the missing LDL?
+    options:
+      - MCAR, because the order is a clinical choice unrelated to the lab value
+      - MAR
+      - MNAR, because a clinician's decision is not random
+      - It cannot be classified without a formal test
+    answer: 1
+    explanation: |
+      Missingness depends only on age, which is observed, so this is MAR. It is not MCAR,
+      because the ordering rate visibly changes with age. A human decision does not make
+      something MNAR. It is MNAR only if the decision depends on the unseen value, or on
+      something unrecorded that tracks it. If you dropped the age column, the same clinic
+      process would become MNAR for your analysis, because in real data LDL tends to track age.
+
+  - type: text
+    title: What the repo actually contains
+    text: |
+      We can measure this. In the repo's database (`generate_synthetic_data.py`, seed 20260908,
+      5,000 patients) there are two different kinds of "missing":
+
+      - **Blank result**: 656 of 22,357 lab rows (2.9%) have a NULL `result_value`. It is 2.7%
+        to 3.1% for each of the four tests.
+      - **No test in the window**: of the 333 cohort patients, 275 (82.6%) have no LDL value
+        dated in the 365 days before the index date.
+
+      Those 275 split into **272** patients with no LDL row at all in the window and **3** with
+      an LDL row whose value is blank. `02_features.sql` requires `result_value IS NOT NULL`,
+      so it folds "never drawn" and "drawn, no value" into one NULL. Remember that, we will
+      separate them shortly.
+
+  - type: image
+    image: m09-01-repo-missingness.png
+    caption: |
+      Measured missingness in the synthetic data. The blank-result rate is flat across tests.
+      The large gap is patients with no LDL dated in the prior year.
+
+  - type: text
+    title: The honest reading, it is pure chance
+    text: |
+      Reading `generator.py`, this dataset contains **no clinical behaviour** at all:
+
+      - Every lab result is blanked with a flat 3% probability, independent of everything.
+      - Each patient gets `Poisson(3.5) + 1` lab rows on random dates over six years, and each
+        row is one of four tests chosen uniformly. Nobody orders an LDL because they are worried.
+      - LDL values are drawn from a normal distribution (mean 110, SD 35) with no link to age,
+        stroke, or anything else.
+
+      That arithmetic predicts the 83%. A lab has a 1/4 chance of being LDL, a 365/2,176 chance
+      of landing in the window, and a 97% chance of having a value. Averaged over the Poisson
+      count, about **83.2%** of patients end up with no usable LDL, against 82.6% observed.
+
+      I also checked for structure. Blank-result rates by sex, race, age band, calendar year,
+      and stroke status all sit between roughly 2.5% and 3.2%. The missingness here is **MCAR
+      by construction**.
+
+  - type: quiz
+    question: |
+      Because the repo's missingness is MCAR, what does a complete-case analysis of LDL cost
+      you in this cohort?
+    options:
+      - Bias, because with more than 80% missing it cannot be unbiased
+      - Nothing, MCAR makes complete-case analysis free
+      - Precision. It is unbiased in expectation, but only 58 patients and 7 readmissions remain
+      - Both bias and precision, because the 3 "drawn, no value" rows are informative
+    answer: 2
+    explanation: |
+      The **proportion** missing does not determine bias, the **mechanism** does. Under MCAR
+      the 58 patients are a random subsample, so estimates are unbiased in expectation, just
+      very noisy (with 7 events you cannot sensibly fit a model with eight predictors). "Free"
+      is wrong: throwing away 83% of the data is a huge loss of power. The 3 blank-value rows
+      are also generated at random.
+
+  - type: text
+    title: Real EHR data is not like that
+    text: |
+      Real missingness is a **record of decisions**. A lipid panel is drawn because a clinician
+      thought it mattered, a protocol demanded it, or the patient happened to be in the system.
+      So its presence carries information about the patient.
+
+      The clearest large-scale evidence is Agniel, Kohane and Weber (BMJ 2018). They studied 272
+      common lab tests across 669,452 patients at two hospitals over one year. The presence of
+      an order was significantly associated with survival for 233 of the 272 tests (86%). For
+      118 of 174 tests, the timing of the orders predicted survival better than the results
+      themselves.
+
+      Read that carefully: whether and when a test happened often carried more information than
+      what the test said. A model that sees the value but not the missingness throws away
+      signal. A model that uses the missingness is learning from **how care was delivered**,
+      which may not transfer to another site or another year.
+
+  - type: text
+    title: Six things a blank can mean
+    text: |
+      A NULL in a lab column can come from very different processes:
+
+      - **Not ordered**: nobody suspected a problem (often good news), or nobody looked (often
+        bad news).
+      - **Done elsewhere**: an outside lab or another health system. The value exists, not in
+        your data.
+      - **Not resulted by time zero**: drawn before the index date but resulted after it. The
+        two clocks of m01-05 again.
+      - **Ordered because of what happened next**: a lab drawn during the index stay, in
+        response to the course you are trying to predict.
+      - **Structurally absent**: an HbA1c for a patient with no diabetes workup, or a value
+        that is "not applicable".
+      - **Recorded but blank**: an interface, unit, or data-entry problem. The repo's 3% is
+        this type.
+
+      Our `labs` table has only a `lab_date`, so all six look identical: NULL. **Your first
+      job is to work out which ones your NULLs are.**
+
+  - type: quiz
+    question: |
+      A colleague adds `has_ldl_prior_365d` to the readmission model and calls it "just a
+      data-quality flag". Which statement is most accurate for real EHR data?
+    options:
+      - It is noise, whether a test was done says nothing about the patient
+      - It can carry real signal about how the patient was cared for, but that signal is about process and may not transfer
+      - It is always leakage, because it is derived from the labs table
+      - It is only useful for tree models, not for logistic regression
+    answer: 1
+    explanation: |
+      Informative presence is well documented (Agniel et al.), so the flag can be predictive.
+      But it encodes care processes, such as ordering habits, order sets, and where patients get
+      their labs, and those change between sites and over time. It is not automatically leakage
+      (that depends on the timestamp, see below). Any model class can use a 0/1 column.
+
+  - type: text
+    title: The simulation, predict before you scroll
+    text: |
+      A small experiment, so the effect is visible. This is a numpy simulation, not repo data.
+
+      - **Z**: age (observed, standardised). **U**: unmeasured frailty.
+      - **X**: an LDL-like lab that depends on Z and U.
+      - **Y**: a continuous outcome that depends on X (true slope **1.0**), Z, and U.
+      - Only X goes missing, for 40% of patients.
+
+      Five mechanisms: **MCAR**; **MAR on age**; **MAR on the outcome Y**; **MNAR on X's own
+      value**; **MNAR on the unmeasured U**.
+
+      We run a complete-case analysis and compare it with the same data with nothing missing,
+      for two estimands: the **mean of X**, and the **slope of Y on X** adjusted for Z.
+
+  - type: quiz
+    question: |
+      Which mechanism distorts the complete-case **slope** of Y on X the most?
+    options:
+      - MAR on age
+      - MNAR on X's own value
+      - MCAR
+      - MAR on the outcome Y
+    answer: 3
+    explanation: |
+      Most people pick MNAR on X. But selecting patients on the regressor X alone leaves the
+      regression of Y on X intact, you only see a restricted range of X. Selecting on the
+      **outcome** does bend the fitted relationship, and it does so even though this is
+      formally MAR, because Y is observed. Look at the figure next.
+
+  - type: image
+    image: m09-01-cca-bias.png
+    caption: |
+      Complete-case bias for two estimands under five mechanisms. Green means a bias below 0.01.
+      The mean of X is biased by every mechanism except MCAR. The slope is biased only when
+      missingness depends on the outcome (directly, or through the unmeasured U).
+
+  - type: text
+    title: Read the bars
+    text: |
+      - **Mean of X**: every mechanism except MCAR biases it. That includes MAR. Dependence on
+        age changes _who is observed_, and a plain mean does not correct for it.
+      - **Slope**: bias appears only when missingness depends on Y beyond the covariates in the
+        model, directly (bar 3) or through an unmeasured driver (bar 5). Dependence on age (in
+        the model) or on X itself does not bias it.
+
+      So a working rule: **complete-case regression is valid when missingness is independent of
+      the outcome given the covariates in the model.** "MAR" does not guarantee it, and "MNAR"
+      does not rule it out. Bias belongs to a (mechanism, estimand, model) triple, not to a label.
+
+      One more nuance, because our label is binary. In a logistic model, missingness that
+      depends on the outcome alone shifts the intercept but leaves the slopes intact (the
+      case-control logic). In a quick check (20,000 simulated patients, 200 runs) the X
+      coefficient was 1.44 with outcome-driven missingness and 1.44 with nothing missing.
+
+  - type: quiz
+    question: |
+      A hospital records LDL only when it is above 130 mg/dL. You fit a correctly specified
+      linear model of a continuous outcome on LDL and age using only the recorded patients, and
+      you also report the mean LDL of those patients as the cohort's mean. Which is biased?
+    options:
+      - The mean is biased, the slope is not (given the model is correct)
+      - Both, MNAR always biases everything
+      - Neither, because the model is correctly specified
+      - The slope is biased, the mean is not
+    answer: 0
+    explanation: |
+      Selection on X alone truncates its range but does not change how Y depends on X, so the
+      slope is fine if the model form is right. The mean of a truncated variable is obviously
+      biased upward. Caveats: precision drops, and you learn the relationship only for LDL above
+      130, so extrapolating to lower values leans entirely on the model form.
+
+  - type: text
+    title: Can you tell MAR from MNAR? No.
+    text: |
+      From the observed data alone, MAR and MNAR **cannot be distinguished**. Molenberghs,
+      Beunckens, Sotto and Kenward (JRSS-B 2008) show that any MNAR model fitted to a dataset
+      has an MAR counterpart that reproduces the observed data exactly. The two only differ in
+      what they predict for the unobserved values.
+
+      What you _can_ test is whether missingness depends on **observed** variables (compare
+      groups, or model R on covariates). A clear dependence rules MCAR out. Failing to reject
+      MCAR, for example with Little's test, is not evidence for it, because small samples lack
+      power.
+
+      So MAR is defended by **argument from how the data were produced**, then stress-tested
+      with a sensitivity analysis (lesson 3). The practical lever is **auxiliary variables**:
+      put anything that plausibly drives or predicts missingness (prior utilisation, site,
+      department, calendar time) into the imputation model, even if it is not in the final
+      model. That makes MAR more plausible.
+
+  - type: code
+    title: The testable part, in SQL
+    language: sql
+    text: "Does LDL missingness depend on an observed variable? A first look at the cohort:"
+    code: |
+      SELECT prior_af,
+             COUNT(*) AS patients,
+             ROUND(AVG((latest_ldl_prior_365d IS NULL)::INT), 3) AS share_ldl_missing
+      FROM stroke_features
+      GROUP BY prior_af
+      ORDER BY prior_af;
+    after: |
+      On the repo database this returns 309 patients without prior AF, 84.8% missing, and 24 with
+      prior AF, 54.2% missing. That looks like a strong pattern. Keep it in mind for the next
+      question.
+
+  - type: quiz
+    question: |
+      The 24 AF patients are far less often missing (54% vs 85%). A permutation test on this
+      one of eight comparisons gives a raw p of about 0.001. What is the best conclusion?
+    options:
+      - Weak evidence from 24 patients and eight comparisons, so check it on more data before believing it
+      - Missingness depends on AF, so the data are MAR and complete-case analysis is now safe
+      - p < 0.05 proves the mechanism is MNAR
+      - Ignore it, statistical tests of missingness are meaningless
+    answer: 0
+    explanation: |
+      I re-checked on all 5,000 synthetic patients at three reference dates: 10% to 12% of
+      patients with a prior-year LDL had AF, versus 11% to 12% of those without. No association.
+      The generator has no path from AF to lab ordering, so the cohort pattern is chance.
+      With small groups and several comparisons, spurious patterns are normal. Note also that
+      even a real dependence on AF would not make complete-case analysis "safe" (see the bars).
+      It is fine to include AF in the imputation model anyway, it is cheap.
+
+  - type: text
+    title: Missing indicators, help and leak
+    text: |
+      A missing indicator (1 if LDL is missing) lets a model use informative missingness. It is
+      what `add_indicator=True` did in the m02-01 pipeline. It helps when the goal is
+      **prediction**, the missingness carries signal, and the process is stable between training
+      and deployment.
+
+      It can hurt or leak:
+
+      - **Time leak**: built from information not available at time zero. A flag computed from
+        `lab_date` alone counts a lab drawn before time zero but resulted after it.
+      - **Outcome-side process**: `ldl_ordered_during_index_stay` exists because of what happens
+        next. Longer stays produce more labs.
+      - **Process shortcut**: it identifies a site or workflow, not a patient state.
+      - **Shift**: if an order set makes LDL routine, the flag's meaning silently changes.
+
+      For **effect estimation**, indicators are a different story. In observational analyses
+      the missing-indicator method can bias coefficients, depending on why data are missing
+      (Groenwold et al., CMAJ 2012). Use indicators for prediction, not to fix an explanatory
+      model.
+
+  - type: quiz
+    question: |
+      Which indicator is the one that leaks for a model that predicts at admission?
+    options:
+      - "`ldl_missing_prior_365d`: no LDL resulted before the index date in the prior 365 days"
+      - "`no_ed_visits_prior_365d`: zero ED encounters starting before the index date in the prior year"
+      - "`no_labs_prior_365d`: no lab of any type resulted before the index date in the prior year"
+      - "`ldl_ordered_during_index_stay`: any LDL ordered between admission and discharge"
+    answer: 3
+    explanation: |
+      An order placed during the index stay happens after time zero, and it depends on the stay
+      itself (longer stays, more labs, sicker patients). The other three are defined only from
+      data that existed before the index date. They can still be informative or shift between
+      sites, which is a separate issue from leakage.
+
+  - type: code
+    title: Separating never drawn from drawn, no value
+    language: sql
+    text: |
+      The repo folds two situations into one NULL. This CTE (DuckDB, real repo columns) tells them
+      apart:
+    code: |
+      WITH ldl_status AS (
+          SELECT c.patient_id, c.index_date,
+                 COUNT(l.lab_id)       AS n_ldl_rows,
+                 COUNT(l.result_value) AS n_ldl_values
+          FROM index_stroke_cohort c
+          LEFT JOIN labs l
+            ON l.patient_id = c.patient_id
+           AND l.test_name = 'LDL'
+           AND CAST(l.lab_date AS DATE) <  c.index_date
+           AND CAST(l.lab_date AS DATE) >= c.index_date - INTERVAL '365 days'
+          GROUP BY 1, 2
+      )
+      SELECT CASE WHEN n_ldl_rows = 0   THEN 'never drawn'
+                  WHEN n_ldl_values = 0 THEN 'drawn, no value'
+                  ELSE 'observed' END AS ldl_status,
+             COUNT(*) AS patients
+      FROM ldl_status GROUP BY 1 ORDER BY 2 DESC;
+    after: |
+      Returns 272 never drawn, 58 observed, and 3 drawn with no value. `ldl_status` (and a
+      "days since the last LDL" column) is a better feature than a bare NULL. It also uses the
+      window-in-`ON` pattern from the leakage lesson, so patients without any LDL keep their row.
+
+  - type: quiz
+    question: |
+      A teammate changes `COUNT(l.lab_id)` to `COUNT(*)` in the CTE above. What does the final
+      query return?
+    options:
+      - The same three groups, 272, 3, and 58
+      - Two groups, 275 "drawn, no value" and 58 "observed"
+      - A syntax error, because COUNT(*) is not allowed with a LEFT JOIN
+      - Two groups, 272 "never drawn" and 61 "observed"
+    answer: 1
+    explanation: |
+      A LEFT JOIN with no match still produces **one** row (with NULLs in `l`), so `COUNT(*)`
+      is 1 for a patient with no LDL rows, never 0. The "never drawn" branch can no longer fire,
+      and those 272 patients fall into "drawn, no value" along with the real 3. This is the same
+      LEFT JOIN trap as in m01-05: count a column from the right-hand table, not `*`.
+
+  - type: text
+    title: Where people go wrong, the tidy complete-case table
+    text: |
+      A realistic failure. A team builds an early-warning model on "complete cases", meaning
+      every row with all 8 features present. Each feature is "only about 10% missing", which
+      sounds harmless.
+
+      - With independent 10% gaps in 8 features, only 0.9^8, about **43%**, of patients are
+        complete. Real gaps are correlated, so the exact number differs, but that arithmetic is
+        why "10% each" turns into "half the cohort".
+      - The survivors are not a random half. In real EHR data, complete records tend to belong to
+        patients who were followed closely: more encounters, more chronic disease, more
+        admissions. The model learns that population.
+      - In deployment every new patient gets a score, including the patients whose records look
+        nothing like the training set. Nobody ever measured performance for them.
+
+      The fix is not a fancier imputer. State who the model is for, report performance for
+      patients with and without each input, and handle missing inputs by design (lessons 2 and 3).
+
+  - type: think
+    interview: true
+    prompt: |
+      A colleague says: "Only 15% of the rows have a missing lab, so I just dropped them." How
+      do you respond?
+    model_answer: |
+      Short version: the percentage doesn't decide whether that's safe, the mechanism and the
+      question do. Dropping rows is unbiased if the labs are missing completely at random, and
+      even then it costs power. In EHR data a lab is usually missing because of a decision, so
+      the dropped 15% are probably a different kind of patient, and that can bias means and, if
+      missingness relates to the outcome, coefficients too.
+
+      What I'd actually do: ask why the values are missing, compare dropped and kept patients on
+      observed variables and on the outcome rate, and rerun the key result with imputation and a
+      missingness indicator to see if anything moves. And for a prediction model, patients with a
+      missing lab will still show up in deployment, so a model trained only on complete cases has
+      never seen them. If dropping is defensible after those checks, I'd keep it, document it,
+      and report the imputation analysis as a sensitivity analysis.
+    key_points:
+      - The percentage missing does not determine bias, the mechanism and the estimand do
+      - Compare dropped and kept patients on observed variables and outcome rate
+      - Complete-case is unbiased under MCAR but loses power, and can bias under MAR or MNAR
+      - Deployment still sees incomplete patients, so complete-case training leaves a gap
+      - Document the handling and report a sensitivity analysis
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you decide whether missing LDL values in EHR data are MCAR, MAR, or MNAR?"
+    model_answer: |
+      Twenty-second version: I can't prove it from the data. I can test whether missingness
+      depends on observed variables, which rules out MCAR, but MAR versus MNAR is an assumption
+      about values I don't see, so I argue it from how the data are produced and then test how
+      much it matters.
+
+      The deeper answer: first I'd find out why LDL is missing, whether it wasn't ordered, was
+      done outside the system, or wasn't resulted by prediction time, by talking to clinicians
+      and looking at order and result timestamps. Then I'd model missingness on observed
+      covariates to see how patterned it is, and put those variables, plus auxiliary ones like
+      utilization and site, into the imputation model so MAR is more plausible. Finally I'd run a
+      sensitivity analysis, shifting the imputed values in a plausible direction to see how
+      strong an MNAR effect would have to be before the conclusion changes. I'd say clearly that
+      MAR is an assumption, not a finding.
+    key_points:
+      - MAR versus MNAR is not testable from the observed data
+      - Testing dependence on observed variables can rule out MCAR only
+      - Argue the mechanism from process knowledge and timestamps
+      - Include auxiliary variables to make MAR more plausible
+      - Run a sensitivity analysis and state the assumption plainly
+
+  - type: laptop
+    title: Audit the missingness in your own copy
+    repo_path: 01-clinical-data-engineering/sql/02_features.sql
+    task: |
+      In a scratch copy of `02_features.sql`, add the `ldl_status` CTE from this lesson and expose
+      `ldl_status` in `stroke_features`. Confirm 272 / 3 / 58. Then add `days_since_ldl` (days
+      between the latest LDL and `index_date`, NULL if none) and check that it is never below 1.
+      Finally, run the missing-rate-by-`prior_af` query for the other flags and write two sentences
+      on whether anything looks like a real pattern once you account for group sizes.
+
+  - type: recap
+    points:
+      - "**MCAR / MAR / MNAR** are statements about what missingness depends on. MAR is relative to the variables you keep"
+      - A blank in an EHR can mean not ordered, done elsewhere, not resulted yet, ordered because of the outcome, structural, or a data problem
+      - The repo's missingness is pure chance (about 3% blank results, about 83% no LDL in the window), which real EHR data is not
+      - Real missingness is informative (Agniel et al., BMJ 2018), so indicators carry signal about care, not only physiology
+      - Bias depends on the mechanism, the estimand, and the model. The proportion missing tells you little
+      - Complete-case regression is valid when missingness is independent of the outcome given the covariates in the model
+      - MAR versus MNAR cannot be tested from the observed data. Argue it, add auxiliary variables, and run sensitivity analyses
+      - Indicators help prediction, but they can leak (post-time-zero) or shift (process changes)

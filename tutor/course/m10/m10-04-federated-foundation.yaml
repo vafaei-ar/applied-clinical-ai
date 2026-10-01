@@ -1,0 +1,524 @@
+id: m10-04-federated-foundation
+title: 'Privacy-preserving and foundation-model imaging: federated learning, differential privacy, and
+  cost'
+summary: What federated learning, secure aggregation, and differential privacy actually protect and cost,
+  how self-supervised and foundation models change imaging work, and how to estimate training emissions.
+minutes: 28
+status: authored
+why_it_matters: Multi-institution training and large pretrained models are where the field is moving. You need
+  to discuss the trade-offs concretely, including utility loss, site heterogeneity, and what each privacy
+  tool does and does not protect.
+objectives:
+  - Describe federated averaging and the effect of non-IID site data and client drift
+  - Explain differential privacy budgets (epsilon, delta), DP-SGD, and the utility-privacy trade-off
+  - Compare centralized, federated, secure-aggregation, DP, and swarm approaches and what each protects (and does not)
+  - Explain self-supervised pretraining and foundation-model adaptation for imaging, and how to evaluate it
+  - Estimate training compute and emissions and report them with accuracy
+key_points:
+  - Federated learning does not guarantee privacy without additional protections
+  - Non-IID sites bias convergence and leave the worst site behind
+  - DP-SGD costs accuracy, especially on small or rare-class data, and the unit of privacy must be the patient
+  - Foundation models cut labeling needs but add contamination, shortcut, and governance questions
+  - Report energy and emissions, including the experiments, alongside accuracy
+tags: [imaging, federated, privacy, foundation-models, interview]
+steps:
+  - type: text
+    title: Four hospitals, one stroke model, no data sharing
+    text: |
+      Four hospitals want one infarct-segmentation model that works on all their scanners. Legal says
+      the CTs cannot leave the building. Someone proposes **federated learning**: "the data never
+      moves, so there is no privacy risk."
+
+      Six months later (an invented scenario):
+
+      - Site C normalized CT windows differently and nobody noticed, because nobody can look at the
+        other sites' images.
+      - The smallest site's results are worse than what it gets training alone.
+      - The privacy office asks whether the shared model updates can leak patients, and the
+        honest answer is "they can".
+      - A colleague says to skip all this and fine-tune a pretrained foundation model. Then someone
+        asks what the training run cost in energy.
+
+      None of these tools is wrong. Each **protects something specific and costs something
+      specific**. The skill is saying which, with numbers. The simulations in this lesson use
+      synthetic data, and I say so where it matters.
+
+  - type: text
+    title: Federated averaging in one screen
+    text: |
+      **Federated averaging (FedAvg)**, from McMahan et al. (AISTATS 2017), is the workhorse.
+      Each communication round:
+
+      - The server sends the current global weights to every site.
+      - Each site trains on its own data for some **local steps** (or epochs).
+      - Each site sends its updated weights back.
+      - The server averages them, **weighted by each site's sample count**.
+
+      Hospitals are the **cross-silo** setting: a handful of reliable participants with real
+      compute, not millions of phones. The knobs are local steps, learning rate, and rounds.
+      Communication per round is about the model size times the number of sites.
+
+      Motivation in imaging: data cannot move, and diversity helps. The FeTS study (Pati et al.,
+      Nature Communications, 2022) trained a glioblastoma boundary-detection model across 71 sites
+      (6,314 patients), reporting a 33% improvement in delineating the surgically targetable tumor
+      and 23% for the complete tumor extent over a publicly trained model.
+
+  - type: quiz
+    question: |
+      Three sites have 1,000 studies each, and a fourth has 100. With standard weighted FedAvg, how much
+      does the small site contribute to each averaged model?
+    options:
+      - About 3%, since weights follow sample counts
+      - 25%, since every site gets an equal vote
+      - 10%, because small sites are upweighted for fairness
+      - 0%, since sites under 500 studies are dropped
+    answer: 0
+    explanation: |
+      100 / 3,100 is about 3.2%. Sample-weighted averaging optimizes the pooled loss, which
+      favors big sites, and a small site may be served poorly. Equal weights (B) are a design
+      choice that trades pooled accuracy for fairness. This is a real decision in multi-site projects,
+      not a detail.
+
+  - type: text
+    title: Non-IID sites and client drift
+    text: |
+      In imaging, sites are never identically distributed.
+
+      - **Feature shift**: scanner, protocol, and reconstruction differences.
+      - **Label shift**: a comprehensive stroke center has a different case mix from a community
+        hospital.
+      - **Concept shift**: different labeling conventions and reader habits, such as different
+        core-definition rules.
+      - **Quantity skew**: sites differ by orders of magnitude in size.
+
+      With many local steps, each site's model moves toward **its own** optimum. The average of
+      those models need not be near the pooled optimum. This is **client drift**, analysed and
+      corrected in SCAFFOLD (Karimireddy et al., ICML 2020, using control variates). FedProx (Li et
+      al., MLSys 2020) adds a proximal term that keeps local models close to the global one.
+      Batch-normalization statistics are another known trouble spot when sites differ.
+
+      Drift is worse with more local steps, and worse with more heterogeneity. The next figure shows
+      both in a small simulation.
+
+  - type: image
+    image: m10-04-fedavg-noniid.png
+    caption: |
+      Synthetic simulation: 5 sites, a logistic model, 300 patients per site, mean of 12 seeds.
+      Left: pooled test loss above what centralized training reaches. Identical (IID) sites
+      reach it even with 50 local steps. Non-IID sites with 50 local steps stall about 0.07 above
+      it, and more rounds do not help. One local step converges, but it needs many more rounds
+      (more communication). Right: drift, measured as the spread of local models, grows with local
+      steps and is about three times larger when sites differ.
+
+  - type: quiz
+    question: |
+      Reading the figure, what is the right conclusion about non-IID sites with many local steps?
+    options:
+      - FedAvg converges to the centralized optimum given enough rounds
+      - It settles at a worse solution than centralized training, and adding rounds does not close the gap
+      - The problem appears on IID sites too, just more slowly
+      - The fix is simply a smaller learning rate, with no change in communication
+    answer: 1
+    explanation: |
+      The orange curve flattens above zero: it is a biased fixed point, not slow convergence. IID sites
+      (the dashed curve) do not show it. A smaller learning rate shrinks drift but also slows
+      progress, and the usual remedies are fewer local steps, SCAFFOLD or FedProx-style
+      corrections, or accepting a site-adapted model. The price of fewer local steps is more rounds,
+      which is more communication.
+
+  - type: text
+    title: Heterogeneity hurts sites unevenly
+    text: |
+      A second finding from the same simulation: even **centralized** training on the pooled data
+      had mean per-site AUC of 0.91 but worst-site AUC of only about 0.77. Federating did not cause
+      that gap. **Heterogeneity** did, and averaging over sites hides it.
+
+      So for multi-site work, in any setup:
+
+      - Report **per-site** metrics, not just pooled ones. The worst site is the one that will
+        complain.
+      - Evaluate on a **held-out site** (leave-one-site-out), as in Lesson 2. That is the
+        deployment question.
+      - Consider **local adaptation**: fine-tune on each site after federated training, or use
+        site-specific normalization layers or heads.
+      - Audit preprocessing and label conventions across sites before any training.
+        The practical failure in the hook is harmonization, not optimization.
+
+  - type: text
+    title: Does federated learning protect privacy?
+    text: |
+      **Not by itself.** What leaves a site is a model update, and updates carry information
+      about the training data.
+
+      - **Gradient inversion**: Zhu et al. (NeurIPS 2019) recovered training images from shared
+        gradients, and Geiping et al. (NeurIPS 2020) reconstructed images at higher resolution
+        and showed that averaging gradients over images or iterations did not protect them.
+      - **Membership inference and memorization**: a trained model, federated or not, can reveal
+        whether a patient was in the training set.
+
+      The toolkit:
+
+      - **Secure aggregation** (Bonawitz et al., CCS 2017): the server learns only the **sum** of
+        site updates, not any single site's update.
+      - **Differential privacy**: a mathematical bound on what the output reveals about any one
+        record (next).
+      - Plus the boring controls: access control, logging, data-use agreements, and a threat
+        model.
+
+      Secure aggregation protects against a curious **server**. It says nothing about what the
+      final model reveals. DP is the tool that addresses that.
+
+  - type: quiz
+    question: |
+      A vendor says: "We use secure aggregation, so the model cannot leak any patient information." What
+      is the most accurate response?
+    options:
+      - Correct. Secure aggregation makes the trained model private
+      - Wrong, because secure aggregation does not stop the server seeing updates
+      - Only a problem for segmentation models
+      - True for what the server sees, but not for the model. Secure aggregation hides individual updates, while the aggregate and final model can still leak (for example by membership inference), and only a DP guarantee bounds that
+    answer: 3
+    explanation: |
+      Secure aggregation is a protocol guarantee about who sees which update. The trained
+      weights are still a function of the patients, and attacks on the final model do not care
+      how it was aggregated. Option B reverses the claim: hiding individual updates from the server is
+      exactly what it does.
+
+  - type: text
+    title: Differential privacy in plain terms
+    text: |
+      A randomized training procedure is **(epsilon, delta)-differentially private** if changing
+      one person's record changes the probability of any output by at most a factor of e^epsilon,
+      except with small probability delta. Intuition: the trained model is nearly as likely
+      whether or not your patient was included.
+
+      What to keep straight:
+
+      - **Smaller epsilon means stronger privacy** and usually lower accuracy. There is no
+        universal "safe" value. Reported values in practice range widely, and what is acceptable
+        depends on the threat model and the data.
+      - **Delta** is set well below one over the number of records.
+      - **The unit of privacy.** Record-level DP protects one training example. In imaging, one patient
+        has many slices, studies, and follow-ups. If one patient contributes 10 studies, the
+        guarantee for the **patient** degrades, roughly as epsilon times 10 by group privacy. Define
+        the unit as the **patient**, and cap how many studies each patient contributes.
+      - **Site-level DP** protects a whole hospital's contribution. It is much stronger, and much
+        more costly.
+
+  - type: text
+    title: DP-SGD and what it costs
+    text: |
+      DP-SGD (Abadi et al., CCS 2016) changes the training step in three ways:
+
+      - **Clip** each example's gradient to a maximum norm C, which bounds any one person's
+        influence.
+      - **Add Gaussian noise** scaled to C (standard deviation sigma times C) to the summed
+        gradients.
+      - A **privacy accountant** tracks epsilon across steps, including the privacy gain from
+        sampling batches.
+
+      The costs are practical:
+
+      - Per-example gradients need more memory and time, and small batch sizes.
+      - Batch normalization is problematic because it mixes examples. Teams switch to group
+        norm.
+      - More hyperparameters (C, sigma, batch size, steps) that interact.
+      - **Utility.** The noise is fixed by the privacy budget, and the signal scales with
+        dataset size and shrinks with model dimension. Bagdasaryan et al. (NeurIPS 2019) also showed
+        the accuracy loss falls hardest on underrepresented classes and subgroups.
+
+      Ziller et al. (Scientific Reports, 2021) evaluated DP-SGD for chest X-ray classification and
+      liver segmentation. Kaissis et al. (Nature Machine Intelligence, 2021) combined federated
+      learning, secure aggregation, and DP for pediatric chest X-rays.
+
+  - type: image
+    image: m10-04-dp-utility.png
+    caption: |
+      Synthetic simulation of a DP linear probe on 256-dimensional embeddings (delta 1e-5, 100 steps,
+      mean of 5 seeds). A dataset of 500 studies falls from AUROC 0.76 without DP to 0.56 at
+      epsilon 2. A dataset of 5,000 falls from 0.87 to 0.83. A dataset of 50,000 stays at 0.89.
+      The epsilon values come from a simple, conservative accounting bound (no batch-sampling
+      gain), so real DP-SGD would report smaller epsilon for the same noise. The shape is the
+      point. This is a simulation, not a result on real images.
+
+  - type: quiz
+    question: |
+      Two hospitals each want a DP guarantee of epsilon 2 on a model trained only on their own data. One has 500
+      labelled studies and the other 50,000. Based on the figure, what do you expect?
+    options:
+      - Both lose about the same accuracy, since epsilon is the same
+      - The larger hospital loses more, because it has more records to protect
+      - The smaller hospital loses much more. The same noise is spread over far less signal
+      - Neither loses anything, since delta is tiny
+    answer: 2
+    explanation: |
+      The noise added to the gradient sum is set by the privacy budget and the clip norm, not by
+      dataset size, but the gradient signal grows with the number of examples. With 50,000 studies
+      the noise is small relative to signal. With 500 it swamps it. That is why DP is often
+      workable for large consortia and brutal for rare diseases and small sites, and why fine-tuning
+      only a small head on frozen embeddings is a common compromise.
+
+  - type: code
+    title: The core of a DP-SGD step
+    language: python
+    text: |
+      A minimal numpy version of one step. Real libraries (for example Opacus for PyTorch) compute
+      per-example gradients efficiently and run the accountant. Check their current APIs.
+    code: |
+      import numpy as np
+
+      def dp_step(w, per_example_grads, clip, sigma, lr, rng):
+          """One DP-SGD step. per_example_grads has shape (n, d)."""
+          norms = np.linalg.norm(per_example_grads, axis=1, keepdims=True)
+          scale = np.minimum(1.0, clip / np.maximum(norms, 1e-12))
+          clipped = per_example_grads * scale                   # each row has norm <= clip
+          noisy_sum = clipped.sum(axis=0) + rng.normal(0.0, sigma * clip, size=w.shape)
+          return w - lr * noisy_sum / len(per_example_grads)
+    after: |
+      Two things to notice. The noise is added to the **sum** of clipped gradients, with scale tied
+      to the clip norm, because the clip bounds how much one example can change that sum. And
+      epsilon is not computed here at all. It comes from the accountant, given sigma, batch sampling
+      rate, number of steps, and delta.
+
+  - type: quiz
+    question: |
+      A teammate writes this and says it is "differentially private because it adds Gaussian noise".
+      What is wrong?
+    code: |
+      g = per_example_grads.mean(axis=0)
+      g = g + rng.normal(0.0, 0.1, size=g.shape)
+      w -= lr * g
+    language: python
+    options:
+      - Nothing. Gaussian noise is what DP means
+      - The noise should be Laplace, not Gaussian
+      - It should clip the mean gradient instead of each example
+      - There is no per-example clipping, so one patient's influence on the update is unbounded. The noise scale is not tied to any sensitivity, and no accountant reports epsilon, so there is no (epsilon, delta) guarantee
+    answer: 3
+    explanation: |
+      DP needs a bound on how much one record can change the output (sensitivity), which is what
+      per-example clipping gives, and a noise scale chosen relative to that bound. Adding arbitrary noise
+      to an unclipped average gives some blurring but no guarantee. Clipping the mean (C) bounds
+      the batch update but not one example's contribution in the way the analysis requires.
+      Gaussian noise is fine for (epsilon, delta) guarantees, so A and B are both off.
+
+  - type: text
+    title: Centralized, federated, secure, private, swarm
+    text: |
+      What each option protects, what it does not, and what it costs:
+
+      - **Centralize** (data moves into one governed place). Best utility and easiest debugging.
+        Requires trust, legal basis, and security, and a breach exposes everything. A **trusted
+        research environment**, where data stays put and approved code runs inside, is often
+        simpler than federation.
+      - **Federated learning.** Raw data stays. Updates move, and can leak. Costs: infrastructure
+        at every site, harmonization, blind debugging, non-IID issues.
+      - **Federated plus secure aggregation.** Server cannot see single-site updates. Final model
+        can still leak.
+      - **Federated plus DP.** A formal bound on leakage about individuals. Costs utility, most
+        for small data and rare classes.
+      - **Swarm learning** (Warnat-Herresthal et al., Nature, 2021). Sites coordinate peer to peer
+        with blockchain-based coordination, with no central server. It removes one trusted party,
+        and adds infrastructure complexity. It does not by itself stop leakage to peers.
+
+      None of these change who is **accountable**. A model trained federated is still a model
+      with an intended use that needs validation (Lesson 3).
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      Two realistic failures (invented for illustration).
+
+      **"Federated means private."** A consortium tells its privacy office that no patient data
+      leaves the sites and skips DP and secure aggregation. A reviewer then points to gradient
+      inversion results. The consortium has no threat model, no accountant, and no answer.
+
+      **"Federated means the same pipeline."** For months, the global model's validation looks
+      fine. At external validation it fails on one scanner vendor. The cause is that each site's
+      preprocessing was slightly different (intensity windowing, resampling), and the model had
+      learned to tell sites apart. Nobody could look at other sites' images to notice.
+
+      Habits that prevent both: write the threat model first, agree a **shared preprocessing
+      container** and label protocol, run a small centralized pilot on synthetic or consented
+      shared data to catch harmonization bugs, log per-site metrics every round, and hold
+      out one site.
+
+  - type: text
+    title: Self-supervised and foundation models
+    text: |
+      Imaging labels are expensive (Lesson 1). **Self-supervised pretraining** learns
+      representations from unlabeled images, using contrastive learning, masked-image modeling,
+      or self-distillation, and then adapts to labeled tasks. Adaptation options:
+
+      - **Linear probe**: freeze the encoder, train a linear classifier on embeddings. Cheap,
+        stable, and the easiest to make DP.
+      - **Full fine-tuning**: best accuracy with enough labels, more compute and overfitting risk.
+      - **Parameter-efficient tuning** (for example low-rank adapters): a few new weights on a
+        frozen backbone.
+
+      Examples I verified: **RETFound** (Zhou et al., Nature 2023) was trained by self-supervised
+      learning on 1.6 million unlabeled retinal images and adapted with fewer labels. **UNI** (Chen
+      et al., Nature Medicine 2024) was pretrained on more than 100 million images from over
+      100,000 pathology slides. **RAD-DINO** (Pérez-García et al., Nature Machine Intelligence,
+      2025) is an image-only encoder for chest radiographs. I did not verify a public head-CT
+      foundation model for this lesson, so check what exists, under which license and with
+      what training data, before you plan around one.
+
+  - type: text
+    title: What to check before trusting a foundation model
+    text: |
+      - **Contamination.** The pretraining set may include images from public benchmarks you are
+        about to test on. A strong score may be memory. Ask for the pretraining data sources and use
+        a test set that could not have been in them.
+      - **Shortcuts live in embeddings too.** RAD-DINO's authors report that its features correlate
+        with attributes such as age and sex that reports rarely mention. Embeddings can also encode
+        scanner and site, so run the header-only and held-out-site checks from Lessons 1 and 2.
+      - **Privacy and provenance.** Did pretraining data contain PHI? Are embeddings themselves
+        shareable? Memorization applies to large models.
+      - **Label efficiency is a claim to test.** Plot performance against the number of labels
+        for the foundation model and a baseline trained from scratch, on your data.
+      - **Regulatory.** A fine-tuned foundation model is still a device with an intended use. When I
+        checked on 30 September 2026, FDA's page listing AI-enabled devices said FDA will explore
+        ways to identify and tag devices that incorporate foundation models, from large language
+        models to multimodal architectures. Check its current position.
+
+  - type: quiz
+    question: |
+      A pretrained imaging encoder with a linear probe gets AUROC 0.93 for hemorrhage on a public head CT
+      benchmark. What is the most important next question?
+    options:
+      - Could the benchmark images have been in the pretraining data, and does it hold on an external site and scanner the encoder has never seen?
+      - Is the encoder large enough?
+      - Would full fine-tuning add 0.01 AUROC?
+      - Does the saliency map highlight the bleed?
+    answer: 0
+    explanation: |
+      Contamination and external validity decide whether 0.93 means anything. Size (B) and a small
+      gain from fine-tuning (C) are secondary. A saliency map (D) is not validation (Lesson 2).
+      Foundation models raise the importance of a clean, held-out, multi-site test set, because the
+      pretraining corpus is so large that overlap is easy.
+
+  - type: text
+    title: Compute, energy, and emissions
+    text: |
+      Emissions from training are simple to estimate, and worth reporting beside accuracy
+      (Lacoste et al. 2019 introduced a calculator along these lines):
+
+      **kg CO2e = GPU-hours x power (kW) x PUE x grid intensity (kg CO2e per kWh)**
+
+      - **Power**: measure it, or assume the rated power (about 0.4 kW for a current data-center GPU
+        is a rough figure).
+      - **PUE** (power usage effectiveness): data-center overhead, 1.0 at best, often 1.1 to 1.6.
+      - **Grid intensity** varies enormously by region and hour. I found about 0.35 kg CO2e per kWh for the
+        US average (EPA eGRID, 2023 data: 771.5 lb CO2 per MWh) and about 0.46 for the world
+        average in 2025 (Ember). Some regions are far lower.
+
+      The trap, noted by Strubell et al. (ACL 2019), is **counting only the final run**. Research
+      includes hyperparameter searches and failed runs. Report GPU-hours for the **whole
+      project**, and note inference: a model scanning thousands of studies a day adds up.
+
+      Tools such as CodeCarbon can measure a run directly. Estimates are still uncertain, so
+      report the assumptions.
+
+  - type: image
+    image: m10-04-compute-emissions.png
+    caption: |
+      Illustrative estimates under stated assumptions (0.4 kW per GPU, PUE 1.2, 0.35 kg CO2e per kWh).
+      One fine-tune is about a kilogram. A 40-run search is 40 times that. A from-scratch
+      pretraining run on 64 GPUs for a week is nearly two tonnes. Grid choice can change every bar
+      by a large factor.
+
+  - type: quiz
+    question: |
+      What does this return?
+    code: |
+      def kg_co2e(gpu_hours, gpu_kw=0.4, pue=1.2, kg_per_kwh=0.35):
+          return gpu_hours * gpu_kw * pue * kg_per_kwh
+
+      kg_co2e(2000)
+    language: python
+    options:
+      - About 34 kg
+      - About 336 kg
+      - About 2,800 kg
+      - About 0.34 kg
+    answer: 1
+    explanation: |
+      2,000 x 0.4 x 1.2 x 0.35 = 336 kg CO2e. The same job on a grid at 0.05 kg per kWh would be
+      48 kg, which is why the region often matters more than the model. And if those 2,000
+      GPU-hours were the last of a search with ten times the compute, the project total is
+      ten times larger.
+
+  - type: think
+    interview: true
+    prompt: |
+      A hospital's privacy officer asks: "If we train this stroke model with federated learning, is
+      patient data protected?"
+    model_answer: |
+      Partly. Federated learning keeps the raw images at each site, which removes one risk, the
+      central copy. But what leaves the site is model updates, and updates can leak. There are
+      published attacks that reconstruct training images from gradients, and the final model can
+      reveal membership. So I'd start from a threat model. Who might attack, the server, other sites, or
+      someone with the final model? Then I'd match controls to it. Secure aggregation hides
+      individual site updates from the server. Differential privacy gives a formal bound on what the
+      model reveals about one person, but it costs accuracy, especially for small sites and rare
+      findings, and the unit of privacy has to be the patient, not the image. Beyond the math
+      there's the usual governance: data-use agreements, access control, logging, and ethics
+      approval. I'd also say plainly that federation brings engineering costs, such as
+      harmonization, and non-IID effects, so I'd compare it with a trusted research environment before
+      committing.
+    key_points:
+      - States that federated learning removes the central copy but updates and final models can leak
+      - Names gradient inversion and membership inference
+      - Matches controls to a threat model, secure aggregation for the server and DP for the model output
+      - Says DP costs utility for small sites and requires the patient as the privacy unit
+      - Mentions governance controls and compares alternatives such as trusted research environments
+
+  - type: think
+    interview: true
+    prompt: |
+      "You have 600 CT angiograms with expert LVO labels and access to a public pretrained imaging
+      foundation model. How do you approach it, and what worries you?"
+    model_answer: |
+      With 600 labels a frozen encoder with a linear probe, or a lightly tuned head, is my baseline,
+      because it is cheap, stable, and less prone to overfitting than full fine-tuning. I'd compare
+      it against a model trained from scratch and a supervised ImageNet-style initialization, and
+      plot performance against the number of labels to check whether the label-efficiency claim
+      holds on our data. What worries me: first, whether the encoder's pretraining data contained
+      angiograms or public datasets I might test on, which would make results optimistic. Second,
+      embeddings can carry scanner and site information, so I'd run a header-only baseline and
+      test on a held-out site and vendor. Third, series selection and preprocessing must match
+      what the encoder expects, including 3D versus 2D input and windowing. Fourth, the
+      governance of the model: license, training data provenance, and versioning, since it will be part of a
+      regulated device if it is used clinically. I'd also measure compute, with the full search
+      counted, and report it.
+    key_points:
+      - Starts with a frozen-encoder linear probe baseline and compares it to scratch and supervised initialization
+      - Tests label efficiency by plotting performance against the number of labels
+      - Raises pretraining contamination and embedding shortcuts such as scanner or site information
+      - Plans external validation with a held-out site and vendor and a header-only baseline
+      - Covers preprocessing match, license and provenance, regulatory status, and compute reporting
+
+  - type: laptop
+    title: Simulate federation and privacy, then measure the cost
+    repo_path: 10-medical-imaging/src/fed_dp_sim.py
+    task: |
+      Create `10-medical-imaging/src/fed_dp_sim.py` with numpy only. Part 1: define 5 sites **once**
+      (feature shift, prevalence, label weights) and draw train and test data from those same
+      parameters. Implement FedAvg for a logistic model with a `local_steps` argument and compare 1
+      versus 50 local steps, with IID and non-IID sites, against centralized training. Part 2:
+      implement `dp_step` from this lesson and a simple accountant, then plot test AUROC against
+      epsilon for three training-set sizes. Part 3: install `codecarbon` in your own environment,
+      wrap the run in `EmissionsTracker`, and write the estimated kg CO2e, the assumptions, and the
+      total GPU or CPU hours for **all** your experiments in a short `docs/cost_note.md`.
+
+  - type: recap
+    points:
+      - "**FedAvg** averages site models weighted by sample count. Non-IID sites and many local steps cause **client drift** and a biased fixed point"
+      - Report **per-site** metrics and hold out a site, because the worst site is hidden by the average
+      - "**Federated is not private.** Updates can leak (gradient inversion), and secure aggregation only hides single updates from the server"
+      - "**DP-SGD** clips per-example gradients, adds noise, and needs an accountant. The privacy unit must be the **patient**"
+      - DP costs the most on small datasets and rare classes, so large consortia and frozen-embedding probes are the workable cases
+      - Compare centralized, trusted research environment, federated, secure, DP, and swarm by what each protects and costs
+      - "Foundation models cut label needs, but check **contamination**, embedded site and scanner shortcuts, provenance, and regulatory status"
+      - Estimate emissions as GPU-hours x power x PUE x grid intensity, **count the whole search**, and report assumptions

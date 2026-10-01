@@ -1,0 +1,428 @@
+id: m05-06-agents-eval
+title: Agents, tool use, and cost/latency evaluation
+summary: Tool-using agents, task success vs trajectory evaluation, deterministic tool-call checks,
+  latency percentiles and cost per task, guardrails and human-in-the-loop, and LangChain/LangGraph in
+  perspective.
+minutes: 26
+status: authored
+why_it_matters: Agentic systems are entering clinical workflows, where a right answer reached by the
+  wrong path can still be a privacy incident. Evaluating agents end to end, on outcome, process,
+  latency, and cost, is a differentiating skill in clinical AI interviews.
+objectives:
+  - Explain when an agent loop is warranted over a fixed pipeline
+  - Define task success, pass^k, trajectory quality, and tool-call accuracy
+  - Write deterministic checks for tool calls
+  - Benchmark latency (p50/p95) and cost per task, and read a cost-accuracy frontier
+  - Design guardrails and human-in-the-loop checkpoints
+  - Know when a framework like LangChain/LangGraph helps and what it hides
+key_points:
+  - Use outcome and process metrics together
+  - Reliability across repeated runs (pass^k) matters more than best-of-k in clinical use
+  - Deterministic tests for tool calls (names, schemas, patient scope, approvals) need no LLM judge
+  - Report latency percentiles, not means; agent latency is the sum of sequential steps
+  - Agent cost grows with steps because context accumulates, so set budgets
+  - Least-privilege tools, and human approval for writes
+  - Frameworks are optional; evaluation lives at the trajectory and log level
+tags: [agents, evaluation, interview]
+steps:
+  - type: text
+    title: 92% correct, and still not safe
+    text: |
+      The team extends the assistant into an **agent**: given a stroke patient, it looks up the
+      chart, checks the secondary-prevention guideline, and drafts a plan (antiplatelet, statin,
+      BP target, follow-up) for the neurologist to review.
+
+      Final plans are judged correct in **92%** of test cases. Then someone reads the logs:
+
+      - In 3% of runs it fetched medications for the **wrong patient ID**, noticed, and retried.
+        The final plan was right. The PHI access was still a privacy incident.
+      - In 1% it called `draft_note` with no approval step.
+      - p95 latency was **45 seconds**. Clinicians stop waiting after about 10.
+
+      An outcome-only metric saw none of this. Agents need evaluation of **what** they produce,
+      **how** they got there, and **what it cost** in time and money.
+
+  - type: text
+    title: What an agent is, and when you need one
+    text: |
+      An **agent** is a loop: the model chooses a tool call, **your code** runs it (Lesson 01),
+      the result goes back into context, and it repeats until the model finishes or a budget
+      runs out.
+
+      Our agent's tools:
+
+      - `get_active_meds(patient_id)`, `get_labs(patient_id, test)`, `get_problem_list(patient_id)`:
+        read-only chart access (think of the Module 01 `medications`, `labs`, and `diagnoses`
+        tables behind an API)
+      - `search_guidelines(query)`: the Lesson 02 retriever
+      - `draft_note(text)`: a **write**, which needs approval
+
+      The Lesson 02 RAG system is a **fixed pipeline**: the same steps every time. Prefer a
+      pipeline whenever the steps are known in advance, because it's cheaper, faster, and far
+      easier to test. Use an agent when **later steps depend on earlier results**.
+
+  - type: quiz
+    question: Which task genuinely benefits from an agent loop rather than a fixed pipeline?
+    options:
+      - Summarizing one discharge summary into a fixed schema
+      - Answering a guideline question with retrieval and citations
+      - Reconciling meds by fetching current drugs, checking each against contraindications, and pulling labs only when an interacting drug appears
+      - Classifying whether a question is about acute care or prevention
+    answer: 2
+    explanation: |
+      In medication reconciliation, which tools to call next (which labs, which guideline
+      sections) depends on what the previous calls returned. That's the case for an agent. The
+      other three have fixed steps, where a pipeline is cheaper, faster, and easier to evaluate.
+      "Agentic" is not automatically better.
+
+  - type: text
+    title: Outcome and process
+    text: |
+      Evaluate two things separately:
+
+      - **Outcome (task success)**: is the final artifact correct? For our agent: does the
+        draft plan match what the guideline and chart support?
+      - **Process (trajectory)**: were the steps acceptable? Right tools, right arguments,
+        right patient, no forbidden actions, no wasteful loops, sensible recovery from tool
+        errors.
+
+      They disagree in both directions, and both disagreements matter:
+
+      - **Right answer, bad path**: the wrong-patient lookup. The outcome is fine, but the
+        process caused a PHI incident, and next time it could produce a wrong plan.
+      - **Wrong answer, good path**: it gathered the right data and misreasoned. That's a model
+        or prompt problem, not a tooling problem.
+
+  - type: text
+    title: Defining task success
+    text: |
+      Make success **checkable**:
+
+      - **Deterministic checkers** wherever the answer is structured: the draft plan (as
+        validated JSON) must include a high-intensity statin, and DAPT for 21 days if NIHSS ≤ 3
+        per the institutional protocol.
+      - **Clinician rubrics** for the rest, with an LLM judge only after it has been validated
+        (Lesson 04).
+      - **Partial credit** by element, so you can see which part fails.
+
+      Then run each task **several times**. A task that succeeds 2 runs out of 3 is not a
+      reliable task. τ-bench (Yao et al., 2024) popularized **pass^k**: the fraction of tasks
+      that succeed on **all k** runs. That's different from pass@k (succeeds on **at least
+      one** of k), which suits settings like code generation where you can verify and pick the
+      best attempt. In a clinic, you get one attempt, so reliability is what counts.
+
+  - type: quiz
+    question: |
+      A task succeeds on 90% of runs, and runs are independent. What is its pass^3 (success on
+      all 3 of 3 runs)?
+    options:
+      - "0.90"
+      - "0.999"
+      - "0.30"
+      - "0.729"
+    answer: 3
+    explanation: |
+      0.9³ = 0.729. The tempting 0.999 is pass@3 (1 − 0.1³), the probability that at least one
+      run succeeds. The gap between the two is the gap between "it can do it" and "it reliably
+      does it". In practice runs aren't fully independent, since hard tasks fail more
+      consistently, so measure pass^k directly rather than computing it.
+
+  - type: text
+    title: Trajectory evaluation without exact matching
+    text: |
+      There is rarely one correct trajectory. The agent might fetch labs before meds or search
+      the guideline twice. Exact-match comparison against a reference path punishes valid
+      behavior.
+
+      Specify **constraints** instead:
+
+      - **Required calls**: `get_active_meds` must happen before a plan is drafted.
+      - **Forbidden calls**: no write without approval; no call for another patient.
+      - **Ordering rules**: retrieve the guideline before citing it.
+      - **Budgets**: at most N calls, no identical call repeated more than twice (loop
+        detection).
+
+      Report **required-call recall**, **forbidden-call rate**, **redundant-call rate**, and
+      **steps per task**. Most of these are deterministic, so they're cheap to run on every
+      trace.
+
+  - type: text
+    title: Tool-call accuracy is deterministic
+    text: |
+      Tool calls are structured data, so check them in code, not with a judge:
+
+      - **Name**: is the tool on the allowlist for this agent?
+      - **Schema**: do the arguments validate (Pydantic, as in Lesson 01)?
+      - **Values**: does `patient_id` equal the patient in the authenticated session? Is the lab
+        name a real test code?
+      - **Permissions**: was every write approved?
+      - **Use of results**: do numbers in the final plan (LDL, BP) match values that a tool
+        actually returned? A value that no tool returned was hallucinated.
+
+      Build a small set of scripted scenarios with **fake tools** returning known data, so every
+      check has an exact expected answer. That's the agent equivalent of the Module 01 pytest
+      suite.
+
+  - type: code
+    language: python
+    title: A trajectory checker
+    code: |
+      def check_trajectory(calls, session_patient_id, spec):
+          errors = []
+          names = [c.name for c in calls]
+          for c in calls:
+              if c.name not in spec.allowed_tools:
+                  errors.append(f"disallowed tool: {c.name}")
+              if c.args.get("patient_id", session_patient_id) != session_patient_id:
+                  errors.append(f"{c.name} called for another patient")
+              if c.name in spec.write_tools and not c.approved:
+                  errors.append(f"unapproved write: {c.name}")
+          for required in spec.required_tools:
+              if required not in names:
+                  errors.append(f"missing required call: {required}")
+          if len(calls) > spec.max_calls:
+              errors.append(f"too many calls: {len(calls)}")
+          return errors
+
+  - type: quiz
+    question: |
+      Session patient is P0042. `spec` allows all five tools, `write_tools = {"draft_note"}`,
+      `required_tools = ["get_active_meds"]`, `max_calls = 8`. The trace is
+      `get_active_meds(patient_id="P0042")`, then `search_guidelines(query="DAPT duration")`,
+      then `draft_note(text=...)` with `approved=False`. What does the checker return?
+    options:
+      - "An empty list"
+      - "[\"search_guidelines called for another patient\", \"unapproved write: draft_note\"]"
+      - "[\"unapproved write: draft_note\"]"
+      - "[\"missing required call: get_active_meds\"]"
+    answer: 2
+    explanation: |
+      `search_guidelines` has no `patient_id`, so `.get()` falls back to the session ID and the
+      check passes. That's the intended design for tools that aren't patient-scoped. The meds
+      call uses the right patient and the required call is present. The only violation is the
+      unapproved write.
+
+  - type: text
+    title: Latency is a distribution
+    text: |
+      Measure **end-to-end latency per task**: every model call, every tool call, and every
+      retry. For an agent these are mostly **sequential**, so latency is roughly the sum of the
+      steps, and one slow tool or one extra loop shows up directly.
+
+      Report **percentiles**, not the mean:
+
+      - **p50** (median): the typical experience.
+      - **p95 / p99**: the tail, which is what clinicians remember and what breaks timeouts.
+
+      The mean is pulled up by a few very slow tasks and describes nobody's experience.
+      For chat, also track **time to first token**, since streaming makes waits feel shorter.
+      For background agents, total time and timeout rate matter more.
+
+  - type: code
+    language: python
+    title: Percentiles vs the mean
+    code: |
+      import numpy as np
+
+      # seconds per task, 10 runs of the same scenario
+      lat = np.array([1.2, 1.4, 1.3, 1.1, 1.5, 1.2, 1.3, 9.8, 1.4, 12.5])
+
+      print(np.percentile(lat, 50))   # 1.35
+      print(np.percentile(lat, 95))   # about 11.28 (linear interpolation)
+      print(lat.mean())               # 3.27
+    after: |
+      With only 10 runs, p95 is essentially "the slowest run or two", so collect hundreds of
+      runs before trusting tail percentiles.
+
+  - type: quiz
+    question: Which line best summarizes these 10 runs for a dashboard?
+    options:
+      - "Average latency 3.3 s, so the agent is fast enough"
+      - "p95 is 11 s, so most tasks are slow"
+      - "Latency is too variable to report"
+      - "Median 1.35 s, but p95 is about 11 s, so a slow tail needs investigating"
+    answer: 3
+    explanation: |
+      Most runs take 1.1–1.5 s, and two take 10–12 s. The median captures the typical run and
+      p95 exposes the tail, which usually means a slow tool, a retry, or an extra loop. The mean
+      (3.3 s) matches no actual run. p95 doesn't mean most tasks are slow, only that the
+      slowest 5% are.
+
+  - type: text
+    title: Agent cost grows with steps
+    text: |
+      For a single call, cost is tokens in plus tokens out. For an agent, each step usually
+      resends the **whole conversation so far** (instructions, tool definitions, and every
+      previous observation). Input tokens per step grow as the task goes on, so total cost grows
+      **faster than linearly** with the number of steps. Prompt caching, where supported, can
+      reduce the repeated part.
+
+      So:
+
+      - Count **all** tokens across steps, retries, and any verifier or judge calls.
+      - Set **budgets**: max steps, max tokens, wall-clock timeout, with a graceful "couldn't
+        complete, here's what I found" ending.
+      - Report **cost per completed task** (Lesson 01), next to success and p95 latency.
+
+  - type: image
+    image: m05-06-cost-accuracy.png
+    caption: |
+      Illustrative numbers. Each point is a system design; bubble size is p95 latency. Blue
+      points are the Pareto frontier, where no other design is both cheaper and better. The
+      self-critique loop costs more and is slower than the plain agent without being better, and
+      the frontier model without retrieval is beaten by a cheaper design.
+
+  - type: quiz
+    question: |
+      For interactive guideline Q&A you need p95 under 10 seconds and task success of at least
+      85%. Using the figure, which design do you choose?
+    options:
+      - Agent with a frontier model, the highest success
+      - Frontier model + RAG
+      - Small model + RAG, the cheapest option above 75%
+      - Agent + self-critique loop
+    answer: 1
+    explanation: |
+      Frontier + RAG (88%, p95 7 s, about 2.5¢) is the only design meeting both constraints.
+      The agent gains 3 points but has a p95 of 28 s, which breaks the latency requirement, and
+      costs several times more. The self-critique loop is dominated. Small + RAG misses the
+      success bar. Constraints first, then the cheapest point on the frontier that meets them.
+
+  - type: text
+    title: Guardrails and human-in-the-loop
+    text: |
+      Assume the agent will sometimes do the wrong thing, and limit what the wrong thing can be:
+
+      - **Least privilege**: read-only tools by default, a per-agent allowlist, and patient scope
+        taken from the session, never from model output.
+      - **Validation** of every tool argument and final output (schemas plus domain checks).
+      - **Budgets and loop detection**, with a safe fallback.
+      - **Human-in-the-loop checkpoints**: a clinician approves every **write** (a note into the
+        chart, a draft order) and any output above a severity threshold (Lesson 05).
+
+      Design the approval screen to show **evidence** (the tool results and guideline chunks
+      behind each item), or reviewers will rubber-stamp it. That's automation bias. Track the
+      **override rate**: near 0% can mean reviewers stopped reading, not that the agent is
+      perfect.
+
+  - type: quiz
+    question: Where should human approval sit for the plan-drafting agent?
+    options:
+      - On writes and high-severity outputs, with the supporting evidence shown
+      - On every tool call, including reads, for maximum safety
+      - Nowhere, if task success is above 95%
+      - Only on a random 5% sample of tasks, reviewed weekly
+    answer: 0
+    explanation: |
+      Approving every read produces alert fatigue, and reviewers soon click through
+      everything, which removes the safety you wanted. High task success doesn't remove the
+      need to approve writes, since the remaining failures can be severe. Random audits are
+      great for **monitoring**, but they don't prevent a harmful write. Put checkpoints where
+      actions become irreversible or high-stakes, and show the evidence.
+
+  - type: text
+    title: LangChain and LangGraph in perspective
+    text: |
+      **LangChain** provides integrations and abstractions: model clients, retrievers, vector
+      stores, tool wrappers. **LangGraph** models agent workflows as an explicit **graph of
+      steps with shared state**, with built-in persistence (checkpointing), streaming, and
+      **interrupts for human approval**.
+
+      What they give you: speed to a prototype, standard patterns, and tracing integrations.
+
+      What they can hide:
+
+      - The **exact prompt** and tool schemas actually sent to the model.
+      - **Token counts, retries, and default parameters** buried in wrappers.
+      - Stack traces through several abstraction layers, plus API churn between versions.
+
+      A basic agent loop is a few dozen lines of your own code. Frameworks are **optional**.
+      Whatever you choose, log raw requests and responses, and keep your evaluation harness
+      independent of the framework, so you can change one without the other.
+
+  - type: quiz
+    question: |
+      A teammate says: "We can't evaluate the agent properly until we migrate to LangGraph."
+      What's the best response?
+    options:
+      - Agree, since frameworks are required for trajectory evaluation
+      - Agree, since LangGraph's built-in metrics replace a custom harness
+      - Disagree; evaluation works on logged trajectories and outcomes, so frameworks are optional, as long as raw calls are logged
+      - Disagree, because frameworks make evaluation impossible
+    answer: 2
+    explanation: |
+      Task success, trajectory constraints, tool-call checks, latency, and cost all come from
+      the logged sequence of calls and results. Any architecture that logs them can be
+      evaluated. LangGraph may be worth adopting for state management or approval interrupts,
+      but that's a separate decision. Frameworks don't prevent evaluation either; they just
+      shouldn't hide the raw calls.
+
+  - type: think
+    interview: true
+    prompt: |
+      "How would you evaluate an agent that drafts secondary-prevention plans from the chart
+      for neurologists to review?"
+    model_answer: |
+      I'd evaluate four layers. Outcome: build 100 or so scripted patient scenarios with fake
+      chart tools returning known data, and have clinicians define the correct plan elements.
+      Structured elements like statin intensity and DAPT duration get deterministic checks,
+      and the rest uses a rubric scored by clinicians or a judge validated against them. I'd
+      run each scenario several times and report pass^k, since reliability matters more than
+      best case. Process: deterministic trajectory checks, with required calls, no
+      cross-patient access, no unapproved writes, a step budget, and verification that every
+      number in the plan came from a tool result. Any cross-patient call is a severe failure
+      even if the plan is right. Operations: p50 and p95 end-to-end latency and cost per
+      completed task, compared with a simpler pipeline baseline to justify the agent at all.
+      Safety: red-team scenarios such as injected text in notes, missing data, and conflicting
+      meds. Then, in a silent pilot, I'd measure clinician override and edit rates and the time
+      saved.
+    key_points:
+      - Uses scripted scenarios with fake tools and clinician-defined expected outputs
+      - Measures outcome with deterministic checks plus rubrics, and reliability with pass^k
+      - Evaluates trajectory constraints, treating cross-patient access or unapproved writes as severe
+      - Reports p50/p95 latency and cost per completed task against a simpler baseline
+      - Includes red-teaming and a pilot measuring override rates and time saved
+
+  - type: think
+    interview: true
+    prompt: |
+      "When would you use a framework like LangGraph, and when would you write the agent loop
+      yourself?"
+    model_answer: |
+      It depends on what the workflow needs. For a simple tool loop with a few tools, I'd write
+      it myself: it's a few dozen lines, I see exactly what's sent to the model, and debugging
+      and evaluation are straightforward. I'd reach for LangGraph when I need what it actually
+      provides: long-running workflows with durable state and checkpointing, branching graphs,
+      and human-approval interrupts that pause and resume, which are fiddly to build well. The
+      costs are abstraction, hidden prompts and defaults, and API churn, so I'd pin versions,
+      make sure raw requests and token counts are logged, and keep the eval harness
+      framework-independent, working on logged trajectories. In a regulated clinical setting,
+      auditability of exactly what the model saw and did is non-negotiable, whichever I choose.
+    key_points:
+      - Writes the loop directly for simple agents to keep transparency and control
+      - Uses a framework for durable state, complex graphs, and human-approval interrupts
+      - Names the costs, including hidden prompts and defaults, abstraction layers, and version churn
+      - Requires raw logging and an evaluation harness independent of the framework
+      - Stresses auditability in clinical settings
+
+  - type: laptop
+    title: An agent evaluation harness
+    repo_path: 05-clinical-llm-evaluation/eval/agent_harness.py
+    task: |
+      Create `05-clinical-llm-evaluation/eval/agent_harness.py`. Define fake read-only tools that
+      return canned chart data for three synthetic patients (reuse IDs from the Module 01
+      synthetic `patients` table if you like), plus a `draft_note` write tool that records
+      whether it was approved. Write a minimal agent loop against your Lesson 01 client with a
+      step budget. Run each scenario 5 times and report success rate, pass^5, trajectory errors
+      from `check_trajectory`, p50/p95 latency, and cost per completed task in one table.
+
+  - type: recap
+    points:
+      - Use an agent only when later steps depend on earlier results, and prefer pipelines otherwise
+      - Evaluate **outcome and process**, since a right answer via a wrong-patient lookup is still an incident
+      - "**pass^k** (all k runs succeed) measures reliability; pass@k measures possibility"
+      - Specify trajectories as constraints (required, forbidden, ordering, budgets), not exact paths
+      - Tool calls are structured, so check names, schemas, patient scope, and approvals deterministically
+      - Report latency as **p50/p95**, and cost per completed task, which grows with steps
+      - Least privilege, budgets, and human approval for writes, with evidence shown to reviewers
+      - LangChain/LangGraph are optional tools; keep raw logs and a framework-independent eval harness

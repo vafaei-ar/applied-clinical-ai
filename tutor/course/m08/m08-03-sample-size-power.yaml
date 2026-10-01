@@ -1,0 +1,515 @@
+id: m08-03-sample-size-power
+title: 'How much data is enough: power and sample size for trials and prediction models'
+summary: Power and events for trials, the Riley criteria for developing a prediction model, and precision-based planning for validation studies, with the traps behind "10 events per variable".
+minutes: 27
+status: authored
+why_it_matters: Trial teams and ML teams both get asked "how many patients do you need?". The answer differs
+  by question type, and rules of thumb such as 10 events per variable are misleading. Knowing which
+  quantity drives each answer is an interview discriminator and saves real projects.
+objectives:
+  - Compute sample size for a two-arm trial from alpha, power, and effect size
+  - Convert between hazard ratio, events needed, and patients needed
+  - Apply the Riley et al. criteria for prediction-model development sample size
+  - Explain why 'events per variable' rules of thumb fail
+  - Plan validation studies by precision of calibration and AUROC
+key_points:
+  - Survival trials are powered on events, not patients
+  - Effect-size assumptions drive everything; state and stress-test them
+  - Prediction-model sample size targets shrinkage, optimism, and precision of the overall risk
+  - EPV rules came from coefficient-bias simulations, not from predictive performance
+  - Validation precision is set by events, and the calibration slope needs far more than AUROC
+  - Post hoc power is a transformation of the p-value and adds nothing
+tags: [statistics, sample-size, power, interview]
+steps:
+  - type: text
+    title: Same question, three different answers
+    text: |
+      In one week, three people ask you "how many patients do we need?".
+
+      - The trial statistician means: **enough events to detect a plausible treatment effect**.
+      - The ML lead building the readmission model means: **enough data that a model with 20
+        candidate predictors won't overfit**.
+      - The clinical lead about to validate it at a new hospital means: **enough to estimate
+        AUROC and calibration precisely enough to decide anything**.
+
+      Three questions, three quantities. The number that answers the first is an **effect
+      size**, the second depends on **how much signal the outcome has**, and the third on a
+      **target interval width**. Yet one rule of thumb, "10 events per variable", gets quoted
+      for all three.
+
+      In this lesson we compute each one, and see where the rule of thumb breaks. For the trial
+      we sketch an **invented** secondary-prevention trial, SYN-STROKE, which Module 04 later
+      develops in full (synthetic, zetagrel does not exist).
+
+  - type: text
+    title: Power is an argument, not a calculation
+    text: |
+      A trial sample size needs four inputs: the **type I error** (two-sided 0.05 is standard),
+      the **power** (80% to 90%), the **effect size** you want to detect, and the **variability**
+      or event rate. The formula is the easy part. Everything depends on the assumed effect.
+
+      Two ways teams go wrong:
+
+      - **Reverse-engineering.** "We can afford 600 patients, so the effect we're powered for is
+        HR 0.70." The effect is then chosen to justify the budget.
+      - **Optimistic effects.** A phase 2 or pilot result was partly selected **because** it
+        looked good, so on average the next estimate is smaller (the winner's curse). Planning a
+        phase 3 on the raw phase 2 estimate tends to underpower it.
+
+      DELTA2 (Cook et al., BMJ 2018) is UK guidance on choosing and reporting the target
+      difference. The spirit: pick the difference that would matter to patients and clinicians
+      **and** is realistic, write down why, and stress-test the choice.
+
+      Also make sure the effect matches the **estimand**. An ITT hazard ratio is diluted by
+      people who stop the drug, so designing on the on-treatment effect underpowers the ITT
+      analysis (Module 04's estimands lesson).
+
+  - type: code
+    title: From hazard ratio to events to patients
+    language: python
+    text: |
+      A time-to-event trial is powered on **events**. Schoenfeld's formula (Biometrics 1983) gives
+      the total for a 1:1 comparison. Patients then follow from how likely each patient is to
+      have an event during follow-up.
+    code: |
+      from math import exp, log
+      from statistics import NormalDist
+
+      z = NormalDist().inv_cdf
+
+      def events_needed(hr, alpha=0.05, power=0.80, p_treat=0.5):
+          return (z(1 - alpha / 2) + z(power)) ** 2 / (p_treat * (1 - p_treat) * log(hr) ** 2)
+
+      def p_event(haz, accrual, total, drop=0.0):
+          """P(event seen): uniform accrual, exponential event and dropout hazards (per year)."""
+          r = haz + drop
+          return haz / r * (1 - (exp(-r * (total - accrual)) - exp(-r * total)) / (r * accrual))
+
+      d = events_needed(0.75)                        # HR 0.75, 80% power
+      for drop in (0.0, 0.05):
+          p_bar = (p_event(0.10, 1, 2.5, drop) + p_event(0.075, 1, 2.5, drop)) / 2
+          print(f"dropout {drop:.2f}: {d:.0f} events -> {d / p_bar:,.0f} patients")
+    after: |
+      Output: `dropout 0.00: 379 events -> 2,371 patients` and `dropout 0.05: 379 events -> 2,490 patients`.
+
+      Assumptions, stated plainly: control hazard 10% per year (the aspirin-alone arm), 25%
+      lower on treatment, enrolment over 1 year, a 2.5-year study, exponential times, and
+      independent dropout. The approach matches a Monte Carlo check I ran. Module 04's design of
+      about 3,000 patients leaves a cushion (roughly 460 to 480 events under these assumptions).
+
+      Everything shifts if the control event rate does. Note what the function does **not**
+      contain: the number of patients never enters the power calculation directly.
+
+  - type: quiz
+    question: |
+      Predict first. The trial above is sized with 379 events for HR 0.75 (80% power, two-sided
+      alpha 0.05). The true HR turns out to be 0.85. Roughly what power did it actually have?
+    options:
+      - About 80%, since it reached the planned number of events
+      - About 60%
+      - About 35%
+      - About 10%
+    answer: 2
+    explanation: |
+      Power depends on the **true** effect through `|ln HR| · sqrt(events / 4)`. For HR 0.85 that
+      is 0.1625 × 9.74 = 1.58, and the power is Φ(1.58 − 1.96) ≈ **0.35**. Reaching the planned
+      event count protects you only if your assumed effect was right. The 60% answer is roughly
+      the power at HR 0.80, and "about 80%" confuses the planned number of events with realised
+      power.
+
+  - type: image
+    image: m08-03-power-misspecified.png
+    caption: |
+      Power of a 379-event trial, sized for HR 0.75, as a function of the true hazard ratio. At
+      HR 0.80 power is about 59%, at 0.85 about 35%, at 0.90 about 18%. A modest optimism about
+      the effect can turn a well-powered trial into a coin flip or worse.
+
+  - type: text
+    title: Stress-test the assumptions
+    text: |
+      A sample-size section that gives one number is a weak argument. Good ones show a small
+      grid of scenarios:
+
+      - **Effect**: the target HR, a more pessimistic HR (say 0.80), and what power you keep.
+      - **Control event rate**: lower than planned is the usual surprise, because trial
+        participants tend to be healthier than the population the rate came from.
+      - **Attrition**: dropout, withdrawal, and non-stroke death all remove events.
+      - **Non-adherence and crossover**: they dilute the ITT effect.
+
+      Also decide **before** the trial what you will do if events accrue slowly: extend
+      follow-up (event-driven designs do exactly this), enrich for higher-risk patients, or
+      re-estimate from the **blinded** pooled event rate. Adjusting the target effect after
+      seeing unblinded interim results is a different matter (the Bayesian adaptive-design
+      lesson later in this module covers it).
+
+      "Design for the smallest effect you would regret missing" is a more useful principle than
+      "design for the effect you hope for".
+
+  - type: quiz
+    question: |
+      The same trial turns out to have a control event rate of 7% per year instead of the assumed
+      10% (same HR 0.75, same accrual and follow-up). What follows?
+    options:
+      - Nothing changes, because the number of events needed depends only on the HR
+      - The 379 events are still needed, but reaching them takes about 40% more patients (or much longer follow-up)
+      - Fewer events are needed, because the control arm is healthier
+      - Power is unaffected, because the hazard ratio is unchanged
+    answer: 1
+    explanation: |
+      Events needed depend on the HR, alpha, and power only. But each patient now contributes
+      fewer events, so the same 379 events require more patient-years. Under the same accrual and
+      follow-up, the expected event probability falls from 0.16 to about 0.115, so the required
+      number of patients rises from about 2,370 to about 3,300 (around +39%). Without enough
+      extra patients or follow-up, you end the trial with too few events and lose power.
+
+  - type: text
+    title: 'Prediction models: a different question'
+    text: |
+      For model **development**, there is no null hypothesis and no treatment effect. The risk
+      is **overfitting**: a model with too many candidate parameters for the information in the
+      outcome learns noise, is over-confident in new patients, and ranks worse than it looked.
+
+      The oldest rule is **10 events per variable (EPV)**. It comes from simulation studies such
+      as Peduzzi et al. (J Clin Epidemiol 1996), which studied **bias and confidence-interval
+      coverage of regression coefficients** in logistic regression. They found no major problems
+      at EPV of 10 or more and problems below 10. That is a result about estimating
+      coefficients, not about how well a model predicts new patients.
+
+      van Smeden et al. (Stat Methods Med Res 2019) showed that EPV has no strong relation to
+      predictive performance. Out-of-sample performance is better approximated by the **number of
+      predictors, the total sample size, and the events fraction** together.
+
+      So EPV fails as a design rule not because it's wrong about coefficients, but because it is
+      the wrong quantity for this job.
+
+  - type: text
+    title: The Riley criteria
+    text: |
+      Riley et al. (Stat Med 2019; BMJ 2020) replaced EPV with criteria that tie the sample size
+      to how much **signal** the outcome has. For a binary outcome, the minimum sample size is
+      the largest needed to meet all three:
+
+      1. **Small overfitting**: expected shrinkage of predictor effects of **at most 10%**
+         (shrinkage factor S ≥ 0.9).
+      2. **Small optimism**: an absolute difference of **at most 0.05** between the model's
+         apparent and adjusted Nagelkerke R².
+      3. **Precise overall risk**: the average outcome risk is estimated within ±0.05.
+
+      Criterion 1 uses `n = p / ((S − 1) · ln(1 − R²_CS / S))`, where `p` is the number of
+      **candidate predictor parameters** and `R²_CS` is the **anticipated** Cox-Snell R² of the
+      model. A weak-signal outcome (low R²) needs a lot more data for the same `p`.
+
+      Two practical points. `p` counts **every** candidate parameter **before** any variable
+      selection, including dummy variables, spline terms, and interactions. And the anticipated
+      R² comes from earlier models in the same setting, for example via a previously reported
+      C-statistic. The authors' `pmsampsize` package (R and Stata) implements the criteria.
+
+  - type: quiz
+    question: |
+      A model will use 12 candidate variables: 6 continuous (entered linearly), 4 categorical with
+      4 levels each, and 2 continuous with restricted cubic splines using 4 knots (3 parameters
+      each). What `p` goes into the sample-size formula?
+    options:
+      - "12, the number of variables"
+      - "24, the number of candidate parameters"
+      - "18, counting each categorical as one"
+      - "30, counting each spline as 12"
+    answer: 1
+    explanation: |
+      Count parameters, not variables: 6 (linear) + 4 × 3 (categorical with 4 levels needs 3
+      dummies) + 2 × 3 (a spline with 4 knots has 3 degrees of freedom) = **24**. Using 12 would
+      understate the flexibility of the model by half. Also, `p` is counted before selection: if
+      you screen variables on the outcome, the model has effectively used all of them.
+
+  - type: code
+    title: How the required size moves with the signal
+    language: python
+    text: Criterion 1 and the overall-risk criterion, for 20 candidate parameters and 10% prevalence.
+    code: |
+      from math import exp, log
+
+      def riley_shrinkage_n(p, r2_cs, s=0.9):
+          return p / ((s - 1) * log(1 - r2_cs / s))
+
+      def max_r2_cs(prev):
+          return 1 - exp(2 * (prev * log(prev) + (1 - prev) * log(1 - prev)))
+
+      prev, p = 0.10, 20
+      print("max R2_CS:", round(max_r2_cs(prev), 3))
+      for r2 in (0.03, 0.05, 0.10):
+          n = riley_shrinkage_n(p, r2)
+          print(f"R2_CS {r2:.2f}: n={n:,.0f}  events={n * prev:,.0f}  EPV={n * prev / p:.1f}")
+      print("overall-risk criterion:", round((1.96 / 0.05) ** 2 * prev * (1 - prev)))
+    after: |
+      Output:
+
+      ```
+      max R2_CS: 0.478
+      R2_CS 0.03: n=5,899  events=590  EPV=29.5
+      R2_CS 0.05: n=3,499  events=350  EPV=17.5
+      R2_CS 0.10: n=1,698  events=170  EPV=8.5
+      overall-risk criterion: 138
+      ```
+
+      The "required EPV" ranges from 8.5 to 29.5 with the signal, so a fixed 10 cannot be right.
+      In a simulation I ran, a perfectly calibrated model with AUROC about 0.72 at 10%
+      prevalence (like our readmission model) had `R²_CS` ≈ 0.058, so 20 parameters need about
+      3,000 patients and 300 events, an EPV of about 15. The overall-risk criterion is the
+      easy one here. Shrinkage is the one that binds.
+
+  - type: quiz
+    question: |
+      A team has 2,000 patients with 200 events (10%), and 20 candidate parameters. A colleague
+      says "EPV is 10, we're fine." You expect a weak-signal model with `R²_CS` around 0.05.
+      What is the best response?
+    options:
+      - Agree, because EPV of 10 is the accepted minimum
+      - Agree, but only if the model is regularized with a ridge penalty
+      - Disagree, because 200 events is too few for any prediction model
+      - "Disagree: the shrinkage criterion needs about 3,500 patients (350 events) for that signal, so 2,000 risks substantial overfitting"
+    answer: 3
+    explanation: |
+      With p = 20 and R²_CS = 0.05, the shrinkage criterion gives about 3,500 patients and 350
+      events. At 2,000 patients, expected shrinkage would be noticeably worse than 10%, meaning
+      predictions too extreme in new patients. A penalty can reduce overfitting but does not
+      remove the need to budget for it. "200 events is too few for any model" is false: with
+      fewer candidate parameters or a stronger signal, 200 events can be enough.
+
+  - type: text
+    title: Flexible models are hungrier
+    text: |
+      The Riley formulas are built for regression models with a countable `p`. Gradient boosting,
+      random forests, and neural networks have far more **effective** parameters, and they
+      typically need more data to behave.
+
+      van der Ploeg, Austin, and Steyerberg (BMC Med Res Methodol 2014) simulated this for
+      dichotomous endpoints. Logistic regression reached a stable AUC at roughly 20 to 50 events
+      per variable, while support vector machines, neural nets, and random forests **may need
+      over 10 times as many** events per variable for a stable AUC and small optimism. The exact
+      numbers depend on the setting, but the ordering is the lesson: flexibility costs data.
+
+      Practical consequences for the readmission model:
+
+      - If the cohort has a few hundred readmissions, a regularized **logistic regression
+        baseline** is not a cop-out, it's the right size of model.
+      - Plot a **learning curve** (Module 02): does validation performance still rise as
+        training size grows? If not, more data of this kind won't help.
+      - Pretraining, transfer learning, and strong regularization reduce the need for **labels**,
+        but they do not shrink the events you need to **validate**.
+
+  - type: text
+    title: 'Validation: plan by precision'
+    text: |
+      Validating a **fixed** model needs no shrinkage argument. The question is how precisely you
+      want the performance estimates, and the answer is in events.
+
+      Rules of thumb from resampling studies:
+
+      - Vergouwe et al. (J Clin Epidemiol 2005): at least **100 events and 100 non-events**.
+      - Collins et al. (Stat Med 2016): at least **100 events, ideally 200 or more**.
+
+      More recent work (Riley et al., Stat Med 2021) replaces fixed minimums with
+      **precision targets** for each measure, with closed-form and iterative solutions: choose the
+      standard error you can live with for O/E (overall calibration), the calibration slope, the
+      C-statistic, and net benefit, then compute the sample size. In their worked example, about
+      9,800 participants (177 events) were needed, and **the calibration slope** was the
+      criterion that drove the number.
+
+      The next figure shows why the slope is usually the hard one.
+
+  - type: image
+    image: m08-03-validation-precision.png
+    caption: |
+      Simulated: a perfectly calibrated model (true slope 1), prevalence 10%, true AUROC about 0.72,
+      800 simulated validation sets per point. The bands show where 95% of estimates fall. With
+      100 events, AUROC lands anywhere from 0.67 to 0.77, and the slope from 0.74 to 1.30.
+
+  - type: text
+    title: Reading the figure
+    text: |
+      Numbers from the simulation behind it (events in the validation set):
+
+      - **100 events**: AUROC 0.67 to 0.77 (width 0.10); slope 0.74 to 1.30.
+      - **200 events**: AUROC 0.69 to 0.75; slope 0.83 to 1.20.
+      - **500 events**: AUROC 0.70 to 0.74; slope 0.88 to 1.14.
+      - **1,000 events**: AUROC 0.70 to 0.74; slope 0.92 to 1.10.
+
+      For a perfectly calibrated model, a validation set with 100 events would still often
+      report a slope of 0.75 or 1.3. A "slope of 0.85" from a set that size is entirely
+      compatible with a well-calibrated model. Bootstrap CIs for AUROC (Lesson 1) come out with
+      similar widths, because the bootstrap is describing the same sampling variability.
+
+      So: **AUROC is cheap to estimate, and the slope is expensive.** Report the slope with its
+      interval, and do not over-read it on a small set.
+
+  - type: quiz
+    question: |
+      Predict first. Hospital A validates the model on 2,000 patients at 10% prevalence. Hospital B
+      has 10,000 patients, but the outcome is rare (2%). Which gets the **more precise** AUROC?
+    options:
+      - About equal, because both have about 200 events
+      - Hospital B, because it has five times as many patients
+      - Hospital A, because the outcome is more common there, so each event is worth more
+      - Neither can be compared without knowing the model
+    answer: 0
+    explanation: |
+      AUROC compares events with non-events, and its precision is driven mainly by the number of
+      **events** (and non-events). Both hospitals have about 200 events. In my simulation of
+      binormal scores with AUROC 0.72, the 95% range was 0.684 to 0.756 for Hospital B and 0.683
+      to 0.757 for Hospital A, essentially identical. Counting rows instead of events is the most
+      common sizing mistake, especially with repeated encounters per patient (Lesson 1).
+
+  - type: code
+    title: Plan a validation set by simulation
+    language: python
+    text: |
+      When no closed form fits, simulate. Given an anticipated AUROC and prevalence, how wide will
+      the AUROC range be at each sample size?
+    code: |
+      import numpy as np
+      from statistics import NormalDist
+
+      def auc_range(auc, prev, n, reps=1000, seed=0):
+          rng = np.random.default_rng(seed)
+          d = 2**0.5 * NormalDist().inv_cdf(auc)      # binormal separation for this AUROC
+          n1 = int(round(n * prev)); n0 = n - n1
+          out = np.empty(reps)
+          for i in range(reps):
+              s1, s0 = rng.normal(d, 1, n1), rng.normal(0, 1, n0)
+              ranks = np.argsort(np.argsort(np.r_[s1, s0])) + 1
+              out[i] = (ranks[:n1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+          return np.percentile(out, [2.5, 97.5])
+
+      for n in (1000, 2000, 5000):
+          print(n, auc_range(0.72, 0.10, n).round(3))
+    after: |
+      Output: `1000 [0.667 0.768]`, `2000 [0.683 0.757]`, `5000 [0.697 0.743]`.
+
+      This is a quick planning tool, using an idealized score distribution. For the **calibration
+      slope**, simulate the same way but generate outcomes from a calibrated logistic model and fit
+      the recalibration regression each time, which is how the figure was made. Check the
+      anticipated prevalence and the **events per subgroup** you will report, because a subgroup
+      analysis needs its own events (Module 02's subgroup lesson).
+
+  - type: text
+    title: Where people go wrong
+    text: |
+      Four realistic failures, all common in protocols and pitches.
+
+      - **Post hoc (observed) power.** A trial ends with p = 0.20 and someone computes "observed
+        power = 25%, so it was underpowered and the result is inconclusive". Observed power is a
+        one-to-one function of the p-value (Hoenig and Heisey, The American Statistician 2001),
+        so it adds no information. A non-significant result always has low "observed power". Use
+        the **confidence interval** and the pre-specified target difference.
+      - **Sizing on rows.** "We have 50,000 encounters, so we're fine." Events, and patients
+        when encounters repeat, are what count.
+      - **Sizing from the pilot's effect.** The pilot estimated HR 0.60 with a huge interval, and
+        the phase 3 is powered for 0.60.
+      - **One-number sample size.** A single calculation with no scenario grid, then surprise
+        when the control event rate comes in lower.
+
+  - type: quiz
+    question: |
+      A trial ends with HR 0.88 (95% CI 0.70 to 1.11), p = 0.29. The sponsor computes "observed
+      power was 18%" and argues the trial was "simply underpowered, so the drug probably works".
+      What is the best response?
+    options:
+      - "Correct: low power means a true effect was probably missed"
+      - Correct, if the observed power is computed from the observed HR
+      - Observed power is a function of the p-value and adds nothing; judge it by the CI, which includes both a 30% benefit and a small harm
+      - Incorrect, because power is irrelevant once the trial is over
+    answer: 2
+    explanation: |
+      Observed power is computed from the estimated effect and the same standard error that gave
+      the p-value, so it is just the p-value re-expressed, always low when p is large. The
+      informative statement is the interval: HR 0.70 to 1.11 is compatible with a meaningful
+      benefit and with no effect or slight harm. The trial is inconclusive, which is different
+      from "the drug probably works". The last option overreaches: power calculated **before** the
+      trial, for a pre-specified target difference, is a legitimate design input.
+
+  - type: think
+    interview: true
+    prompt: |
+      "We want to validate our 30-day readmission model at a partner hospital. How many patients
+      do we need?"
+    model_answer: |
+      The 20-second version: it depends on events and on how precisely we want to estimate
+      performance, not on patient count. I'd start from a precision target and translate it into
+      events, then into patients via the prevalence.
+
+      The deeper version: I'd pick targets before looking: for example an AUROC interval of about
+      plus or minus 0.05, a calibration slope interval of about plus or minus 0.15, and overall
+      O/E within 10%. The classic rules of thumb, 100 events and 100 non-events at the very
+      least and 200 or more ideally, are a sanity check, but the calibration slope usually
+      drives the number, so I'd simulate or use the Riley validation formulas with the
+      anticipated prevalence and spread of predicted risks. With 10% prevalence, 300 to 500
+      events means 3,000 to 5,000 patients. If we report subgroups such as payer, each needs its
+      own events. And if the partner data has repeated encounters, I'd count patients as clusters
+      in the analysis. I'd also state that the interval only covers sampling error, not
+      differences in case mix.
+    key_points:
+      - Frames size in terms of events and a precision target, not rows
+      - Mentions calibration slope as the typically binding criterion and gives the 100 to 200 events rule as a floor
+      - Converts events to patients via prevalence, and accounts for subgroup and clustered data
+      - Uses simulation or the Riley validation approach rather than EPV
+
+  - type: think
+    interview: true
+    prompt: |
+      "The PI wants 80% power to detect an HR of 0.80 for recurrent stroke, but the budget supports
+      about 250 events. What do you tell them?"
+    model_answer: |
+      The 20-second version: 80% power for HR 0.80 needs about 630 events, and 250 events gives
+      around 42% power, so the design as it stands is close to a coin flip.
+
+      The deeper version: Schoenfeld's formula says events scale with 1 over the square of the log
+      hazard ratio, so a smaller effect is very expensive. I'd check the assumption first: is 0.80
+      the smallest effect that matters, or just what the budget reached? If a larger effect is
+      justified by earlier data or mechanism, I'd redo the calculation, but I'd guard against
+      optimism from a small earlier study. Then the options: raise the event rate by enriching
+      for higher-risk patients or extending follow-up, which gets events more cheaply but changes
+      who the result applies to; use a composite endpoint if the components are equally
+      important; or accept lower power and be explicit that a null would be inconclusive. I'd
+      present a scenario table with power under several HRs and event rates, and recommend not
+      launching at 42% without a plan to reach the events.
+    key_points:
+      - Computes or estimates required events (about 630) and resulting power (about 42%) for the stated budget
+      - Notes events scale with 1/(ln HR)^2, so small effects are expensive
+      - Questions whether the target effect is the smallest that matters versus budget-driven
+      - Offers options with trade-offs, such as enrichment or longer follow-up, a composite, or accepting low power
+      - Presents a scenario table rather than one number
+
+  - type: laptop
+    title: Is our cohort big enough? A sample-size memo
+    repo_path: 02-pytorch-clinical-ml/src/evaluation/sample_size.py
+    task: |
+      Count the events in your `stroke_features` training split and the number of candidate
+      predictor **parameters** you plan to use (dummies and splines included). Implement the
+      Riley shrinkage criterion and the overall-risk criterion from this lesson, print the
+      minimum n and compare it with what you have.
+
+      Then write a short memo: is the cohort large enough for a logistic regression baseline, and
+      for the MLP? Add a simulation for the **validation** side: how many events would the
+      temporal test set need for an AUROC interval of about plus or minus 0.05, and for a slope
+      interval of about plus or minus 0.15?
+
+  - type: laptop
+    title: Simulate the trial's power and its sensitivity
+    repo_path: 04-clinical-trials-survival/src/simulate_trial.py
+    task: |
+      When Module 04's simulator exists, add a function that simulates 2,000 SYN-STROKE trials at
+      a chosen true HR, control hazard, accrual, follow-up, and dropout, runs the log-rank test,
+      and returns the empirical power. Check it against `events_needed` and `p_event` from this
+      lesson, then produce a small grid: HR 0.75 and 0.85 against control event rates of 10% and
+      7% per year.
+
+  - type: recap
+    points:
+      - "Three questions, three quantities: trials need **events for an assumed effect**, development needs **enough data for the signal and the number of parameters**, validation needs **a target interval width**"
+      - "Schoenfeld: events = 4(z_a + z_b)² / (ln HR)², so small effects are very expensive; patients follow from the event probability"
+      - "The assumed effect drives everything: a trial sized for HR 0.75 has about 35% power if the truth is HR 0.85. Stress-test with a scenario grid"
+      - "**10 EPV** came from coefficient-bias simulations, not prediction accuracy; required events per variable vary from under 10 to about 30 with the signal"
+      - "Riley criteria: shrinkage of at most 10%, optimism in R² of at most 0.05, overall risk within 0.05, with p counted as **candidate parameters**"
+      - Flexible ML methods are hungrier than logistic regression, and more data for training does not reduce what validation needs
+      - Validation precision is set by events (at least 100, ideally 200 or more), and the calibration slope needs far more events than AUROC
+      - Post hoc power is a re-expression of the p-value; use the confidence interval instead

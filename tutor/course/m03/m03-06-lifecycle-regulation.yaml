@@ -1,0 +1,499 @@
+id: m03-06-lifecycle-regulation
+title: 'Model lifecycle: registry, rollback, retraining, and regulation'
+summary: Versioning, champion/challenger, rollback, retraining triggers and their risks, and the regulatory frame (FDA SaMD pathways, non-device CDS, PCCPs, locked vs adaptive).
+minutes: 28
+status: authored
+why_it_matters: A clinical model is never finished. It gets replaced, rolled back, and retrained, and in
+  some cases it's a regulated medical device. Knowing how change control works, technically and
+  regulatorily, is what separates someone who trains models from someone trusted to run them.
+objectives:
+  - Use a model registry to version models with lineage and aliases
+  - Run champion/challenger comparisons with pre-specified promotion gates
+  - Plan rollback and incident response
+  - Define retraining triggers and explain why retraining can make things worse
+  - Explain FDA SaMD and the 510(k), De Novo, and PMA pathways at a high level
+  - Know the four criteria for non-device clinical decision support
+  - Explain locked vs adaptive algorithms and Predetermined Change Control Plans
+key_points:
+  - Every prediction should trace to a registered model version with its data, code, and validation evidence
+  - Challengers are compared to the champion on the same patients against pre-specified gates
+  - Rollback is a rehearsed, minutes-long operation, not a rebuild
+  - Retraining can hurt through immature labels, feedback loops, and upstream artifacts
+  - Intended use, not the algorithm, determines regulatory status
+  - Non-device CDS must meet all four statutory criteria
+  - A PCCP lets pre-specified model changes proceed without a new submission, if made as described
+tags: [regulation, mlops, fda, interview]
+steps:
+  - type: text
+    title: The better model that made things worse
+    text: |
+      A year after launch, the team retrains the readmission model on the newest data. Test
+      AUROC rises from 0.72 to 0.74. They deploy it on a Friday.
+
+      By Wednesday, care managers at two hospitals report twice as many high-risk flags as
+      usual. It turns out the new model is well-ranked but **miscalibrated**: its probabilities
+      run higher, so the fixed 0.25 threshold now captures many more patients. Someone asks,
+      "Which version was running last Tuesday, and can we go back?" Nobody is sure which file
+      was the old model, and rebuilding it takes two days.
+
+      Every piece of that story is a **lifecycle** failure: no registry, no promotion gate
+      that checked calibration against the operating threshold, no rehearsed rollback. This
+      final Module 03 lesson covers those, and then the regulatory frame that governs change
+      for models that are medical devices.
+
+  - type: text
+    title: The model registry
+    text: |
+      A **model registry** is the system of record for model versions. For each version it
+      stores the artifact plus its **lineage**:
+
+      - the training run, code commit, and lockfile
+      - a pointer or hash for the exact training data snapshot and cohort definition
+      - metrics on the validation sets (discrimination, calibration, subgroups)
+      - the validation report and who approved it
+      - which environments it's deployed to
+
+      Module 02's experiment-tracking lesson used MLflow to log runs. The **MLflow Model
+      Registry** adds named models with numbered versions and **aliases**, movable pointers
+      such as `@champion` and `@challenger`. (MLflow's older fixed stages, Staging and
+      Production, are deprecated in favour of aliases.) Azure ML, SageMaker, and Vertex AI have
+      equivalent registries.
+
+  - type: code
+    title: Register, tag, and promote with aliases
+    language: python
+    code: |
+      import mlflow
+      from mlflow import MlflowClient
+
+      client = MlflowClient()
+      NAME = "readmission-30d"
+
+      mv = mlflow.register_model(f"runs:/{run_id}/model", NAME)
+      client.set_model_version_tag(NAME, mv.version, "data_snapshot", "features_2026-08-31")
+      client.set_model_version_tag(NAME, mv.version, "validation_report", "reports/v7.html")
+      client.set_registered_model_alias(NAME, "challenger", mv.version)
+
+      # after the promotion gate passes and is signed off:
+      client.set_registered_model_alias(NAME, "champion", mv.version)
+
+      # the service loads whatever @champion points to, at startup
+      model = mlflow.pyfunc.load_model(f"models:/{NAME}@champion")
+    after: |
+      Moving an alias is a one-line, auditable change, and rollback is moving it back. One
+      caution: if the service resolves `@champion` at startup, then which model is running
+      depends on when each replica last restarted. Many teams therefore resolve the alias to a
+      concrete version **at deploy time** (bake it into the image or the config, as in
+      Lesson 3), so the image digest and the model version always go together.
+
+  - type: quiz
+    question: |
+      Your service loads `models:/readmission-30d@champion` at startup. Someone moves the
+      alias to version 8 on Tuesday. On Thursday, one of three replicas restarts after a crash.
+      What is running now?
+    options:
+      - All replicas run version 8, since the alias moved
+      - All replicas still run the old version until the next deployment
+      - One replica runs version 8 and two run the old version, and responses don't say which unless you return model_version
+      - The restart fails because the alias changed
+    answer: 2
+    explanation: |
+      Each replica resolves the alias when it starts. The restarted one picks up version 8;
+      the others keep the version they loaded earlier. Patients now get scores from two models
+      depending on which replica answers. That's why the response includes `model_version`
+      (Lesson 2), and why many teams pin a concrete version per deployment instead of resolving
+      a moving alias at runtime.
+
+  - type: text
+    title: Champion and challenger
+    text: |
+      The **champion** is the model in production. A **challenger** is a candidate
+      replacement. The promotion process should be decided **before** you see results:
+
+      - **Same data.** Evaluate both on the same patients, ideally a recent temporal holdout
+        plus a period of **shadow scoring** on live data (Lesson 5's silent mode), once those
+        labels mature.
+      - **Pre-specified gates.** For example: AUROC no worse than the champion's minus 0.01;
+        observed/expected ratio between 0.9 and 1.1; no subgroup (site, sex, race and
+        ethnicity, age band) worse than the champion by more than a set margin; flag rate at
+        the operating threshold within the care team's capacity; all behaviour tests passing.
+      - **Human sign-off** by the clinical owner, with the validation report attached to the
+        registry version.
+
+      Online A/B tests, where live patients are randomly assigned to models, are common in
+      tech but need much more care in clinical settings. They can count as research on
+      patients and may need IRB review. Shadow comparison is the usual first step.
+
+  - type: quiz
+    question: |
+      What's wrong with this promotion decision?
+    code: |
+      champ = evaluate(champion, holdout_2024)     # AUROC 0.72, O/E 1.02
+      chall = evaluate(challenger, holdout_2026)   # AUROC 0.75, O/E 0.82
+
+      if chall.auroc > champ.auroc:
+          promote(challenger)
+    language: python
+    options:
+      - The models are evaluated on different data, and the gate ignores calibration (O/E 0.82 is outside a sensible band)
+      - Nothing; the challenger has a higher AUROC
+      - AUROC should be replaced with accuracy
+      - The challenger should be evaluated on the 2024 holdout only
+    answer: 0
+    explanation: |
+      AUROCs from different holdouts aren't comparable, since case mix and base rates differ,
+      so the "improvement" may be just a different test population. Evaluate both on the same
+      recent data. The gate also ignores calibration: an O/E of 0.82 means the model
+      predicts about 20% more readmissions than occur (over-prediction), which is exactly what broke the
+      threshold in the hook. Option D fixes comparability but tests on old data, not the
+      population the model will actually see.
+
+  - type: text
+    title: Rollback and incident response
+    text: |
+      Assume every release might need to be undone, and make undoing it boring:
+
+      - **Keep the previous version deployable**: its image digest in the registry, its model
+        version registered, ideally a previous revision still available for instant traffic
+        switching (Container Apps revisions, App Service slots, Kubernetes rollbacks).
+      - **Have a kill switch**: a config flag that makes the service return "score
+        unavailable" instead of a score. When scores may be wrong, **no score is safer than a
+        wrong score**, and the EHR must display that state clearly.
+      - **Write and rehearse a runbook.** Who can decide to roll back? The on-call engineer
+        should be able to do it without waiting for a meeting.
+
+      After containment, treat it as a **clinical incident**: which patients were scored by
+      the bad version (the audit log answers this), was any care affected, notify the clinical
+      owner and patient-safety or quality teams per local policy, then write a blameless
+      post-incident review with fixes to the gates or monitoring. For a regulated device there
+      may also be reporting obligations.
+
+  - type: quiz
+    question: |
+      A new model version is producing implausibly high risk scores at all sites. It's 3 p.m.
+      and care managers are building tomorrow's call list. What's the right first action?
+    options:
+      - Debug the new model in production to find the root cause before changing anything
+      - Retrain quickly on corrected data and redeploy tonight
+      - Roll back to the previous version (or hit the kill switch), tell the care team, then investigate
+      - Lower the threshold so fewer patients are flagged
+    answer: 2
+    explanation: |
+      Contain first, investigate second. Rolling back restores a validated state in minutes,
+      and the care team needs to know which lists to trust. Debugging in place (A) keeps
+      patients exposed to wrong scores. A rushed retrain (B) ships an unvalidated model under
+      pressure. Moving the threshold (D) patches the symptom while the probabilities, which
+      clinicians may also see, stay wrong.
+
+  - type: text
+    title: When to retrain
+    text: |
+      Retraining triggers come in three kinds:
+
+      - **Scheduled**: for example annually, or after each ICD-10-CM code-set update, with a
+        full validation. Predictable, easy to resource.
+      - **Performance-based**: mature-label metrics cross a pre-set floor, such as O/E outside
+        0.85–1.15 for two consecutive quarters, or sensitivity at the threshold below target.
+      - **Change-based**: a known event, such as a new hospital joining, an EHR migration, or a
+        new care program.
+
+      Note what's **not** on the list: input drift by itself. Drift triggers **investigation**
+      (Lesson 5). Often the fix is upstream (a unit conversion, a code list), or a simple
+      **recalibration** (refitting the intercept or a calibration map on recent data, as in
+      Module 02) solves a miscalibration without replacing the whole model.
+
+      Every retrain goes through the same gates as any challenger. "Automatic retraining" in a
+      clinical setting should mean automatic **candidate generation**, not automatic
+      deployment.
+
+  - type: text
+    title: Why retraining can make things worse
+    text: |
+      - **Immature labels.** Patients discharged in the last 30 days, or the last 90 if
+        readmissions elsewhere arrive via claims, don't have final labels yet. If they're in the
+        training set as "not readmitted", the new model learns an artificially low risk.
+      - **Feedback loops.** If care managers intervened on high-risk patients and it worked,
+        their outcomes now look low-risk (Lesson 5). Retraining teaches the model to stop
+        flagging the kind of patients it helped.
+      - **Upstream artifacts.** Retraining after the hypertension coding change bakes the
+        artifact into the model instead of fixing it.
+      - **Transient periods.** Data from an unusual period (a pandemic surge, an EHR
+        go-live month) may not represent the future.
+      - **Changed behaviour for users.** A new calibration shifts how many patients cross the
+        threshold, and staff workflows and trust are tied to the old behaviour, as in the hook.
+      - **Silent subgroup regressions.** Overall AUROC rises while performance drops for a
+        small site or subgroup.
+
+  - type: quiz
+    question: |
+      A team retrains on all stroke discharges up to yesterday, using `readmission_30d` from
+      the feature table. The new model's predicted risk is systematically lower than the old
+      one's. What's the most likely cause?
+    options:
+      - The population has become healthier
+      - Label smoothing in the training loop
+      - The new model is overfitting
+      - Recent discharges have incomplete outcome windows and claims, so they're labelled 0 too often
+    answer: 3
+    explanation: |
+      Patients discharged recently haven't had 30 days to be readmitted, and readmissions to
+      other hospitals may not have arrived as claims yet. Labelling them 0 biases the training
+      base rate downwards. Exclude patients whose outcome window plus data latency hasn't
+      closed. It's the same recorded-time logic as the Module 01 leakage lesson, applied to
+      labels.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our vendor says their model retrains itself every month on our data. Should we be
+      comfortable with that?"
+    model_answer: |
+      Not by default. I'd want to know what "retrains" means. Automatically producing a
+      candidate every month is fine; automatically deploying it without gates isn't. I'd ask
+      how they handle label maturity, since recent readmission labels are incomplete for a
+      month or more; whether they account for our own interventions changing outcomes; how
+      they'd detect an upstream coding or unit change before training on it; and what the
+      promotion gates are: same-data comparison with the current version, calibration, and
+      subgroup and per-site checks. I'd want each version registered and traceable, with
+      release notes, the ability to pin or roll back a version, and notice before changes so
+      our clinical owner can sign off. If the product is FDA-regulated, I'd ask whether
+      monthly updates are covered by an authorized Predetermined Change Control Plan, because
+      otherwise significant changes may need a new submission. And I'd keep our own
+      independent monitoring rather than relying on theirs.
+    key_points:
+      - Distinguishes automatic candidate generation from automatic deployment
+      - Asks about label maturity, intervention feedback, and upstream data changes
+      - Requires pre-specified gates (same-data comparison, calibration, subgroups and sites)
+      - Requires versioning, traceability, rollback, and clinical sign-off
+      - Raises the regulatory angle (PCCP) and keeps independent monitoring
+
+  - type: text
+    title: When software is a medical device
+    text: |
+      In the US, software can be a **medical device** when it's intended for the diagnosis,
+      cure, mitigation, treatment, or prevention of disease. Software that does this on its
+      own, without being part of a hardware device, is called **Software as a Medical Device
+      (SaMD)**, a term from the International Medical Device Regulators Forum (IMDRF).
+
+      What decides it is the **intended use**: what you claim the software does, for whom,
+      and how its output is used. It isn't the algorithm or its complexity. The same logistic
+      regression could be:
+
+      - a care-management prioritization tool (possibly not a device, or non-device CDS), or
+      - a tool that tells clinicians whether to discharge a patient (much more likely a device).
+
+      The 21st Century Cures Act (2016) excluded several software functions from the device
+      definition, including administrative support, general wellness, and certain clinical
+      decision support. That's why many hospital-built models aren't regulated by FDA, and why
+      you have to write down the intended use and not drift from it.
+
+  - type: image
+    image: m03-06-device-decision.png
+    caption: |
+      A simplified decision flow. Is there a medical purpose? If so, does the software meet
+      all four non-device CDS criteria? If not, it's a device software function, and the
+      pathway depends mainly on risk and whether a predicate exists. Real determinations
+      involve regulatory affairs staff and sometimes FDA itself.
+
+  - type: text
+    title: The four non-device CDS criteria
+    text: |
+      Under section 520(o)(1)(E) of the FD&C Act (added by the Cures Act), and as interpreted
+      in FDA's Clinical Decision Support Software guidance (first issued in September 2022,
+      revised in January 2026), CDS software is **not** a device only if it meets **all four**
+      criteria:
+
+      - **1.** It does **not** acquire, process, or analyze a medical image, a signal from an
+        in vitro diagnostic, or a pattern or signal from a signal acquisition system (like an
+        ECG or continuous monitor).
+      - **2.** It displays, analyzes, or prints medical information about a patient or other
+        medical information (such as clinical guidelines or peer-reviewed studies).
+      - **3.** It supports or provides recommendations to a **health care professional** about
+        prevention, diagnosis, or treatment. It's meant to inform their decision, not replace
+        it, and it isn't aimed at patients or caregivers.
+      - **4.** It enables the professional to **independently review the basis** for the
+        recommendation, so they don't rely primarily on it. In practice that means explaining
+        the inputs, the logic or model, and its validation in plain language.
+
+      The 2022 guidance read criterion 3 narrowly: a single, specific output (including a risk
+      score) was treated as a device function, and time-critical alerts were excluded, citing
+      automation bias. FDA loosened this in the January 2026 revision (the version current when
+      this lesson was checked, dated January 29, 2026): it now says it intends to exercise
+      **enforcement discretion** for a single recommendation when only one option is clinically
+      appropriate and the software otherwise meets the criteria. Time-critical use still fails
+      criterion 4, and image, signal, or pattern analysis still fails criterion 1. Guidance is
+      nonbinding and can change again, so check the **current** version on FDA's site and
+      involve regulatory experts rather than relying on a summary.
+
+  - type: quiz
+    question: |
+      Which tool most clearly **fails** the non-device CDS criteria?
+    options:
+      - A dashboard showing a physician a patient's labs next to the relevant guideline, with the rules it applies
+      - Software that analyzes a continuous ECG signal and alerts nurses to possible atrial fibrillation
+      - A readmission-risk worklist for care managers that lists the contributing factors and links to the model's validation summary
+      - A tool that retrieves peer-reviewed studies relevant to a patient's diagnosis
+    answer: 1
+    explanation: |
+      Analyzing a physiological signal from a signal acquisition system fails criterion 1, so
+      the ECG tool is a device function however transparent it is. The dashboard (A) and
+      literature tool (D) are classic non-device CDS. The worklist (C) is designed with
+      criteria 3 and 4 in mind: it's for professionals, and it exposes the basis for the
+      score. Whether a risk score fully satisfies criterion 3 depends on the details and on
+      FDA's current reading, which is why these calls go to regulatory staff.
+
+  - type: text
+    title: Device pathways, briefly
+    text: |
+      Devices are classified by risk (Class I, II, III), and the premarket pathway follows:
+
+      - **510(k)**: show **substantial equivalence** to a legally marketed **predicate**
+        device. The most common route, and how the large majority of AI-enabled devices on
+        FDA's public list reached the market.
+      - **De Novo**: for novel devices with **no predicate** that are low to moderate risk.
+        A granted De Novo creates a new classification that later devices can use as a
+        predicate. A stroke example: Viz.ai's software for flagging suspected large-vessel
+        occlusion on CT angiography went through De Novo in 2018, and later triage tools used
+        that classification.
+      - **PMA** (premarket approval): for **Class III**, high-risk devices. It requires
+        valid scientific evidence of safety and effectiveness, usually including clinical
+        studies, and is the most demanding route.
+
+      Alongside the pathway, device makers operate a **quality management system**, design
+      controls, cybersecurity documentation, and postmarket surveillance. FDA, Health Canada,
+      and the UK MHRA also published ten **Good Machine Learning Practice** guiding principles
+      (2021) that read like a checklist for this whole module.
+
+  - type: quiz
+    question: |
+      A startup builds a new kind of AI tool, a moderate-risk device, and no similar device
+      has ever been authorized. Which pathway is most likely?
+    options:
+      - De Novo, because there's no predicate and the risk is low to moderate
+      - 510(k), because it's the most common
+      - PMA, because all AI devices are Class III
+      - None; AI software is exempt under the Cures Act
+    answer: 0
+    explanation: |
+      510(k) needs a predicate to be substantially equivalent to, which doesn't exist here.
+      De Novo is designed for exactly this case and, once granted, becomes a predicate for
+      followers. AI devices are not automatically Class III (C). The Cures Act exempts certain
+      software functions, not AI in general (D).
+
+  - type: text
+    title: Locked vs adaptive, and PCCPs
+    text: |
+      A **locked** algorithm gives the same output for the same input every time. It changes
+      only through a deliberate, versioned update. An **adaptive** (continuously learning)
+      algorithm changes its behaviour in the field as it sees new data. FDA's 2019 discussion
+      paper on modifications to AI/ML-based SaMD framed this distinction. In practice, the great
+      majority of authorized AI devices are locked, and our registry-and-gates workflow is a
+      locked workflow.
+
+      Traditionally, a significant change to a cleared device, such as retraining that affects
+      performance, could require a new submission. A **Predetermined Change Control Plan
+      (PCCP)** changes that. Authorized as part of the original submission (FDA's final
+      guidance on PCCPs for AI-enabled device software functions was issued in
+      December 2024 and reissued in August 2025), it has three parts:
+
+      - **Description of modifications**: exactly which changes are planned (for example,
+        retraining on new data from the same sources, or recalibrating for a new site).
+      - **Modification protocol**: how each change will be developed, validated, and
+        rolled out, including data management, performance criteria, and update procedures.
+      - **Impact assessment**: the benefits and risks of the changes and how the risks are
+        mitigated.
+
+      Changes made **as described** in an authorized PCCP don't need a new submission.
+      Changes outside it still do. PCCPs can be used with 510(k), De Novo, and PMA.
+
+  - type: quiz
+    question: |
+      A device maker has an authorized PCCP covering "quarterly retraining on new data from
+      the same EHR sources, meeting stated AUROC and calibration criteria". They now want to
+      add a new input feature from a wearable. What applies?
+    options:
+      - It's covered, since the PCCP allows retraining
+      - Wearables are general wellness, so no review is needed
+      - PCCPs allow any change as long as performance improves
+      - It's outside the described modifications, so it likely needs a new submission (or an updated PCCP)
+    answer: 3
+    explanation: |
+      A PCCP covers only the modifications it describes, made according to its protocol.
+      Adding a new input from a new data source changes the device's inputs and possibly its
+      risk profile, well beyond "retraining on the same sources". Performance improving (C)
+      doesn't widen the plan's scope, and the device's intended use is what matters, not
+      the consumer category of the data source (B).
+
+  - type: text
+    title: Document the intended use
+    text: |
+      Whether or not your model is regulated, write down its **intended use** and keep it
+      with the registry entry:
+
+      - **Purpose and users**: "Prioritize adult ischemic stroke discharges for post-discharge
+        care-management outreach. Used by care managers, not for discharge decisions."
+      - **Population**: the Module 01 cohort definition (18+, index `I63%` encounter, the
+        coverage requirement), and the sites it was validated at.
+      - **Inputs and outputs**: features, units, allowed missingness, the probability and
+        tiers, and the thresholds.
+      - **Performance and limits**: validation results by subgroup and site, known failure
+        modes, and what it must not be used for.
+      - **Change control**: who owns it, how it's monitored, the gates, and how it's rolled
+        back.
+
+      This is a **model card** plus change control. It answers the regulatory question, the
+      security review (Lesson 4), and the clinician who asks "can I use this for my patients?"
+      Reporting guidelines like **TRIPOD+AI** (2024) are a good checklist for the validation
+      part.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Is our 30-day readmission model a medical device? How would you figure that out?"
+    model_answer: |
+      I'd start from the intended use, not the algorithm, because that's what determines
+      status. If it's used by care managers to prioritize outreach and allocate follow-up
+      resources, it's arguably closer to care-management or administrative support than to
+      diagnosis or treatment, and it may also satisfy the non-device CDS criteria: it doesn't
+      analyze images or physiological signals, it uses patient information, it's for
+      professionals, and we can show the basis for each score, meaning the inputs,
+      contributing factors, and a validation summary. If instead it were used to decide
+      whether to discharge a patient, or shown as a time-critical directive, or aimed at
+      patients directly, it would look much more like a device function. So I'd write down
+      the intended use precisely, design the interface so the basis is reviewable, and take
+      it to our regulatory or compliance team, since FDA's reading of the CDS criteria has
+      shifted over time and it's their call to make. Separately, even if it's not a device,
+      I'd apply the same discipline: validation, monitoring, change control, and rollback,
+      because patient safety doesn't depend on the regulatory label.
+    key_points:
+      - Intended use, not the algorithm, determines device status
+      - Walks through the four non-device CDS criteria for this specific use
+      - Shows how a different use (discharge decisions, time-critical, patient-facing) changes the answer
+      - Documents intended use, designs for reviewable basis, and involves regulatory experts
+      - Applies lifecycle discipline regardless of regulatory status
+
+  - type: laptop
+    title: Registry, promotion gate, and rollback runbook
+    repo_path: 03-production-ml/src/readmission_service/promote.py
+    task: |
+      With a local MLflow tracking server (`mlflow server` or a local `mlruns/` folder),
+      register two versions of the Lesson 1 model, for example one trained on the earlier half
+      of the cohort by `index_date` and one on all mature data. Write `promote.py` with a
+      `passes_gate(champion_metrics, challenger_metrics)` function that compares both models
+      on the **same** most recent holdout: AUROC margin, O/E band, per-subgroup AUROC margin,
+      and flag rate at the threshold. Unit-test it with hand-built metric dicts. Then write
+      `03-production-ml/docs/intended_use.md` (the five headings above) and a short
+      `docs/rollback.md` runbook: who decides, the exact command to move the alias back or
+      redeploy the previous image digest, and who to notify.
+
+  - type: recap
+    points:
+      - A **registry** stores versions with lineage; aliases like `@champion` make promotion and rollback one-line changes
+      - Pin a concrete model version per deployment so every replica runs the same model
+      - Compare challengers on the **same data** against **pre-specified gates**, including calibration and subgroups
+      - Rollback and a kill switch are rehearsed operations; no score beats a wrong score
+      - Drift triggers investigation; scheduled, performance, and change events trigger retraining candidates
+      - Retraining can hurt through **immature labels**, **feedback loops**, upstream artifacts, and user-visible calibration shifts
+      - "**Intended use** decides device status; non-device CDS must meet **all four** criteria"
+      - "510(k) needs a predicate, De Novo is for novel low–moderate risk, PMA is for Class III"
+      - Authorized AI devices are mostly **locked**; a **PCCP** (FDA final guidance, Dec 2024, updated Aug 2025) pre-authorizes described changes only

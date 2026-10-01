@@ -1,0 +1,534 @@
+id: m01-03-window-functions
+title: Window functions for longitudinal data
+summary: ROW_NUMBER, RANK, DENSE_RANK, LAG/LEAD, frames, and QUALIFY, applied to index events,
+  readmissions, and gaps in coverage.
+minutes: 28
+status: authored
+why_it_matters: Longitudinal patient data is ordered in time, and window functions are how you reason
+  about "first", "previous", "next", and "within N days". They're a favourite interview topic because
+  the bugs (ties, frames, filter order) are subtle.
+objectives:
+  - Pick ROW_NUMBER vs RANK vs DENSE_RANK when ties exist, with deterministic tie-breakers
+  - Use PARTITION BY patient and ORDER BY time to select first events
+  - Compute readmissions and coverage gaps with LAG/LEAD
+  - Use ROWS and RANGE frames for rolling counts
+  - Explain logical query order, why WHERE cannot see window results, and what QUALIFY does
+key_points:
+  - Always add a deterministic tie-breaker (ORDER BY date, id)
+  - Readmission = next inpatient start minus this discharge ≤ 30 days
+  - Coverage gaps via LAG(coverage_end)
+  - Windows run after WHERE/GROUP BY/HAVING, so filters before a window change what it sees
+  - The default frame with ORDER BY is RANGE … CURRENT ROW, which includes ties
+tags: [sql, window, interview]
+steps:
+  - type: text
+    title: '"Give me each patient''s first stroke"'
+    text: |
+      It's a classic SQL screen question. The first instinct is:
+
+      `SELECT patient_id, MIN(index_date) FROM qualifying_strokes GROUP BY patient_id`
+
+      That gives you the **date**, but you also need the **encounter_id** to anchor features and
+      outcomes. So people join the MIN back to the table on `patient_id` and date, and any patient
+      with two stroke encounters on that date now has **two** "first" strokes.
+
+      GROUP BY collapses rows. What you want is to keep every row, **number** them within each
+      patient in time order, and pick number 1. That's a window function, and most of the
+      longitudinal logic in this course is built from a handful of them.
+
+  - type: text
+    title: Anatomy of a window
+    text: |
+      `function() OVER (PARTITION BY ... ORDER BY ... frame)`
+
+      - **PARTITION BY patient_id**: compute separately for each patient, like GROUP BY but
+        without collapsing rows.
+      - **ORDER BY encounter_start**: put each patient's rows in time order.
+      - **Frame** (optional): which rows around the current one an aggregate can see, for example
+        "the last 365 days".
+
+      The families you'll use constantly:
+
+      - **Ranking**: `ROW_NUMBER`, `RANK`, `DENSE_RANK` for first, last, and nth events.
+      - **Offset**: `LAG`, `LEAD` for the previous or next event, gaps, and readmissions.
+      - **Aggregate over a frame**: `SUM`, `COUNT`, `MAX` for running totals and rolling
+        counts.
+
+      Every output row keeps its identity. That's the whole difference from GROUP BY.
+
+  - type: code
+    title: How the repo picks the index stroke
+    text: "From `sql/01_index_stroke_cohort.sql`:"
+    code: |
+      stroke_candidates AS (
+          SELECT
+              patient_id,
+              encounter_id,
+              index_date,
+              ROW_NUMBER() OVER (
+                  PARTITION BY patient_id
+                  ORDER BY index_date, encounter_id
+              ) AS stroke_number
+          FROM qualifying_strokes
+      ),
+      first_stroke AS (
+          SELECT patient_id, encounter_id, index_date
+          FROM stroke_candidates
+          WHERE stroke_number = 1
+      )
+    after: |
+      Two details matter. `ROW_NUMBER` guarantees exactly one row numbered 1 per patient. And
+      `encounter_id` is a **tie-breaker**: if two stroke encounters share an `index_date`, the
+      lower ID wins, the same way on every run.
+
+  - type: image
+    image: m01-03-ranking-timeline.png
+    caption: |
+      One patient: an ED visit and an inpatient admission for stroke on the same day (a common
+      ED-to-admission pattern), then a later stroke. Ordered by date alone, RANK and DENSE_RANK
+      give both same-day encounters rank 1.
+
+  - type: quiz
+    question: |
+      Someone replaces `ROW_NUMBER()` with `RANK()` in `stroke_candidates` and keeps
+      `WHERE stroke_number = 1`. What happens?
+    options:
+      - Nothing, because the tie-breaker on encounter_id prevents ties
+      - Patients with same-day stroke encounters get two index rows, so the cohort has duplicate patients
+      - Patients with same-day strokes are dropped
+      - The query errors because RANK needs DENSE_RANK
+    answer: 0
+    explanation: |
+      Read the ORDER BY carefully. It's `index_date, encounter_id`, and encounter IDs are unique,
+      so there are no ties left and RANK equals ROW_NUMBER. The duplicate-patient answer is what
+      happens if you use RANK and **drop** the tie-breaker. Then same-day encounters both get rank
+      1, and every feature join downstream fans out. The lesson: ties depend on the full ORDER BY,
+      not the function name.
+
+  - type: text
+    title: Tie-breakers are about reproducibility
+    text: |
+      Without `encounter_id` in the ORDER BY, `ROW_NUMBER` still returns one row per patient, but
+      **which** one is arbitrary. DuckDB runs in parallel, so the choice can change between runs
+      or versions. Your cohort, your features, and your model's AUROC can then change with no code
+      change.
+
+      Rules:
+
+      - Always finish the ORDER BY with a **unique key**: `ORDER BY index_date, encounter_id`.
+      - Prefer a **clinically meaningful** tie-breaker when one exists. With real timestamps, order
+        by `encounter_start` (not the date), then by a setting priority (ED before inpatient), then
+        the ID.
+      - Know what the tie means. An ED visit and an admission on the same day are usually **one
+        episode of care**. Picking either anchors time zero on the same day, but features like
+        "length of stay" depend on which one you picked.
+
+      Same pattern in `02_features.sql`: the latest LDL uses `ORDER BY l.lab_date DESC, l.lab_id DESC`.
+
+  - type: quiz
+    question: |
+      You want **every** encounter on each patient's **second distinct** stroke date (to study
+      recurrence). Which filter works when the first date can have ties?
+    options:
+      - "`ROW_NUMBER() OVER (PARTITION BY patient_id ORDER BY index_date) = 2`"
+      - "`RANK() OVER (PARTITION BY patient_id ORDER BY index_date) = 2`"
+      - "`DENSE_RANK() OVER (PARTITION BY patient_id ORDER BY index_date) = 2`"
+      - "`LAG(index_date) OVER (PARTITION BY patient_id ORDER BY index_date) IS NOT NULL`"
+    answer: 2
+    explanation: |
+      DENSE_RANK numbers **distinct values** without gaps: 1, 1, 2. RANK leaves a gap after ties
+      (1, 1, 3), so `RANK = 2` finds nothing for the patient in the figure. ROW_NUMBER = 2 could
+      return the second encounter of the _first_ day. The LAG option returns every stroke except
+      the first row, including the same-day duplicate and any third stroke.
+
+  - type: text
+    title: Logical query order, and why WHERE can't see windows
+    text: |
+      SQL runs a query in a **logical order** that's different from how it's written:
+
+      1. `FROM` / `JOIN`
+      2. `WHERE`
+      3. `GROUP BY`, then `HAVING`
+      4. **Window functions**
+      5. `QUALIFY` (DuckDB, Snowflake, BigQuery)
+      6. `SELECT` list, then `DISTINCT`
+      7. `ORDER BY`, then `LIMIT`
+
+      Three consequences:
+
+      - A window value doesn't exist yet when WHERE runs, so `WHERE ROW_NUMBER() OVER (...) = 1` is
+        an error. Hence the repo's two-step CTE pattern.
+      - **WHERE filters change what the window sees.** Filter to inpatient first, and LEAD finds the
+        next _inpatient_ stay.
+      - Windows run **after** GROUP BY, so they can wrap aggregates. For example,
+        `COUNT(*) * 1.0 / SUM(COUNT(*)) OVER ()` gives each encounter type's share in one query.
+
+  - type: quiz
+    question: What happens when you run this in DuckDB?
+    code: |
+      SELECT patient_id, encounter_id, index_date
+      FROM qualifying_strokes
+      WHERE ROW_NUMBER() OVER (
+          PARTITION BY patient_id
+          ORDER BY index_date, encounter_id
+      ) = 1;
+    options:
+      - It returns each patient's first stroke
+      - It returns only the first row of the whole table
+      - It returns every row, since the window is ignored in WHERE
+      - It fails, because window functions aren't allowed in WHERE
+    answer: 3
+    explanation: |
+      WHERE is evaluated before windows are computed, so the database rejects it. The fix is
+      either a CTE or subquery that computes the row number and then filters on it (the repo's
+      approach, which is portable), or DuckDB's `QUALIFY`, which exists for exactly this.
+
+  - type: code
+    title: QUALIFY collapses the two steps
+    code: |
+      WITH qualifying_strokes AS (
+          SELECT DISTINCT e.patient_id, e.encounter_id,
+                 CAST(e.encounter_start AS DATE) AS index_date
+          FROM encounters e
+          JOIN diagnoses d USING (encounter_id)
+          WHERE d.icd10_code LIKE 'I63%'
+            AND e.encounter_type IN ('ED', 'inpatient')
+      )
+      SELECT patient_id, encounter_id, index_date
+      FROM qualifying_strokes
+      QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY patient_id
+          ORDER BY index_date, encounter_id
+      ) = 1;
+    after: |
+      QUALIFY is to window functions what HAVING is to aggregates: a filter that runs after they
+      are computed. It works in DuckDB, Snowflake, BigQuery, and Databricks, but **not
+      PostgreSQL**. In an interview, mention both forms. The repo uses the CTE form so its SQL
+      stays close to Postgres-compatible.
+
+  - type: quiz
+    question: |
+      The repo ranks strokes **first** and applies the coverage check **after** (in `eligible`).
+      What changes if you move the coverage `EXISTS` into the WHERE of `stroke_candidates`, so it
+      runs **before** ROW_NUMBER?
+    options:
+      - Nothing, because filter order doesn't matter in SQL
+      - Patients whose first stroke lacked a 365-day lookback enter the cohort through a later, recurrent stroke
+      - Fewer patients qualify, because the filter runs twice
+      - It errors, because EXISTS can't be combined with window functions
+    answer: 1
+    explanation: |
+      WHERE runs before the window, so the ranking only sees eligible strokes. A patient whose
+      first observed stroke failed the lookback would have a _second_ stroke promoted to number 1,
+      mixing recurrent strokes into a first-stroke cohort. The repo's order means "the first
+      observed stroke, if eligible". That's also why the first observed stroke isn't
+      automatically an eligible index event (exercise question 2), and why m01-04 treats it as a
+      design decision.
+
+  - type: text
+    title: LAG and LEAD look at neighbours
+    text: |
+      `LAG(x)` returns `x` from the **previous** row in the window and `LEAD(x)` from the **next**,
+      or NULL at the edge (`LAG(x, 1, default)` changes that). They turn "compare each event with
+      the one before or after it" into a single pass, with no self-join.
+
+      A standard **30-day readmission**, per admission, reads directly as a LEAD:
+
+      _next inpatient start − this discharge ≤ 30 days_
+
+      Order matters in two places:
+
+      - Filter to **inpatient** encounters **before** the window, so "next" means the next
+        admission and not an outpatient follow-up.
+      - Anchor on **discharge** (`encounter_end`), which is the CMS-style definition. The repo's
+        `02_features.sql` anchors on the index **admission** date instead, partly because
+        `encounter_end` is sometimes missing. m01-05 discusses that trade-off.
+
+  - type: code
+    title: Readmission with LEAD
+    code: |
+      WITH stays AS (
+          SELECT patient_id, encounter_id, encounter_start, encounter_end,
+                 LEAD(encounter_start) OVER (
+                     PARTITION BY patient_id
+                     ORDER BY encounter_start, encounter_id
+                 ) AS next_start
+          FROM encounters
+          WHERE encounter_type = 'inpatient'
+      ),
+      gaps AS (
+          SELECT *,
+                 date_diff('day', CAST(encounter_end AS DATE),
+                                  CAST(next_start AS DATE)) AS days_to_next
+          FROM stays
+      )
+      SELECT *,
+             CASE WHEN encounter_end IS NULL THEN NULL      -- unknown discharge
+                  WHEN days_to_next <= 30    THEN 1
+                  ELSE 0 END AS readmit_30d
+      FROM gaps;
+    after: |
+      Each edge case gets an explicit branch. Missing discharge gives NULL, which is to be decided
+      and counted, not silently turned into 0. A negative `days_to_next` means the next stay
+      **started before this one ended**, which usually means a transfer. Real pipelines merge
+      those into one episode before computing readmission.
+
+  - type: quiz
+    question: |
+      A colleague computes `LEAD(encounter_start)` over **all** encounters in a CTE, then filters
+      the outer query to `encounter_type = 'inpatient'`. What does `next_start` now mean?
+    options:
+      - The next inpatient admission, same as before
+      - The next encounter of any type, often an outpatient follow-up, so "readmissions" are inflated
+      - NULL for every row, because the outer filter removes the window
+      - The previous inpatient admission
+    answer: 1
+    explanation: |
+      The window ran inside the CTE, over all encounter types. The outer WHERE only removes rows
+      afterwards and doesn't recompute LEAD. So an inpatient stay followed a week later by a
+      routine clinic visit looks like a 7-day readmission. Filter first, then window.
+
+  - type: quiz
+    question: |
+      For each patient's **last** inpatient stay, `next_start` is NULL, so the CASE above
+      returns 0. A stay discharged on 2025-12-19 gets `readmit_30d = 0`. What's the problem?
+    options:
+      - None, because NULL next_start proves no readmission
+      - The CASE should return 1 when next_start is NULL
+      - date_diff fails on NULL, so the row errors
+      - The data ends before 30 days of follow-up, so this 0 is really unknown (censored)
+    answer: 3
+    explanation: |
+      The synthetic encounters start no later than 15 December 2025 (the latest discharge is 19
+      December), and coverage can end even earlier. A patient discharged on 19 December has only
+      days of follow-up, so "no readmission seen" isn't
+      "no readmission". Require 30 days of observable follow-up (data and coverage) or exclude
+      these stays. It's the same **censoring** idea that Module 04's survival analysis formalizes.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Given an `encounters` table, how would you compute a 30-day all-cause readmission rate?
+      Walk me through the edge cases."
+    model_answer: |
+      I'd first pin down the unit. Is the denominator every inpatient discharge, which is how
+      hospital-wide measures work, or only an index event like the first stroke admission? Then,
+      in SQL, I'd filter to inpatient encounters first and use LEAD over encounter_start,
+      partitioned by patient and ordered by start with the encounter ID as a tie-breaker. The
+      readmission is the next admission starting within 30 days of this stay's discharge. The
+      edge cases are where the work is. Overlapping or back-to-back stays are usually transfers,
+      so I'd merge them into one episode first. Missing discharge times need a decision:
+      impute from claims or the last event, exclude and report, or run a sensitivity analysis.
+      Stays near the end of data or coverage don't have 30 days of follow-up, so they're censored
+      and should be excluded rather than counted as zeros. Patients who die in the window can't be
+      readmitted, which is a competing risk. And I'd exclude planned readmissions, like scheduled
+      procedures, if I can identify them. Finally, readmissions to other hospitals are invisible
+      in a single EHR, which is one argument for claims data.
+    key_points:
+      - Define the denominator (all discharges vs an index admission)
+      - Filter to inpatient before LEAD, anchor on discharge, and use a deterministic ORDER BY
+      - Merge transfers/overlapping stays and decide how to handle missing discharge times
+      - Require 30 days of observable follow-up, since end-of-data stays are censored, not zeros
+      - Mention death as a competing risk, planned readmissions, and out-of-system readmissions
+
+  - type: text
+    title: Coverage gaps with LAG
+    text: |
+      Now apply LAG to enrollment. About 12% of patients in the repo have **two coverage rows**
+      separated by a 30–180 day gap. Order each patient's rows by `coverage_start` and compare each
+      start with the **previous row's end**:
+
+      _gap days = coverage_start − LAG(coverage_end) − 1_
+
+      Watch the **−1**. Coverage dates are inclusive, so a period ending 31 May followed by one
+      starting 1 June is **continuous**: its date difference is 1, but zero days are uncovered.
+      The generator uses this convention: the first period ends the day before the gap starts.
+
+      Why it matters: the cohort requires coverage from `index_date − 365 days` to `index_date`. If
+      a gap falls inside that window, the "prior year" features were measured over less than a year,
+      so "no diagnosis" may just mean "not insured then". That's the bias exercise question 3 asks
+      about, and m01-04 designs around it.
+
+  - type: image
+    image: m01-03-coverage-gap.png
+    caption: |
+      LAG pairs each coverage row with the previous row's end date. When a gap falls inside the
+      365-day lookback, part of the "prior year" was never observed.
+
+  - type: code
+    title: Finding the gaps
+    code: |
+      WITH ordered AS (
+          SELECT patient_id, coverage_id, coverage_start, coverage_end,
+                 LAG(coverage_end) OVER (
+                     PARTITION BY patient_id
+                     ORDER BY coverage_start, coverage_id
+                 ) AS prev_end
+          FROM coverage
+      )
+      SELECT patient_id,
+             prev_end,
+             coverage_start,
+             date_diff('day', CAST(prev_end AS DATE),
+                              CAST(coverage_start AS DATE)) - 1 AS gap_days
+      FROM ordered
+      WHERE prev_end IS NOT NULL
+        AND date_diff('day', CAST(prev_end AS DATE),
+                             CAST(coverage_start AS DATE)) > 1;
+    after: |
+      On the repo data, `gap_days` should fall between 30 and 180, the range the generator used.
+      That's a nice self-check. Wrap this in a view and you have a reusable gap table.
+
+  - type: quiz
+    question: |
+      Row 1 ends `2022-05-31`. Row 2 starts `2022-06-01`. The query uses
+      `WHERE date_diff('day', prev_end, coverage_start) > 0` to find gaps. What happens?
+    options:
+      - It correctly ignores this pair
+      - It flags the pair as a gap, though the patient was continuously covered
+      - It errors because the dates are adjacent
+      - It flags the pair only when the two rows have different plan types
+    answer: 1
+    explanation: |
+      `date_diff` is 1 for adjacent dates, and `1 > 0` is true, so continuous coverage is flagged
+      as interrupted. Real data is full of these seams (plan changes, renewals). With inclusive end
+      dates, a gap exists only when the difference is **greater than 1**. That's an off-by-one
+      that can wrongly exclude thousands of eligible patients.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Patients can have many coverage rows, sometimes adjacent and sometimes overlapping. How would
+      you decide whether someone was continuously enrolled for the 365 days before their index
+      date?"
+    model_answer: |
+      This is a gaps-and-islands problem. I'd sort each patient's coverage rows by start date and,
+      for each row, compute the latest end date seen so far among the previous rows. That's a
+      running `MAX(coverage_end)` over the rows before this one. Plain LAG isn't enough when
+      periods overlap, because a long earlier period can cover past a short later one. A row starts
+      a new island when its start is more than one day after that running max. Many definitions
+      allow a short gap, for example HEDIS-style rules that tolerate one gap of up to 45 days, and
+      that tolerance would go here. A running SUM of the "new island" flag gives an island ID. I
+      group by patient and island to get merged spans. The patient is eligible if one merged span
+      covers index minus 365 through the index date. Note that the repo's current EXISTS check
+      requires a single coverage row to span the whole window. That's correct on this synthetic
+      data, but in real data it would wrongly exclude someone whose plan changed mid-year with no
+      gap. So I'd merge first, then check.
+    key_points:
+      - Recognize it as gaps-and-islands, and merge spans before checking eligibility
+      - Use a running MAX of prior end dates (not only LAG) to handle overlaps
+      - Flag new islands when start > running max end + 1 day (+ any allowed gap), and SUM flags to get island IDs
+      - Check that one merged span covers index − 365 days through index
+      - Note that a single-row EXISTS check fails on adjacent plan changes
+
+  - type: text
+    title: Frames, ROWS vs RANGE
+    text: |
+      Aggregate windows accept a **frame**, the slice of the partition each row can see:
+
+      - `ROWS BETWEEN 3 PRECEDING AND CURRENT ROW` counts **rows**: the last 4 encounters,
+        however far apart.
+      - `RANGE BETWEEN INTERVAL 365 DAYS PRECEDING AND CURRENT ROW` counts **values** of the
+        ORDER BY column: everything in the last 365 days. This is what clinical "within N days"
+        logic needs. It requires a single date or timestamp ORDER BY.
+
+      The trap is the **default**. With ORDER BY and no frame, you get `RANGE BETWEEN UNBOUNDED
+      PRECEDING AND CURRENT ROW`. In RANGE mode, "current row" includes all its **peers**, meaning
+      rows with the same ORDER BY value. A running count over same-day encounters jumps by the
+      whole day at once.
+
+      Frames also matter for leakage: `CURRENT ROW` includes the event itself, so a "prior visits"
+      feature built this way counts the index visit. End the frame earlier (for example `INTERVAL 1
+      DAY PRECEDING` with date-level data) when you need strictly-before.
+
+  - type: code
+    title: Rolling 365-day ED count at every encounter
+    code: |
+      SELECT patient_id,
+             encounter_id,
+             encounter_start,
+             SUM(CASE WHEN encounter_type = 'ED' THEN 1 ELSE 0 END) OVER (
+                 PARTITION BY patient_id
+                 ORDER BY encounter_start
+                 RANGE BETWEEN INTERVAL 365 DAYS PRECEDING
+                           AND INTERVAL 1 DAY PRECEDING
+             ) AS ed_visits_prior_365d
+      FROM encounters;
+    after: |
+      For every encounter, this counts ED visits in the prior year, excluding that day. That is
+      exact here because every timestamp in this data is midnight. With real times of day, `1 DAY
+      PRECEDING` means 24 hours, not the calendar day, so order by a date column instead. A row
+      with no earlier visits in its frame gets NULL, so wrap it in `COALESCE(..., 0)`. This per-encounter
+      version is useful when every admission is a prediction point, as in the all-discharges
+      readmission model you'll meet in Module 02.
+
+  - type: quiz
+    question: |
+      A patient has encounters on Jan 1, Mar 3, and Mar 3 (two on the same day). What does this
+      return, in date order?
+    code: |
+      SELECT encounter_id,
+             COUNT(*) OVER (
+                 PARTITION BY patient_id
+                 ORDER BY CAST(encounter_start AS DATE)
+             ) AS running_n
+      FROM encounters;
+    options:
+      - 1, 2, 3
+      - 1, 3, 3
+      - 1, 2, 2
+      - 3, 3, 3
+    answer: 1
+    explanation: |
+      No frame is given, so the default is RANGE UNBOUNDED PRECEDING to CURRENT ROW. The two Mar 3
+      rows are peers, and each sees both, so each gets 3. You get 1, 2, 3 only with `ROWS BETWEEN
+      UNBOUNDED PRECEDING AND CURRENT ROW` (plus a tie-breaker in ORDER BY so the order is
+      deterministic). Getting 3, 3, 3 would need no ORDER BY at all.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Explain the difference between ROW_NUMBER, RANK, and DENSE_RANK. Which would you use to
+      pick each patient's index event, and why?"
+    model_answer: |
+      All three number rows within a partition in ORDER BY order. They only differ on ties.
+      ROW_NUMBER gives every row a unique number, breaking ties arbitrarily unless the ORDER BY is
+      unique. RANK gives tied rows the same rank and then skips, so 1, 1, 3. DENSE_RANK gives ties
+      the same rank without skipping, so 1, 1, 2. For an index event I need exactly one row per
+      patient, so I'd use ROW_NUMBER with a deterministic tie-breaker: order by the event time,
+      then a clinically meaningful priority if there is one, then a unique ID. That keeps the
+      cohort reproducible. RANK or DENSE_RANK with "= 1" can return two index events for a patient
+      with same-day encounters, which silently duplicates them in every downstream join. I'd reach
+      for DENSE_RANK when I care about distinct dates, like "encounters on the second distinct
+      stroke date". I'd use RANK when the tie itself is meaningful and I want to see it, for example
+      in a data-quality check that counts patients with tied first events.
+    key_points:
+      - The three differ only in how they handle ties (unique; 1,1,3; 1,1,2)
+      - ROW_NUMBER with a deterministic tie-breaker for exactly one index row per patient
+      - RANK/DENSE_RANK = 1 can return duplicate index rows, which fans out later joins
+      - DENSE_RANK is for distinct values (the nth distinct date), and RANK is for surfacing ties
+
+  - type: laptop
+    title: Exercise task 10 plus the ranking stretch
+    repo_path: 01-clinical-data-engineering/exercises/01_getting_started.md
+    task: |
+      Do task 10 (first stroke per patient) twice: once with the CTE pattern, once with
+      `QUALIFY`, and confirm they return identical rows.
+
+      Then do the stretch comparison. Compute ROW_NUMBER, RANK, and DENSE_RANK side by side,
+      ordered by `index_date` only, and count patients where RANK = 1 returns more than one
+      encounter. In the default data that count is 0, because the generator never puts two
+      stroke encounters on the same date, so the bug stays silent here; plant a same-day pair in
+      a scratch copy to see it. Next, run the coverage-gap query and check that `gap_days` spans 30–180. Finally,
+      save it as a view (`CREATE VIEW coverage_gaps AS ...`), which starts the "continuously
+      eligible patients" stretch task.
+
+  - type: recap
+    points:
+      - Windows keep every row; **PARTITION BY patient, ORDER BY time** is the core longitudinal move
+      - Use **ROW_NUMBER** with a unique **tie-breaker** for index events; RANK/DENSE_RANK are for ties you want to see
+      - "Logical order: FROM → WHERE → GROUP BY → HAVING → **windows** → QUALIFY → SELECT → ORDER BY"
+      - WHERE can't see window results, so use a CTE or **QUALIFY**; filters _before_ a window change what it sees
+      - "**LAG/LEAD** give gaps and readmissions: filter first, anchor on discharge, handle NULL ends and censoring"
+      - Coverage dates are inclusive, so a gap needs a date difference **> 1**; merge overlaps with gaps-and-islands
+      - The default frame with ORDER BY is **RANGE … CURRENT ROW**, which includes ties; use RANGE intervals for "within N days"

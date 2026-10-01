@@ -1,0 +1,436 @@
+id: m06-01-interop-standards
+title: "Healthcare data standards: HL7 v2, FHIR, and OMOP"
+summary: How hospital systems exchange data (HL7 v2 messages, FHIR resources and APIs, SMART on FHIR)
+  and how research data is harmonized (OMOP CDM and the SNOMED CT, LOINC, and RxNorm vocabularies).
+minutes: 28
+status: authored
+why_it_matters: Every health-system and RWE role touches at least one of these standards, and system
+  design interviews ask how a model gets its data and returns a result. Knowing that FHIR is for exchange
+  and OMOP is for analysis, and why, is table stakes.
+objectives:
+  - Read an HL7 v2 message and explain why v2 still runs hospital integration
+  - Describe core FHIR resources (Patient, Encounter, Condition, Observation, MedicationRequest), REST search, and bundles
+  - Explain SMART on FHIR, Bulk FHIR, and US Core at a high level
+  - Map the Module 01 schema onto OMOP CDM tables
+  - Distinguish concept_id, source_concept_id, and source_value, and use SNOMED CT, LOINC, and RxNorm
+key_points:
+  - HL7 v2 is pipe-delimited event messaging (ADT, ORU), everywhere inside hospitals
+  - FHIR is resource-based REST exchange; searches return Bundles; SMART on FHIR adds OAuth2 authorization
+  - FHIR for exchange, OMOP for analysis
+  - OMOP stores every clinical fact with a standard concept_id, plus the original source code
+  - Use concept_ancestor for hierarchies instead of string-matching codes
+  - ETL to a common model loses information (such as recorded time), so document and test it
+tags: [fhir, omop, hl7, standards, interview]
+steps:
+  - type: text
+    title: Three requests in one week
+    text: |
+      Your stroke readmission model from Modules 02–03 runs on the Module 01 DuckDB tables. Now it has
+      to meet the real world:
+
+      - Hospital IT: "We can send you an **HL7 ADT feed** when a patient is admitted."
+      - The EHR team: "Or pull data from our **FHIR** API, with a **SMART** app registration."
+      - A research consortium: "Convert your cohort to **OMOP** so we can run the same study at 20 sites."
+
+      These aren't three competing answers to the same question. They are three tools for three jobs.
+      This lesson gives you enough of each to hold your own in the meeting, and in the interview.
+
+  - type: text
+    title: The map
+    text: |
+      - **HL7 v2** (1980s onward): **event messages** between systems inside a hospital. "Patient
+        admitted." "Lab resulted." Pushed in real time.
+      - **FHIR** (HL7; R4, published 2018 with a 4.0.1 correction in 2019, is still the most widely
+        deployed release): **resource-based APIs** for apps, patient access, and exchange between
+        organizations. Pulled on demand, JSON over HTTPS.
+      - **OMOP CDM** (from the OHDSI community): a **relational model for analytics**. Many sources are
+        converted into one schema with standard vocabularies, so the same query runs everywhere.
+
+      Under all three sit the **terminologies**: SNOMED CT, LOINC, RxNorm, ICD-10-CM, CPT.
+
+      The one-liner to remember: **FHIR for exchange, OMOP for analysis.**
+
+  - type: text
+    title: HL7 v2 in 60 seconds
+    text: |
+      A v2 message is plain text. Each line is a **segment**, named by its first three letters:
+
+      - `MSH`: message header (sender, receiver, message type, version)
+      - `PID`: patient identification (MRN, name, birth date, sex)
+      - `PV1`: patient visit (class, location)
+      - `OBR` / `OBX`: order and **observation result**, one OBX per value
+
+      Separators: `|` between fields, `^` between components, `~` for repeats, `&` for subcomponents,
+      and `\` as the escape character.
+
+      Message types you'll hear: `ADT^A01` (admit), `ADT^A03` (discharge), `ADT^A08` (update), and
+      `ORU^R01` (observation results, meaning labs).
+
+  - type: code
+    title: A lab result message
+    language: text
+    code: |
+      MSH|^~\&|LAB|GENHOSP|EHR|GENHOSP|202403041022||ORU^R01|MSG00042|P|2.5.1
+      PID|1||MRN123456^^^GENHOSP^MR||DOE^JANE||19480512|F
+      PV1|1|I|STROKE^4B^12
+      OBR|1||LAB7781|13457-7^LDL cholesterol (calc)^LN
+      OBX|1|NM|13457-7^Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation^LN||101|mg/dL|<100|H|||F
+    after: |
+      Fields are positional. In `OBX`, field 2 is the value type (`NM` = numeric), 3 is the test code (a
+      LOINC code, marked `LN`), 5 is the value, 6 the units, 7 the reference range, 8 the abnormal flag,
+      and 11 the result status (`F` = final).
+
+  - type: quiz
+    question: In the `OBX` segment above, what is the result and how is it flagged?
+    options:
+      - 13457-7 mg/dL, final
+      - 100 mg/dL, within normal limits
+      - 101 mg/dL, but still preliminary
+      - 101 mg/dL, flagged high against a reference range of <100
+    answer: 3
+    explanation: |
+      Count the pipes: field 5 is `101`, 6 is `mg/dL`, 7 is `<100`, and 8 is `H`. `13457-7` is the LOINC
+      code identifying _which_ test, not a value. The final `F` in field 11 means the result is final,
+      not preliminary. Positional parsing is exactly why v2 interfaces break when a sender shifts a field.
+
+  - type: text
+    title: Why v2 refuses to die
+    text: |
+      Most US hospitals run hundreds of v2 interfaces: every lab, pharmacy, radiology, and bed-management
+      system talks v2 through an **interface engine** (such as Rhapsody or NextGen Connect, formerly Mirth).
+
+      - It's **real-time push**. The ADT A01 arrives seconds after admission, which is the natural
+        trigger for "score this patient now".
+      - It **works**, and replacing thousands of working interfaces has no business case.
+
+      The pain is that v2 is loose. Optional fields, local codes, and custom **Z-segments** mean every
+      interface is a bit different. The saying goes: "If you've seen one HL7 interface, you've seen one
+      HL7 interface."
+
+      For a deployed model (Module 03), v2 ADT events are often the trigger, even when the data itself
+      comes from elsewhere.
+
+  - type: text
+    title: FHIR resources
+    text: |
+      FHIR breaks health data into small, linked **resources**, each with an `id`, a type, and
+      **references** to others. The ones you'll use most:
+
+      - **Patient**: demographics and identifiers
+      - **Encounter**: a visit (class inpatient/ambulatory/emergency, period, location)
+      - **Condition**: a problem or diagnosis, coded (SNOMED CT, ICD-10-CM)
+      - **Observation**: labs, vitals, and assessments, coded with LOINC, with a value and units
+      - **MedicationRequest**: an order or prescription (RxNorm); dispensing and administration are
+        separate resources
+
+      Others appear often too: Procedure, DiagnosticReport, AllergyIntolerance.
+
+      In the US, the ONC Cures Act Final Rule requires certified EHR developers to offer standardized
+      FHIR R4 APIs (based on US Core and SMART), which is why FHIR endpoints are now widely available
+      rather than an exotic option.
+
+  - type: code
+    title: An LDL result as a FHIR Observation
+    language: json
+    code: |
+      {
+        "resourceType": "Observation",
+        "id": "ldl-042",
+        "status": "final",
+        "category": [{"coding": [{
+          "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+          "code": "laboratory"}]}],
+        "code": {"coding": [{
+          "system": "http://loinc.org", "code": "13457-7",
+          "display": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation"}],
+          "text": "LDL (calc)"},
+        "subject": {"reference": "Patient/p-000042"},
+        "encounter": {"reference": "Encounter/e-000917"},
+        "effectiveDateTime": "2024-03-04T08:15:00-05:00",
+        "valueQuantity": {"value": 101, "unit": "mg/dL",
+                          "system": "http://unitsofmeasure.org", "code": "mg/dL"}
+      }
+    after: |
+      Same fact as the v2 OBX, but self-describing: code systems are explicit URIs, the patient and
+      encounter are **references**, and units are coded in UCUM. The `system` values are identifiers,
+      not web pages to fetch.
+
+  - type: quiz
+    question: |
+      Which element tells a receiving system this is an LDL result, whatever the sending hospital calls
+      the test locally?
+    options:
+      - "id: ldl-042"
+      - "code.text: LDL (calc)"
+      - "code.coding with system http://loinc.org and code 13457-7"
+      - "category: laboratory"
+    answer: 2
+    explanation: |
+      The LOINC coding is the interoperable identity of the test. `code.text` is a human-readable
+      local label that varies by site, `id` is just this resource's server identifier, and `category`
+      only says it's a lab. Pipelines should key on `system` + `code`, never on display text.
+
+  - type: text
+    title: REST, search, and bundles
+    text: |
+      FHIR is RESTful. Read one resource with `GET [base]/Patient/p-000042`. Search with parameters:
+
+      `GET [base]/Observation?patient=p-000042&code=http://loinc.org|13457-7&date=ge2024-01-01&_sort=-date&_count=50`
+
+      - Token search uses `system|code`. Dates take prefixes such as `ge`, `lt`.
+      - `_include=Observation:encounter` pulls referenced resources in the same response.
+
+      Results come back as a **Bundle** (`type: searchset`) with an `entry` array and a `next` link
+      for paging. Bundles are also used to submit many resources at once (`type: transaction`).
+
+      For population-scale extraction there's **Bulk FHIR** (`$export`): an asynchronous job that
+      writes **NDJSON** files, one resource per line, per resource type. That's the right tool for
+      training data.
+
+  - type: quiz
+    question: |
+      You need five years of LDL results for 200,000 patients to retrain a model. What's the best FHIR
+      approach?
+    options:
+      - A Bulk FHIR $export job, with backend-services authorization
+      - Loop over patients, calling Observation search for each
+      - A SMART app launched from the EHR for each patient
+      - Subscribe to the HL7 v2 ORU feed and wait five years
+    answer: 0
+    explanation: |
+      `$export` is designed for population-level extraction. It runs asynchronously and returns NDJSON
+      files, without hammering the server with hundreds of thousands of paged searches. Per-patient
+      searches are fine for a single patient's chart in real time, but painfully slow and rate-limited at
+      scale. SMART user launches are for interactive apps.
+
+  - type: text
+    title: SMART on FHIR and US Core
+    text: |
+      **SMART on FHIR** is the authorization and launch layer, built on **OAuth 2.0** and OpenID Connect.
+
+      - **EHR launch**: a clinician opens your app _inside_ the EHR, and it receives the current patient
+        and encounter context.
+      - **Standalone launch**: a patient or clinician opens the app directly and signs in.
+      - **Scopes** limit access, such as `patient/Observation.read` (SMART v1) or
+        `patient/Observation.rs` (v2).
+      - **Backend services**: system-to-system access with a signed JWT and no user. This is typical
+        for a scoring service or bulk export.
+
+      **US Core** is the implementation guide that constrains base FHIR for the US: required and
+      "must support" elements, and profiles like US Core Patient (with race and ethnicity extensions).
+      Base FHIR is very flexible. US Core is what makes two vendors' APIs look alike.
+
+      A related standard, **CDS Hooks**, lets the EHR call your service at workflow moments (such as
+      opening a chart) and show the response as a card.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your stroke readmission model needs to score patients at admission and show the result to the care
+      team in the EHR. How does data get in and out?"
+    model_answer: |
+      I'd separate trigger, data, and write-back. The trigger is the admit event: either an HL7 v2 ADT^A01
+      through the interface engine or a FHIR subscription, whichever the hospital supports reliably. On
+      the trigger, a backend service authorized through SMART backend services pulls the needed
+      inputs through FHIR: Patient for age, Condition for prior AF, diabetes, and hypertension,
+      Encounter history for prior utilization, and Observation for the latest LDL, restricted to data
+      recorded before the admission time. The model runs in the service from Module 03. The result goes
+      back as something clinicians see in workflow: a CDS Hooks card, a flowsheet value or RiskAssessment
+      resource, or a worklist. The main risk is training–serving skew. If the model was trained on
+      warehouse or OMOP data, features computed from FHIR must match those definitions, so I'd validate
+      them on a shadow run and compare distributions before go-live. I'd also plan for monitoring,
+      downtime behavior, and audit logging, since this touches PHI.
+    key_points:
+      - Separates the trigger (ADT or subscription), data retrieval, and write-back
+      - Uses FHIR resources with appropriate authorization such as SMART backend services
+      - Restricts inputs to data available at prediction time
+      - Returns results into clinical workflow, via CDS Hooks, flowsheets, or worklists
+      - Flags training–serving skew between warehouse or OMOP features and FHIR features, and validates with a shadow run
+
+  - type: text
+    title: OMOP CDM
+    text: |
+      The **OMOP Common Data Model** (maintained by OHDSI; v5.4 is still widely deployed and v5.5 is the
+      newest release) is a person-centric relational schema. Every clinical fact becomes a row in a **domain table**, coded with a **standard
+      concept**.
+
+      Why people go to the trouble:
+
+      - **Network studies**: a single SQL or R package runs unchanged at dozens of sites. Data stays
+        local, and only aggregate results are shared.
+      - **Shared tooling**: ATLAS for cohort definitions, the HADES R packages for analytics, and the
+        Data Quality Dashboard for checks.
+      - **One vocabulary**: ICD-9, ICD-10, Read, and local codes all map to the same standard concepts.
+
+      OMOP is to real-world data roughly what SDTM is to trial data (lesson m04-06): a common model, so
+      tools and reviewers don't start from scratch.
+
+  - type: text
+    title: The core tables
+    text: |
+      - **person**: `person_id`, `gender_concept_id`, `year_of_birth`, `race_concept_id`, `ethnicity_concept_id`
+      - **observation_period**: spans when a person's data is **expected to be captured**. This is the
+        denominator, like Module 01's `coverage` table.
+      - **visit_occurrence**: encounters, with `visit_concept_id` (9201 inpatient, 9202 outpatient,
+        9203 emergency room), start and end dates
+      - **condition_occurrence**: diagnoses (standard: SNOMED CT)
+      - **drug_exposure**: prescriptions, dispensings, and administrations (standard: RxNorm)
+      - **measurement**: labs and vitals with `value_as_number` and `unit_concept_id` (standard: LOINC)
+      - **procedure_occurrence**, **observation** (a catch-all), **death**, and **cost**
+
+      Every event table has `person_id` and usually `visit_occurrence_id`, so joins look familiar.
+
+  - type: image
+    image: m06-01-omop-mapping.png
+    caption: |
+      How the Module 01 tables map onto OMOP. Most are one-to-one at the table level. The real work is
+      in the codes: ICD-10-CM diagnoses map to SNOMED CT, medication names to RxNorm, lab names to LOINC.
+      (Simplified: claims also feed visits, and zip3 goes to the location table.)
+
+  - type: text
+    title: concept_id, source_concept_id, source_value
+    text: |
+      Each OMOP event row keeps **three versions** of its code. For a Module 01 diagnosis `I63.9`:
+
+      - `condition_source_value` = `'I63.9'`: the raw string, exactly as in the source
+      - `condition_source_concept_id`: the OMOP concept for **ICD-10-CM** I63.9 (a _non-standard_ concept)
+      - `condition_concept_id`: the **standard** concept it "Maps to", a SNOMED CT concept for cerebral
+        infarction
+
+      Analyses use the **standard** `concept_id`. The mapping lives in `concept_relationship`
+      (relationship "Maps to"). Hierarchies live in **`concept_ancestor`**, so "ischemic stroke and all
+      its descendants" is one join, whatever source vocabulary each site used.
+
+      A `concept_id` of **0** means "unmapped". Always count those rows, because they are silent data loss.
+
+  - type: code
+    title: The stroke index event in OMOP
+    text: "The OMOP version of Module 01's `qualifying_strokes` CTE (DuckDB; `$stroke_concept` is a parameter):"
+    code: |
+      SELECT co.person_id,
+             MIN(co.condition_start_date) AS index_date
+      FROM condition_occurrence co
+      JOIN concept_ancestor ca
+        ON ca.descendant_concept_id = co.condition_concept_id
+      JOIN visit_occurrence vo
+        ON vo.visit_occurrence_id = co.visit_occurrence_id
+      WHERE ca.ancestor_concept_id = $stroke_concept
+        AND vo.visit_concept_id IN (9201, 9203)   -- inpatient, emergency room
+      GROUP BY co.person_id
+    after: |
+      `concept_ancestor` includes each concept as its own ancestor (zero levels of separation), so the
+      parent concept itself is matched too. You'd still add the age and `observation_period` checks from
+      the Module 01 cohort.
+
+  - type: quiz
+    question: |
+      A colleague rewrites the filter as `WHERE co.condition_source_value LIKE 'I63%'`. It works at your
+      site. Why is it a bad idea for a network study?
+    options:
+      - LIKE is slower than a join in DuckDB
+      - Other sites may record strokes in ICD-9, SNOMED, or local codes, so their strokes are silently missed
+      - source_value is always NULL in OMOP
+      - It would include hemorrhagic strokes
+    answer: 1
+    explanation: |
+      Source values are site-specific by design. The standard concept plus `concept_ancestor` is what
+      makes one query portable across sites with different source vocabularies. The query wouldn't fail;
+      it would return fewer patients at some sites, which is worse, because nobody notices. I63 is
+      ischemic (cerebral infarction), so hemorrhagic strokes aren't the issue.
+
+  - type: text
+    title: The vocabularies
+    text: |
+      - **SNOMED CT**: a large clinical terminology with a deep hierarchy (a concept can have several
+        parents). OMOP's standard for conditions. Licensed, and free to use in the US through NLM.
+      - **LOINC** (Regenstrief): identifies **lab tests and observations**. Each code is defined by
+        component, property, timing, specimen system, scale, and method, so "LDL, calculated" and "LDL,
+        direct" are different codes.
+      - **RxNorm** (NLM): normalized names for **clinical drugs**, as ingredient + strength + dose form,
+        linking to NDCs and brand names. OMOP's standard for drugs.
+      - **ICD-10-CM** and **CPT/HCPCS**: billing classifications. ICD-10-CM is mapped to SNOMED for
+        conditions in OMOP. For procedures, CPT4 and HCPCS codes are themselves standard concepts,
+        alongside SNOMED procedures.
+      - **UCUM**: units, such as `mg/dL`.
+
+      In OMOP you download these, pre-mapped, from **Athena** (a few, such as CPT4, need an extra
+      licensing step to get their names).
+
+  - type: quiz
+    question: |
+      Module 01's `labs` row has `test_name = 'LDL'`, `result_value = 101`, and `unit = 'mg/dL'`. What's the
+      correct OMOP load?
+    options:
+      - measurement_concept_id = 'LDL' and value_as_number = 101
+      - An observation row with value_as_string = '101 mg/dL'
+      - measurement_concept_id = the LOINC LDL concept, measurement_source_value = 'LDL', value_as_number = 101, unit_concept_id = the UCUM mg/dL concept
+      - measurement_concept_id = 0, since 'LDL' isn't a LOINC code
+    answer: 2
+    explanation: |
+      Map the local name to a standard LOINC concept, and keep the raw name in `measurement_source_value`.
+      Store the number as a number and the unit as a concept. Concept IDs are integers, not strings.
+      Numeric labs belong in `measurement`, not `observation`. A 0 means you gave up on the mapping. Note
+      that "LDL" is ambiguous between calculated and direct LDL, which is a real question for the data
+      owner.
+
+  - type: text
+    title: What the ETL quietly changes
+    text: |
+      Mapping Module 01 to OMOP forces decisions, and each one is a place bias can creep in:
+
+      - `birth_date` → `year_of_birth` (plus month and day). `sex` → `gender_concept_id` (8507 male,
+        8532 female). `race_ethnicity` must be split into separate race and ethnicity concepts.
+      - `coverage` → `observation_period`: the two-period patients need gaps preserved, not merged.
+      - `encounters` with a missing `encounter_end` still need a `visit_end_date`, so you choose a
+        convention and document it.
+      - `diagnoses`: the late timestamps become `condition_start_date`. **OMOP has no standard
+        "recorded time"** for most events, so the leakage protection from lesson m01-05 can be lost.
+      - `medications` without strength map only to an RxNorm **ingredient**.
+
+      Common models make studies portable. They don't make them correct.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our health system is converting its EHR warehouse to OMOP. What could go wrong for the ML models
+      we train on it?"
+    model_answer: |
+      A few things, roughly in order of how often they bite. Mapping loss: codes that don't map end up
+      with concept_id 0 and silently drop out of cohorts and features, so I'd track unmapped rates by
+      table and by top source codes. Granularity loss: mapping to standard concepts can collapse
+      distinctions, like LDL direct vs calculated or a drug strength. Time semantics: OMOP stores clinical
+      dates, not when data became available, so features can leak unless we keep recorded timestamps in
+      an extension table. Denominators: observation_period logic decides who is "at risk", and small
+      changes shift incidence rates. Visit logic: ED-to-inpatient stays may merge or split, which changes
+      readmission labels. Versioning: vocabulary and ETL versions change results, so the model's training
+      snapshot should record both. Finally, if serving uses FHIR while training uses OMOP, the feature
+      definitions can diverge, which is training–serving skew. I'd use the Data Quality Dashboard,
+      compare cohort counts and label rates before and after conversion, and retrain or recalibrate as needed.
+    key_points:
+      - Unmapped codes (concept_id 0) and loss of granularity
+      - Loss of recorded or available time, which creates leakage risk
+      - observation_period and visit logic change denominators and labels
+      - Vocabulary and ETL version drift, recorded with model snapshots
+      - Training–serving skew with FHIR, and validation with DQD and before/after comparisons
+
+  - type: laptop
+    title: Map Module 01 to OMOP
+    repo_path: 06-technical-labs/omop/
+    task: |
+      Create `06-technical-labs/omop/etl_m01_to_omop.sql` that builds `person`, `observation_period`,
+      `visit_occurrence`, and `measurement` from the Module 01 DuckDB tables. Use a small hand-made lookup
+      table for labs (LOINC 2160-0 creatinine, 13457-7 LDL calculated, 4548-4 HbA1c, 718-7 hemoglobin; use
+      the codes in `measurement_source_value` and a placeholder integer for concept IDs if you don't have
+      Athena downloaded). Add a pytest that asserts every measurement row has a non-null
+      `value_as_number` or a documented reason, and that every event date falls inside an
+      observation_period.
+
+  - type: recap
+    points:
+      - "**HL7 v2**: pipe-delimited event messages (ADT, ORU; segments like PID and OBX), still everywhere inside hospitals"
+      - "**FHIR**: resources (Patient, Encounter, Condition, Observation, MedicationRequest) over REST; searches return Bundles"
+      - "**SMART on FHIR** adds OAuth2 launch and scopes; **Bulk FHIR** handles population extraction; **US Core** makes vendors consistent"
+      - "**OMOP**: person-centric tables with standard concepts, built for network analytics. FHIR for exchange, OMOP for analysis"
+      - Analyse on standard `concept_id` with `concept_ancestor`; keep `source_value` and `source_concept_id` for traceability
+      - SNOMED CT for conditions, LOINC for labs, RxNorm for drugs, UCUM for units
+      - ETL to a common model loses information, such as recorded time, so measure and document it

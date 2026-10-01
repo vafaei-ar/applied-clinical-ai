@@ -1,0 +1,509 @@
+id: m02-02-pytorch-foundations
+title: "PyTorch foundations: tensors, Dataset, DataLoader, and the training loop"
+summary: A complete, minimal, correct PyTorch training loop for the readmission model, read piece by
+  piece, plus the four bugs interviewers love to plant in it.
+minutes: 25
+status: authored
+why_it_matters: PyTorch fluency is listed in most ML job posts, and "walk me through this training loop
+  and find the bug" is a common technical screen. Knowing why each line exists is what separates using
+  PyTorch from understanding it.
+objectives:
+  - Explain tensors, autograd, and nn.Module
+  - Write a Dataset for tabular features and use a DataLoader with batching and shuffling
+  - Walk through zero_grad, forward, loss, backward, and step
+  - Use logits with BCEWithLogitsLoss and apply sigmoid only for predictions
+  - Use model.train() vs model.eval() and torch.no_grad() / torch.inference_mode() correctly
+key_points:
+  - Forgetting zero_grad accumulates gradients across batches
+  - BCEWithLogitsLoss expects raw logits, so don't apply sigmoid first
+  - eval() changes dropout and batchnorm behaviour but does not turn off gradients
+  - no_grad/inference_mode turn off graph building but do not change dropout
+  - Shuffle train, not validation
+  - Collate functions pad variable-length sequences
+tags: [pytorch, interview]
+steps:
+  - type: text
+    title: The screen
+    text: |
+      A common ML engineering screen goes like this. The interviewer pastes 25 lines of PyTorch
+      and says: _"Walk me through what this does. There are two bugs."_
+
+      The bugs are almost never exotic. They are the same handful every time: gradients never
+      cleared, a sigmoid in the wrong place, the model left in training mode during validation,
+      a shuffled validation loader, or a shape mismatch.
+
+      In this lesson you'll read a complete, correct, minimal training loop for the stroke
+      readmission model, one piece at a time, then hunt down those bugs. The baselines from
+      m02-01 are the bar this model has to clear.
+
+  - type: text
+    title: Five pieces
+    text: |
+      Every supervised PyTorch program has the same five parts:
+
+      - **Data**: a `Dataset` that returns one example, and a `DataLoader` that batches and
+        shuffles them.
+      - **Model**: an `nn.Module` whose `forward` maps a batch of features to outputs.
+      - **Loss**: a function that compares outputs to labels and returns a scalar.
+      - **Optimizer**: an object that holds the parameters and updates them from their gradients.
+      - **Loop**: for each batch, clear gradients, run forward, compute the loss, run backward,
+        then step the optimizer.
+
+      Frameworks like PyTorch Lightning or Hugging Face `Trainer` wrap this loop, but they run
+      exactly these steps underneath. If you can write the raw loop, you can debug the wrapped
+      one.
+
+  - type: image
+    image: m02-02-training-step.png
+    caption: |
+      One optimization step. Backward fills each parameter's `.grad`, and step uses it. If
+      nothing clears `.grad`, the next backward adds to it.
+
+  - type: text
+    title: Tensors in one screen
+    text: |
+      A **tensor** is an n-dimensional array with three properties you check constantly:
+
+      - **shape**: a batch of 64 patients with 8 features is `[64, 8]`. Labels are `[64]`.
+      - **dtype**: features and binary labels for BCE should be `torch.float32`. Integer class
+        indices for `CrossEntropyLoss` are `torch.long`.
+      - **device**: `cpu`, `cuda`, or `mps`. Every tensor in an operation must be on the same
+        device, so the model and each batch both get `.to(device)`.
+
+      `torch.as_tensor(np_array)` shares memory with NumPy when it can. `.numpy()` goes back,
+      but only for CPU tensors that don't require gradients, which is why you see
+      `.detach().cpu().numpy()`.
+
+      Most beginner errors are shape, dtype, or device mismatches. Print `x.shape, x.dtype,
+      x.device` before anything else.
+
+  - type: code
+    title: Autograd in six lines
+    language: python
+    code: |
+      import torch
+
+      w = torch.tensor(2.0, requires_grad=True)
+      loss = (3 * w) ** 2          # loss = 9 w^2, so d(loss)/dw = 18 w = 36
+      loss.backward()
+      print(w.grad)                # tensor(36.)
+    after: |
+      With `requires_grad=True`, PyTorch records every operation on `w` in a graph during the
+      forward computation. `backward()` walks that graph in reverse and **adds** each gradient
+      into `.grad`. The graph is then freed. Parameters of an `nn.Module` have
+      `requires_grad=True` automatically.
+
+  - type: quiz
+    question: |
+      Continuing from the code above, without resetting anything, you run these lines. What is
+      printed?
+    code: |
+      loss = (3 * w) ** 2
+      loss.backward()
+      print(w.grad)
+    language: python
+    options:
+      - tensor(36.)
+      - tensor(72.)
+      - tensor(0.)
+      - An error, because the graph was freed
+    answer: 1
+    explanation: |
+      Gradients **accumulate**: the new 36 is added to the stored 36, giving 72. There is no
+      error because a fresh forward pass built a new graph. Only calling `backward()` twice on
+      the **same** graph fails. This accumulation is exactly why the training loop calls
+      `zero_grad()` every step. It is also what makes gradient accumulation (m02-03) possible on
+      purpose.
+
+  - type: code
+    title: A Dataset for the feature table
+    language: python
+    code: |
+      import torch
+      from torch.utils.data import Dataset
+
+
+      class ReadmissionDataset(Dataset):
+          """One row of stroke_features -> (features, label) tensors."""
+
+          def __init__(self, X, y):
+              # X: preprocessed float array [n, d]; y: 0/1 array [n]
+              self.X = torch.as_tensor(X, dtype=torch.float32)
+              self.y = torch.as_tensor(y, dtype=torch.float32)
+
+          def __len__(self):
+              return len(self.y)
+
+          def __getitem__(self, idx):
+              return self.X[idx], self.y[idx]
+    after: |
+      A map-style `Dataset` needs only `__len__` and `__getitem__`. Keep it simple. Do
+      imputation, missing indicators, and scaling **before** this step, using statistics fit on
+      the training split only. Reuse the fitted `SimpleImputer` and `StandardScaler` from
+      m02-01's pipeline. Networks, unlike trees, need scaled inputs and cannot take `NaN`.
+
+  - type: code
+    title: DataLoaders
+    language: python
+    code: |
+      from torch.utils.data import DataLoader
+
+      train_ds = ReadmissionDataset(X_train, y_train)
+      val_ds = ReadmissionDataset(X_val, y_val)
+
+      train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+      val_loader = DataLoader(val_ds, batch_size=256, shuffle=False)
+
+      X, y = next(iter(train_loader))
+      print(X.shape, y.shape)   # torch.Size([64, 9]) torch.Size([64])
+    after: |
+      The default collate function stacks the per-example tensors into batch tensors. The
+      feature count here is 9: 8 features plus the missing-LDL indicator. Shuffle the training
+      data so each epoch sees batches in a new order. Never shuffle validation, for the reason
+      in the bug hunt below. For large datasets, add `num_workers` and `pin_memory=True`, which
+      m02-03 discusses.
+
+  - type: quiz
+    question: |
+      `train_ds` has 1,000 rows, `batch_size=64`, and `drop_last=False` (the default). How many
+      batches per epoch, and how big is the last one?
+    options:
+      - 16 batches, the last of size 40
+      - 15 batches, all of size 64
+      - 16 batches, the last padded to 64
+      - 15 batches, with 40 rows dropped silently
+    answer: 0
+    explanation: |
+      15 full batches cover 960 rows, and the remaining 40 form a 16th, smaller batch. Nothing is
+      padded. `drop_last=True` would discard those 40 rows, which is sometimes used when a
+      layer like BatchNorm misbehaves on tiny batches. Code that assumes every batch has exactly
+      `batch_size` rows breaks on that last batch.
+
+  - type: text
+    title: When examples have different lengths
+    text: |
+      Tabular rows all have the same shape, so default collation works. Suppose instead you feed
+      the model each patient's **sequence of prior encounters**, as you might in a later
+      version of this project. One patient has 3 encounters and another has 40. The default
+      collate function can't stack those and raises an error.
+
+      The fix is a custom `collate_fn` that pads each batch to its longest sequence and returns
+      a **mask** (or the lengths) so the model can ignore the padding. Padding per batch, rather
+      than to a global maximum, keeps memory proportional to the batch's longest sequence. This
+      is how every sequence model, including the transformers behind the LLMs in Module 05,
+      receives its inputs.
+
+  - type: code
+    title: A padding collate function
+    language: python
+    code: |
+      from torch.nn.utils.rnn import pad_sequence
+
+
+      def collate_sequences(batch):
+          # batch: list of (seq [L_i, d] float tensor, label scalar tensor)
+          seqs, labels = zip(*batch)
+          lengths = torch.tensor([s.shape[0] for s in seqs])
+          padded = pad_sequence(seqs, batch_first=True, padding_value=0.0)  # [B, L_max, d]
+          mask = torch.arange(padded.shape[1])[None, :] < lengths[:, None]  # [B, L_max]
+          return padded, mask, torch.stack(labels)
+
+
+      loader = DataLoader(seq_ds, batch_size=32, shuffle=True,
+                          collate_fn=collate_sequences)
+    after: |
+      The mask is `True` for real time steps and `False` for padding. Use it in pooling
+      (average only over real steps) or pass it to attention. Forgetting the mask lets the model
+      learn from zeros that don't exist.
+
+  - type: code
+    title: The model
+    language: python
+    code: |
+      from torch import nn
+
+
+      class ReadmissionMLP(nn.Module):
+          def __init__(self, n_features: int, hidden: int = 32, p_drop: float = 0.2):
+              super().__init__()
+              self.net = nn.Sequential(
+                  nn.Linear(n_features, hidden),
+                  nn.ReLU(),
+                  nn.Dropout(p_drop),
+                  nn.Linear(hidden, 1),
+              )
+
+          def forward(self, x):                  # x: [B, n_features]
+              return self.net(x).squeeze(-1)     # logits: [B]
+    after: |
+      `nn.Module` registers every layer assigned in `__init__`, so `model.parameters()` finds
+      all weights and `model.to(device)` moves them. `forward` returns **logits**, which are
+      unbounded real numbers, not probabilities. `squeeze(-1)` turns `[B, 1]` into `[B]` so it
+      matches the label shape. For a few hundred patients this tiny network is already large
+      relative to the data, so treat it as a tooling exercise.
+
+  - type: text
+    title: Logits, sigmoid, and BCEWithLogitsLoss
+    text: |
+      For binary outcomes, use `nn.BCEWithLogitsLoss` on the raw logits. Internally it combines
+      the sigmoid and binary cross-entropy in one numerically stable expression (the log-sum-exp
+      trick). It avoids `log(0)` when a logit is very large or very negative, and it is safe
+      under mixed precision (m02-03). By contrast, `nn.BCELoss` after a separate sigmoid can
+      saturate, and it raises an error inside `torch.autocast`.
+
+      The rule:
+
+      - **Training**: `loss = loss_fn(logits, y)` with no sigmoid.
+      - **Prediction**: `probs = torch.sigmoid(logits)` only when you need probabilities.
+
+      Two details it enforces: the target must be **float** (0.0/1.0, not `long`), and it must
+      have the **same shape** as the logits. `[B, 1]` against `[B]` raises a size-mismatch
+      error. `pos_weight` can up-weight positives for imbalance. m02-04 explains why that
+      distorts calibration.
+
+  - type: quiz
+    question: "Find the bug. Training runs without errors, but the loss plateaus high and the predicted risks are squashed."
+    code: |
+      class ReadmissionMLP(nn.Module):
+          ...
+          def forward(self, x):
+              return torch.sigmoid(self.net(x).squeeze(-1))
+
+      loss_fn = nn.BCEWithLogitsLoss()
+      loss = loss_fn(model(X), y)
+    language: python
+    options:
+      - BCEWithLogitsLoss needs integer labels
+      - squeeze(-1) removes the batch dimension
+      - Sigmoid should be replaced by softmax for binary outcomes
+      - The sigmoid is applied twice, once in forward and again inside the loss
+    answer: 3
+    explanation: |
+      `BCEWithLogitsLoss` applies its own sigmoid. Feeding it probabilities in (0, 1) means the
+      effective predictions are sigmoid of a value in (0, 1), which lies between 0.5 and about
+      0.73. The model can never predict low risk, the loss can't get small, and gradients are
+      weak. It raises no error, which is why it's a favourite interview bug. Return logits from
+      `forward` and apply sigmoid only at prediction time.
+
+  - type: code
+    title: One epoch of training
+    language: python
+    code: |
+      def train_one_epoch(model, loader, loss_fn, optimizer, device):
+          model.train()                              # dropout on
+          total, n = 0.0, 0
+          for X, y in loader:
+              X, y = X.to(device), y.to(device)
+              optimizer.zero_grad()                  # 1. clear old gradients
+              logits = model(X)                      # 2. forward
+              loss = loss_fn(logits, y)              # 3. scalar loss (batch mean)
+              loss.backward()                        # 4. fill .grad for every parameter
+              optimizer.step()                       # 5. update parameters
+              total += loss.item() * len(y)          # .item(): a Python float, no graph
+              n += len(y)
+          return total / n
+
+
+      device = "cuda" if torch.cuda.is_available() else "cpu"
+      model = ReadmissionMLP(n_features=9).to(device)
+      optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-2)
+      loss_fn = nn.BCEWithLogitsLoss()
+
+  - type: text
+    title: What each line is for
+    text: |
+      - `model.train()` puts dropout and batchnorm into training behaviour. It's needed every
+        epoch, because your validation code switches the model to `eval()`.
+      - `optimizer.zero_grad()` resets `.grad`. Since PyTorch 2.0 it sets gradients to `None`
+        by default, which saves memory and a kernel launch.
+      - `loss.backward()` computes d(loss)/d(parameter) for every parameter and stores it in
+        `.grad`.
+      - `optimizer.step()` reads `.grad` and updates the weights. For AdamW that includes the
+        moment estimates and decoupled weight decay (m02-03).
+      - `loss.item()` converts to a Python number. Writing `total += loss` instead keeps every
+        batch's graph alive, and memory grows until you run out.
+      - Weighting by `len(y)` gives a correct average even when the last batch is smaller.
+
+      Order matters in one place. `zero_grad` can go anywhere before `backward`, but it must
+      come after the previous `step`.
+
+  - type: quiz
+    question: "Find the bug. The loss barely improves and swings back and forth instead of settling."
+    code: |
+      model.train()
+      for X, y in train_loader:
+          X, y = X.to(device), y.to(device)
+          logits = model(X)
+          loss = loss_fn(logits, y)
+          loss.backward()
+          optimizer.step()
+    language: python
+    options:
+      - model.train() should be inside the loop
+      - The loss should be summed, not averaged
+      - optimizer.zero_grad() is missing, so gradients from every batch keep adding up
+      - loss.backward() must come after optimizer.step()
+    answer: 2
+    explanation: |
+      Without `zero_grad()`, each `.grad` holds the sum of gradients from every batch so far.
+      Each update then follows stale history instead of the current batch. With plain SGD the
+      steps grow without bound. AdamW normalizes the step size, but its direction is still
+      dominated by old gradients, so training overshoots and swings. Calling
+      `model.train()` once before the loop is fine. Reversing `backward` and `step` would update
+      with stale gradients. Putting `zero_grad()` first in the loop body fixes it.
+
+  - type: text
+    title: "eval() and no_grad(): two different switches"
+    text: |
+      These two are confused constantly, and interviewers know it.
+
+      **`model.eval()`** changes **layer behaviour**:
+
+      - Dropout stops dropping units and passes activations through unchanged.
+      - BatchNorm uses its stored running mean and variance instead of the current batch's
+        statistics, and stops updating them.
+
+      It does **not** stop gradient tracking.
+
+      **`torch.no_grad()`** / **`torch.inference_mode()`** stop **autograd** from recording
+      the graph, which saves memory and time. They do **not** change dropout or batchnorm.
+      `inference_mode` is the stricter, slightly faster version: tensors created inside it can
+      never be used in autograd later. Use it for pure evaluation and serving.
+
+      Validation needs **both** switches: `eval()` for correct outputs, and `no_grad` or
+      `inference_mode` for efficiency.
+
+  - type: code
+    title: Evaluation
+    language: python
+    code: |
+      from sklearn.metrics import average_precision_score, roc_auc_score
+
+
+      @torch.inference_mode()
+      def predict(model, loader, device):
+          model.eval()                                  # dropout off
+          probs, labels = [], []
+          for X, y in loader:
+              logits = model(X.to(device))
+              probs.append(torch.sigmoid(logits).cpu())  # probabilities only here
+              labels.append(y)
+          return torch.cat(probs).numpy(), torch.cat(labels).numpy()
+
+
+      p_val, y_val = predict(model, val_loader, device)
+      print(roc_auc_score(y_val, p_val), average_precision_score(y_val, p_val))
+    after: |
+      Returning labels together with predictions from the same loop guarantees they line up. The
+      next training epoch calls `model.train()` again, so switching to `eval()` here is safe.
+
+  - type: quiz
+    question: "Find the bug. Validation AUROC jumps around by ±0.03 between two runs on the same checkpoint."
+    code: |
+      @torch.no_grad()
+      def predict(model, loader, device):
+          probs = []
+          for X, _ in loader:
+              probs.append(torch.sigmoid(model(X.to(device))).cpu())
+          return torch.cat(probs).numpy()
+    language: python
+    options:
+      - model.eval() is missing, so dropout is still active during validation
+      - no_grad should be inference_mode
+      - Sigmoid should not be applied during evaluation
+      - Predictions should stay on the GPU
+    answer: 0
+    explanation: |
+      Without `model.eval()`, dropout randomly zeroes units, so every evaluation of the same
+      checkpoint gives different, usually worse, predictions. With BatchNorm it would also use
+      batch statistics and overwrite the running statistics with validation data. `no_grad`
+      vs `inference_mode` only affects efficiency, and sigmoid is correct when you need
+      probabilities.
+
+  - type: quiz
+    question: "Find the bug. Training looks healthy, but validation AUROC is about 0.50 every epoch."
+    code: |
+      val_loader = DataLoader(val_ds, batch_size=256, shuffle=True)
+
+      probs = predict_probs_only(model, val_loader, device)  # returns probs, in loader order
+      val_df["risk"] = probs
+      auc = roc_auc_score(val_df["readmission_30d"], val_df["risk"])
+    language: python
+    options:
+      - batch_size is too large for validation
+      - The validation loader shuffles, so predictions no longer line up with val_df rows
+      - roc_auc_score needs hard 0/1 predictions
+      - AUROC is undefined for rare outcomes
+    answer: 1
+    explanation: |
+      With `shuffle=True`, the predictions come out in a random order, but they are assigned to
+      `val_df` in its original row order. Each risk score lands next to a random patient's label,
+      so AUROC is about 0.5. Shuffling validation adds nothing, because every row is scored
+      anyway. Use `shuffle=False`, and return labels (and patient IDs) from the same loop as the
+      predictions.
+
+  - type: think
+    interview: true
+    prompt: |
+      "What's the difference between `model.eval()` and `torch.no_grad()`? When do you need each?"
+    model_answer: |
+      They control different things. `model.eval()` sets the training flag on every submodule to
+      False, which changes how certain layers compute. Dropout becomes a no-op, and BatchNorm
+      uses its running statistics instead of batch statistics and stops updating them. It has
+      nothing to do with gradients. `torch.no_grad()` tells autograd not to record operations,
+      so no graph is built and intermediate activations aren't kept, which saves memory and
+      time. It doesn't touch dropout or batchnorm. For validation or inference I use both: eval
+      for correct, deterministic outputs, and no_grad, or better inference_mode, for efficiency.
+      A common bug is using only no_grad. The metrics then look noisy and pessimistic because
+      dropout is still active. And I remember to call `model.train()` again before the next
+      training epoch.
+    key_points:
+      - eval() changes layer behaviour (dropout off, batchnorm uses running statistics)
+      - no_grad/inference_mode disable graph construction for memory and speed
+      - Neither one implies the other
+      - Validation and inference need both, and train() must be restored afterwards
+
+  - type: think
+    interview: true
+    prompt: |
+      "Walk me through exactly what happens during `loss.backward()` and `optimizer.step()`."
+    model_answer: |
+      During the forward pass, autograd records each operation on tensors that require gradients
+      and saves whatever it needs for the backward pass, such as the inputs to a matmul or ReLU.
+      `loss.backward()` starts from the scalar loss with gradient 1 and walks that graph in
+      reverse, applying the chain rule at each node. The result is d(loss)/d(parameter), which is
+      added into each parameter's `.grad`. Adding rather than overwriting is why we zero
+      gradients each step, and it's what makes gradient accumulation possible. Afterwards the
+      graph and saved activations are freed, unless we ask to retain them. `optimizer.step()`
+      then loops over its parameter groups and updates each parameter from `.grad`. For SGD
+      that's the weight minus the learning rate times the gradient. For AdamW it updates running
+      first and second moment estimates, applies bias correction, takes a per-parameter scaled
+      step, and applies decoupled weight decay. Backward computes gradients but changes no
+      weights. Only step does.
+    key_points:
+      - Forward builds a graph and saves the tensors needed for the backward pass
+      - backward applies the chain rule in reverse from the scalar loss
+      - Gradients are accumulated into .grad, hence zero_grad
+      - step updates weights from .grad using optimizer state (for example, Adam moments)
+      - backward and step have separate roles
+
+  - type: laptop
+    title: Train the MLP against your baselines
+    repo_path: 02-pytorch-clinical-ml/src/train_mlp.py
+    task: |
+      Create `02-pytorch-clinical-ml/src/train_mlp.py`. Reuse the temporal split from
+      `baselines.py`, carve a validation set from the end of the training period, and fit the
+      imputer and scaler on training rows only. Then train `ReadmissionMLP` for 30 epochs, print
+      train loss and validation AUROC/AUPRC each epoch, and compare the final numbers with the
+      logistic regression and GBM table. Plant each of the four bugs from this lesson one at a
+      time and watch how the symptoms show up.
+
+  - type: recap
+    points:
+      - "Five pieces: Dataset/DataLoader, nn.Module, loss, optimizer, loop"
+      - Check shape, dtype, and device first. Labels for BCE are float and the same shape as the logits
+      - Autograd accumulates into .grad, so call zero_grad every step
+      - Return logits from forward, use BCEWithLogitsLoss, and apply sigmoid only for predictions
+      - eval() switches layer behaviour and no_grad/inference_mode switch off autograd. Validation needs both
+      - Shuffle training data, never validation, and return labels with predictions
+      - Custom collate functions pad variable-length sequences and return a mask

@@ -1,0 +1,431 @@
+id: m04-07-target-trial-emulation
+title: Real-world evidence and target trial emulation
+summary: Using observational data like Module 01's stroke cohort to emulate a trial, covering the
+  protocol, aligned time zero, new-user active-comparator designs, propensity scores, and negative controls.
+minutes: 28
+status: authored
+why_it_matters: Most causal questions in health systems and pharma RWE will never get a randomized
+  trial. Target trial emulation is the framework reviewers and interviewers now expect, and time-zero
+  errors are the most common way observational studies get the wrong answer.
+objectives:
+  - Specify a target trial protocol and map each component to its emulation
+  - Align eligibility, treatment assignment, and time zero, and recognize immortal time and prevalent-user bias
+  - Explain the new-user active-comparator design
+  - Describe propensity score methods (IPTW, matching) and balance diagnostics at a high level
+  - Use negative control outcomes to probe residual confounding
+key_points:
+  - Write the protocol of the trial you wish you could run, then emulate it component by component
+  - Eligibility, treatment assignment, and start of follow-up must coincide at time zero
+  - Misaligned time zero causes immortal time bias; prevalent users cause selection and adjustment bias
+  - New-user active-comparator designs reduce confounding by indication and give a natural time zero
+  - Propensity scores balance measured confounders only; check SMDs, overlap, and weights
+  - Negative control outcomes and E-values probe unmeasured confounding
+tags: [rwe, causal, cohort, interview]
+steps:
+  - type: text
+    title: A drug that looked miraculous
+    text: |
+      You run the "obvious" analysis on Module 01's stroke cohort: patients with **any statin fill in
+      the year after stroke** versus those without. Statin users have dramatically fewer recurrent
+      strokes. The effect is far bigger than the trials ever showed.
+
+      This pattern has a famous history. In the 1990s, observational studies suggested postmenopausal
+      hormone therapy cut coronary heart disease risk. The Women's Health Initiative trial found no
+      such benefit (for estrogen plus progestin, an early excess of events instead). Much of the
+      discrepancy was later traced to **design** rather than to data quality:
+      the observational studies compared mostly long-term (prevalent) users, and when the data were
+      re-analysed like a trial of new users, the results moved much closer to the WHI (Hernán et al.,
+      Epidemiology 2008).
+
+      The lesson: many big observational errors are self-inflicted at the design stage. Target
+      trial emulation is the discipline that prevents them.
+
+  - type: text
+    title: The idea in one sentence
+    text: |
+      **Before touching the data, write the protocol of the randomized trial you would run if you
+      could, the _target trial_. Then emulate each part of it with observational data**, and say
+      explicitly where the emulation falls short (Hernán & Robins, American Journal of Epidemiology 2016).
+
+      It sounds obvious. Its power is that it forces decisions that naive analyses leave implicit:
+      _who_ is eligible, _when_ follow-up starts, _what_ exactly the strategies are, and _which_ effect
+      you're estimating.
+
+      It doesn't create randomization. What it does is remove the avoidable biases, so the only
+      problem left is confounding, which you then address explicitly.
+
+  - type: text
+    title: The protocol components
+    text: |
+      For "statin initiation after ischemic stroke", the target trial protocol and its emulation:
+
+      - **Eligibility**: adults with a first ischemic stroke, no statin in the prior year, and
+        continuous coverage. _Emulation_: Module 01 cohort logic plus a washout on `medications`.
+      - **Treatment strategies**: initiate a statin within 30 days vs do not initiate.
+      - **Assignment**: randomized. _Emulation_: assume exchangeability given measured baseline covariates.
+      - **Time zero**: when eligibility is met and a strategy is assigned.
+      - **Outcome**: recurrent ischemic stroke (a later `I63%` inpatient/ED encounter); death as a competing event.
+      - **Follow-up**: from time zero until outcome, death, disenrollment, or end of data.
+      - **Causal contrast**: intention-to-treat analogue and/or per-protocol effect.
+      - **Analysis plan**: specified before looking at outcomes.
+
+  - type: quiz
+    question: |
+      Which target trial component can observational data **never** truly emulate?
+    options:
+      - Eligibility criteria
+      - Randomized assignment
+      - Time zero
+      - Outcome ascertainment
+    answer: 1
+    explanation: |
+      Eligibility, time zero, and outcomes can all be defined from the data, sometimes imperfectly.
+      Randomization cannot: it is replaced by the untestable assumption that, given the measured
+      baseline covariates, treatment is as good as random (no unmeasured confounding). That's why
+      the rest of the lesson spends so much time on confounding.
+
+  - type: text
+    title: Time zero is the whole game
+    text: |
+      In a real trial, three things happen at the same moment: the patient **is eligible**, is
+      **assigned** a strategy, and **follow-up starts**. Randomization forces this alignment.
+
+      In observational data nothing forces it, and misalignment creates bias _before_ any confounding:
+
+      - Follow-up starts **before** assignment is known → **immortal time bias** (you met it in the
+        Module 01 leakage lesson).
+      - Follow-up starts **long after** treatment began → **prevalent-user bias**.
+
+      Hernán and colleagues call these "self-inflicted injuries": they come from the analyst's design
+      choices, not from the data, and no amount of confounding adjustment repairs them.
+
+  - type: image
+    image: m04-07-time-zero.png
+    caption: |
+      Top: in a correct emulation, eligibility, assignment, and follow-up start together. Middle: follow-up
+      starts at stroke, but "user" status depends on a later fill, so users must survive the red
+      interval, which is immortal time. Bottom: prevalent users entered follow-up after years of
+      treatment, so early harms and dropouts are invisible.
+
+  - type: text
+    title: Prevalent users
+    text: |
+      Suppose you include patients who were **already** on a statin when they had their stroke.
+
+      - **Selection**: they are the people who tolerated the drug, kept filling it, and survived. Early
+        adverse effects and early non-adherers never enter your study (a "depletion of susceptibles").
+      - **Adherence is a marker of health**: people who take a preventive drug for years also exercise,
+        attend screenings, and so on. This is the **healthy adherer** effect.
+      - **Adjustment trap**: their baseline LDL and blood pressure are already _affected by the drug_.
+        Adjusting for them adjusts away part of the effect, since those covariates are mediators.
+
+      The fix is the **new-user design** (Ray, American Journal of Epidemiology 2003): restrict to
+      initiators, with a washout period of no use, and measure covariates before initiation.
+
+  - type: quiz
+    question: |
+      A study compares stroke patients already taking a statin at admission with non-users. Which
+      problem does the **new-user** design specifically fix?
+    options:
+      - Unmeasured confounding by frailty
+      - Missing LDL values
+      - Early treatment effects missing and covariates measured after treatment affected them
+      - Competing risk of death
+    answer: 2
+    explanation: |
+      Restricting to initiators puts everyone at the start of treatment, so early events count and
+      covariates are measured before the drug could change them. It does **not** remove unmeasured
+      confounding (frailty still influences who gets prescribed), and it doesn't handle competing risks,
+      which need their own methods (lesson m04-05).
+
+  - type: text
+    title: Active comparators
+    text: |
+      "Initiate vs don't initiate" has two awkward features:
+
+      - **Non-users have no natural time zero.** There's no fill date, so when does their follow-up
+        start? (Solutions exist, like grace periods with cloning, or sequential trials, but they add
+        complexity.)
+      - **Confounding by indication.** Who gets a statin differs from who doesn't in ways that also
+        predict outcomes. Very frail patients are often _not_ started, which makes the drug look
+        protective.
+
+      The **new-user active-comparator** design compares initiators of drug A with initiators of drug
+      B **for the same indication**, such as high- vs moderate-intensity statin, or apixaban vs warfarin
+      for atrial fibrillation after stroke. Both groups have a natural time zero (the first fill), and
+      both were judged by a clinician to need treatment, so they tend to be much more similar.
+
+      The trade-off is that you answer a different question: A vs B, not A vs nothing.
+
+  - type: quiz
+    question: |
+      Why does an **active comparator** make time zero easier to define?
+    options:
+      - Both groups have a treatment start date, so follow-up can begin at initiation for everyone
+      - Active comparators remove the need for eligibility criteria
+      - It allows including prevalent users
+      - It guarantees no unmeasured confounding
+    answer: 0
+    explanation: |
+      With two drugs, each patient has a first-fill date that marks eligibility, assignment, and the start
+      of follow-up at once. It reduces confounding by indication but doesn't guarantee its absence.
+      You still need new users and a washout, not prevalent users.
+
+  - type: code
+    title: New users of statins after stroke (DuckDB)
+    text: "Built on Module 01's `index_stroke_cohort` and `medications` tables:"
+    code: |
+      WITH prior_statin AS (          -- washout: any statin overlapping the prior year
+          SELECT DISTINCT c.patient_id
+          FROM index_stroke_cohort c
+          JOIN medications m
+            ON m.patient_id = c.patient_id
+           AND m.drug_class = 'statin'
+           AND CAST(m.start_date AS DATE) < c.index_date
+           AND CAST(m.end_date AS DATE) >= c.index_date - INTERVAL '365 days'
+      ),
+      first_statin AS (
+          SELECT c.patient_id, MIN(CAST(m.start_date AS DATE)) AS statin_start
+          FROM index_stroke_cohort c
+          JOIN medications m
+            ON m.patient_id = c.patient_id
+           AND m.drug_class = 'statin'
+           AND CAST(m.start_date AS DATE)
+               BETWEEN c.index_date AND c.index_date + INTERVAL '30 days'
+          GROUP BY c.patient_id
+      )
+      SELECT c.patient_id, c.index_date, f.statin_start,
+             f.statin_start IS NOT NULL AS initiated_30d
+      FROM index_stroke_cohort c
+      LEFT JOIN first_statin f USING (patient_id)
+      WHERE c.patient_id NOT IN (SELECT patient_id FROM prior_statin)
+
+  - type: quiz
+    question: |
+      The analyst takes this table, starts follow-up for **everyone at `index_date`**, and compares
+      `initiated_30d = true` with `false` in a Cox model. What's the main design flaw?
+    options:
+      - Prevalent-user bias, because the washout is too short
+      - Immortal time, because initiators had to survive stroke-free until their statin start
+      - Confounding by indication only, which propensity scores will fix
+      - None, because a 30-day window is too short to matter
+    answer: 1
+    explanation: |
+      Classification uses information from up to day 30, but follow-up starts at day 0. An initiator
+      who filled on day 25 couldn't have had an outcome before day 25 and still count as an initiator,
+      while early events pile up in the non-initiator group. Propensity scores can't fix a timing error.
+      Fixes include starting follow-up at day 30 (a landmark, as in Module 01), or keeping day 0 and
+      using **clone–censor–weight**: copy each patient into both strategies, censor a copy when it
+      deviates, and reweight for that censoring.
+
+  - type: text
+    title: Confounding, measured at baseline
+    text: |
+      With timing fixed, what remains is **confounding**: factors that affect both who initiates and
+      the outcome. After stroke, these include age, frailty, AF, diabetes, prior utilization, stroke
+      severity, and life expectancy.
+
+      Rules that matter in practice:
+
+      - Measure confounders **at or before time zero**. Adjusting for post-baseline variables (for
+        example, LDL at 3 months) can adjust away the effect or introduce bias.
+      - Pick confounders with subject-matter knowledge (a DAG helps), not by stepwise p-values.
+      - Name the ones you **can't** measure. The Module 01 data has no stroke severity (NIHSS) or
+        frailty score, which are major confounders for "who gets treated".
+
+  - type: text
+    title: Propensity scores
+    text: |
+      The **propensity score** is `P(initiate | baseline covariates)` (Rosenbaum & Rubin, Biometrika
+      1983). Patients with the same score have, on average, the same distribution of measured
+      covariates, whatever treatment they got. So one number can stand in for many confounders:
+
+      - **Matching**: pair each initiator with a non-initiator with a similar score (often on the logit
+        of the PS, within a caliper). Estimates the effect in the treated (ATT) and drops unmatched patients.
+      - **IPTW**: weight each patient by 1 / P(treatment they actually got). This creates a pseudo-population
+        where treatment is independent of measured covariates, and estimates the population effect (ATE).
+        **Stabilized** weights keep variance in check.
+      - **Overlap weights**: focus on patients for whom either choice was plausible.
+
+      The assumptions still apply: no unmeasured confounding, **positivity** (every patient had some
+      chance of each treatment), and a well-defined treatment. A PS can only balance what you measured.
+
+  - type: code
+    title: IPTW and a balance check
+    language: python
+    code: |
+      import numpy as np
+      from sklearn.linear_model import LogisticRegression
+
+      cols = ["age_at_index", "prior_af", "prior_diabetes", "prior_hypertension",
+              "ed_visits_prior_365d", "inpatient_visits_prior_365d"]
+      X, a = df[cols], df["initiated"].to_numpy()
+
+      ps = LogisticRegression(max_iter=1000).fit(X, a).predict_proba(X)[:, 1]
+      p1 = a.mean()
+      w = np.where(a == 1, p1 / ps, (1 - p1) / (1 - ps))   # stabilized ATE weights
+
+      def smd(x, a, w):
+          m1 = np.average(x[a == 1], weights=w[a == 1])
+          m0 = np.average(x[a == 0], weights=w[a == 0])
+          sd = np.sqrt((x[a == 1].var() + x[a == 0].var()) / 2)  # unweighted pooled SD
+          return (m1 - m0) / sd
+
+      balance = {c: smd(X[c].to_numpy(), a, w) for c in cols}
+      print(balance, "max weight:", w.max().round(1))
+    after: |
+      Features come from Module 01's `stroke_features` table. The outcome appears nowhere in this
+      code, on purpose: design the weights before you look at outcomes.
+
+  - type: text
+    title: Balance diagnostics
+    text: |
+      A propensity model is judged by the **balance** it achieves, not by its AUROC.
+
+      - **Standardized mean differences (SMD)** for every covariate before and after weighting or
+        matching. A common rule of thumb is |SMD| < 0.1. Show them in a "Love plot".
+      - **Overlap**: plot PS distributions by group. Regions where one group has no counterparts
+        violate positivity.
+      - **Weights**: look at the maximum and the distribution, and report the **effective sample size**.
+        A few huge weights mean a few patients are driving the answer.
+      - Don't use p-values for balance. They depend on sample size, not on how different the groups are.
+
+      A very high PS AUROC is a warning, not a win. It means the groups barely overlap.
+
+  - type: quiz
+    question: |
+      After IPTW, every SMD is below 0.05, but a handful of non-initiators have weights above 80. What
+      should you do?
+    options:
+      - Nothing, because balance is achieved
+      - Add more covariates to the PS model until the weights shrink
+      - Investigate positivity for those patients, then consider trimming, truncation, or overlap weights, and report the effective sample size
+      - Switch to p-value-based balance tests
+    answer: 2
+    explanation: |
+      Huge weights come from non-initiators whose PS was near 1: patients who "should" have gotten a
+      statin but didn't, often for unmeasured reasons such as palliative care. Good average balance can
+      hide the fact that a few people dominate the estimate. Adding covariates usually makes extreme
+      weights _worse_. Examine those patients, restrict to the region of overlap, and be transparent.
+
+  - type: text
+    title: Negative control outcomes
+    text: |
+      You can never prove there's no unmeasured confounding, but you can look for its fingerprints.
+
+      A **negative control outcome** is one the treatment can't plausibly cause, but which shares the
+      confounding structure. If statin initiators also have fewer **accidents and injuries**, the
+      "effect" is probably healthy-adherer confounding, not pharmacology. Dormuth et al. (Circulation
+      2009) found exactly this pattern for adherent statin users.
+
+      Related tools:
+
+      - **Negative control exposures**: a "treatment" with no expected effect, such as another preventive
+        drug with no stroke effect.
+      - **E-values** (VanderWeele & Ding, Annals of Internal Medicine 2017): how strong an unmeasured
+        confounder would need to be to explain away the estimate.
+      - **Benchmarking**: emulate a question where a trial exists (statins in secondary stroke
+        prevention were tested in the SPARCL trial) and check that you reproduce it.
+
+  - type: quiz
+    question: |
+      Your emulation gives HR 0.70 for recurrent stroke with statin initiation. The same design gives HR
+      0.75 for hospitalization with accidental injury. What's the best interpretation?
+    options:
+      - Statins prevent injuries, perhaps through fewer strokes causing falls
+      - The injury result is irrelevant because it's a different outcome
+      - Residual confounding (for example, healthy adherers) likely explains much of the stroke estimate too
+      - The stroke HR is confirmed, since both point the same way
+    answer: 2
+    explanation: |
+      A drug shouldn't prevent injuries. A similar "effect" on a negative control suggests the
+      initiator group is healthier in unmeasured ways, which also inflates the stroke benefit. The
+      falls story is the kind of rationalization negative controls are designed to catch. That
+      said, you'd pre-specify the control and pick one with no plausible causal path.
+
+  - type: text
+    title: Which effect, and how to analyse it
+    text: |
+      As in a trial, name the causal contrast:
+
+      - **Intention-to-treat analogue**: effect of _initiating_, regardless of later adherence. Easiest to
+        emulate: compare initiator groups as defined at time zero.
+      - **Per-protocol analogue**: effect of _initiating and staying on_ treatment. Censor patients when
+        they deviate from their strategy, and use inverse probability of censoring weights, because
+        deviation is rarely random.
+
+      Other things carry over from earlier lessons: death competes with recurrent stroke (m04-05), and
+      outcome definitions must respect recorded time (m01-05). Real claims data would also need
+      linkage to a death index. Module 01's synthetic data has no death table, which is a limitation to
+      state explicitly.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Using our health system's EHR, how would you estimate whether starting a statin after ischemic
+      stroke reduces recurrent stroke?"
+    model_answer: |
+      I'd frame it as a target trial first. Eligibility: adults with a first ischemic stroke, continuous
+      data for a year before, and no statin use in that year, so they're new users. The strategies
+      could be initiating within 30 days of discharge vs not, or, to reduce confounding by indication,
+      high- vs moderate-intensity statin as an active comparator. Time zero is where eligibility and
+      assignment coincide. With a grace period I'd use clone–censor–weight, or a landmark at day 30,
+      so there's no immortal time. Confounders measured before time zero: age, AF, diabetes, prior
+      utilization, and ideally NIHSS, frailty, and life-expectancy proxies. I'd use propensity score
+      weighting or matching, check SMDs, overlap, and extreme weights, and look at the effective
+      sample size. The outcome is recurrent stroke with death as a competing risk, so I'd report CIFs and
+      cause-specific HRs. For robustness: a negative control outcome such as accidental injury,
+      E-values, and benchmarking against SPARCL. I'd state clearly that unmeasured confounding, like
+      stroke severity, is the main residual threat.
+    key_points:
+      - Writes an explicit target trial protocol, with new-user eligibility and washout
+      - Aligns time zero with assignment, and handles grace periods without immortal time
+      - Considers an active comparator to reduce confounding by indication
+      - Uses baseline confounders with propensity score methods and checks balance and weights
+      - Handles death as a competing risk and adds negative controls or E-values
+
+  - type: think
+    interview: true
+    prompt: |
+      "Observational studies said hormone therapy prevented heart disease; the WHI trial said it didn't.
+      Does that mean observational data can't be trusted for treatment effects?"
+    model_answer: |
+      It means the design has to be right, not that the data is useless. The early observational
+      studies mostly compared current users, many of them long-term, with non-users. That misses the
+      early period after initiation, when the trial showed the excess coronary risk was concentrated,
+      and it selects healthy, adherent women. When the Nurses' Health Study data was re-analysed as a
+      series of emulated trials of new users, with ITT-like and per-protocol analyses, the estimates came
+      much closer to the WHI. Remaining differences may partly reflect age and time since menopause
+      at initiation. So the takeaway is to emulate a target trial, use new users, align time zero, and
+      treat unmeasured confounding as the residual risk. Observational data also answers questions
+      trials can't, such as longer follow-up, broader populations, and rare harms, provided the
+      design is explicit and you benchmark it where a trial exists.
+    key_points:
+      - Attributes much of the discrepancy to prevalent users and time-zero design
+      - Mentions the new-user trial-emulation reanalysis bringing results closer to the WHI
+      - Notes effect heterogeneity by age or time since menopause and by time since initiation
+      - Unmeasured confounding remains the residual threat, so benchmarking and negative controls matter
+      - Observational data is valuable for questions trials can't answer
+
+  - type: laptop
+    title: Emulate the statin trial on the Module 01 data
+    repo_path: 04-clinical-trials-survival/
+    task: |
+      Create `04-clinical-trials-survival/sql/tte_statin_new_users.sql` from the SQL above, then a Python
+      script that joins it to `stroke_features` in the Module 01 DuckDB file, sets time zero at day 30 (a
+      landmark), defines recurrent stroke as a later `I63%` ED/inpatient encounter, fits IPTW with the
+      balance check, and prints an SMD table and the effective sample size. Then rerun with follow-up from
+      day 0 and compare the two hazard ratios, to see immortal time bias with your own eyes. (The data is
+      synthetic, so don't read clinical meaning into the size of the effect. Expect very few initiators:
+      in the Module 01 database only a handful of new-user candidates start a statin within 30 days, so
+      widen the window or simulate initiation if the groups are too small to fit.)
+
+  - type: recap
+    points:
+      - Write the **target trial protocol** first, then emulate each component and state the gaps
+      - Eligibility, assignment, and follow-up start must coincide at **time zero**
+      - Follow-up before assignment is **immortal time**; including prevalent users adds **selection and mediator** bias
+      - "**New-user active-comparator** designs give a natural time zero and reduce confounding by indication"
+      - Propensity scores (matching, IPTW) balance **measured** baseline confounders; check SMDs, overlap, and weights
+      - "**Negative control outcomes**, E-values, and trial benchmarks probe unmeasured confounding"
+      - Name the causal contrast (ITT vs per-protocol) and handle death as a competing risk

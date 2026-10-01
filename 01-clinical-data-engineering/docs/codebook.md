@@ -35,6 +35,8 @@ Some patients intentionally have two coverage periods separated by a gap.
 | `encounter_type` | outpatient, ED, or inpatient |
 | `facility_id` | Synthetic facility identifier |
 
+Inpatient encounters that follow an index stroke within 30 days are generated on purpose (about 10% to 12% of index strokes), with risk that depends on age, comorbidities, and prior utilization. They are appended after all other encounters, so they have the highest encounter IDs. They carry one chronic-condition diagnosis and one claim, and never an `I63` code.
+
 ## `diagnoses`
 
 | Column | Meaning |

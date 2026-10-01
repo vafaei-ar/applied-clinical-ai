@@ -1,0 +1,119 @@
+title: Applied Clinical AI
+description: 'A phone-first course on the technical skills behind clinical AI systems: data engineering,
+  clinical ML, production systems, trials and survival analysis, and LLM evaluation.'
+modules:
+- id: m00
+  title: 'Orientation: the clinical AI map'
+  summary: 'The big picture: how clinical AI systems are built end to end, the failure modes that recur
+    everywhere, and how the rest of the course fits together.'
+  lessons:
+  - m00-01-landscape
+  - m00-02-failure-modes
+- id: m01
+  title: Clinical data engineering
+  summary: Turn messy longitudinal EHR and claims data into a correct, tested, analysis-ready cohort.
+    Uses the synthetic stroke dataset in 01-clinical-data-engineering/.
+  lessons:
+  - m01-01-data-sources
+  - m01-02-sql-core
+  - m01-03-window-functions
+  - m01-04-cohort-design
+  - m01-05-temporal-leakage
+  - m01-06-data-quality
+  - m01-07-scale-and-tools
+- id: m09
+  title: Missing data and imputation in clinical data
+  summary: Why clinical data is missing, what that does to models, and how to handle it defensibly in
+    analysis and in deployment. Assumes you have used imputation before.
+  lessons:
+  - m09-01-mechanisms
+  - m09-02-imputation-methods
+  - m09-03-deployment-sensitivity
+- id: m02
+  title: Clinical machine learning with PyTorch
+  summary: Frame clinical prediction correctly, train reproducibly with PyTorch, and evaluate the way
+    clinicians and regulators need.
+  lessons:
+  - m02-01-problem-framing
+  - m02-02-pytorch-foundations
+  - m02-03-training-well
+  - m02-04-metrics-imbalance
+  - m02-05-calibration
+  - m02-06-subgroups-shift
+  - m02-07-experiment-tracking
+- id: m08
+  title: Statistics essentials for clinical AI
+  summary: 'The statistics that clinical AI work and interviews lean on: uncertainty on model performance,
+    multiplicity, sample size, and Bayesian thinking. Pitched at researchers who already know the basics
+    and need the clinical-evidence framing.'
+  lessons:
+  - m08-01-uncertainty-bootstrap
+  - m08-02-testing-multiplicity
+  - m08-03-sample-size-power
+  - m08-04-bayesian-basics
+- id: m10
+  title: Medical imaging AI in practice
+  summary: 'The clinical, regulatory, and deployment side of imaging AI for people who already understand
+    the models: data and labels, evaluation, FDA pathways, and privacy-preserving training.'
+  lessons:
+  - m10-01-data-and-labels
+  - m10-02-evaluation
+  - m10-03-regulation-deployment
+  - m10-04-federated-foundation
+- id: m03
+  title: Production ML systems
+  summary: Take a clinical model from notebook to a tested, containerized, monitored service, and know
+    the regulatory context.
+  lessons:
+  - m03-01-package-and-test
+  - m03-02-serving-api
+  - m03-03-docker-ci
+  - m03-04-cloud-deploy
+  - m03-05-monitoring-drift
+  - m03-06-lifecycle-regulation
+- id: m04
+  title: Clinical trials and survival analysis
+  summary: Understand trial design and estimands, analyse time-to-event data correctly, and know the CDISC
+    standards used in industry.
+  lessons:
+  - m04-01-trial-anatomy
+  - m04-02-estimands
+  - m04-03-censoring-km
+  - m04-04-cox-model
+  - m04-05-competing-risks-eval
+  - m04-06-cdisc
+  - m04-07-target-trial-emulation
+- id: m11
+  title: Clinical NLP and clinical notes
+  summary: 'Working with free-text notes: de-identification, information extraction, ontologies, and how
+    to evaluate NLP that feeds clinical decisions.'
+  lessons:
+  - m11-01-notes-and-deid
+  - m11-02-extraction
+  - m11-03-evaluation-and-use
+- id: m05
+  title: Evaluating clinical LLM systems
+  summary: 'Build and judge LLM and RAG systems for clinical use: retrieval, grounding, factuality, robustness,
+    safety, cost, and agents.'
+  lessons:
+  - m05-01-llm-systems
+  - m05-02-rag
+  - m05-03-retrieval-eval
+  - m05-04-generation-eval
+  - m05-05-robustness-safety
+  - m05-06-agents-eval
+- id: m06
+  title: Standards, privacy, and platform labs
+  summary: Healthcare interoperability standards, privacy law, and short mental models for Spark, Terraform,
+    and Kubernetes.
+  lessons:
+  - m06-01-interop-standards
+  - m06-02-privacy-governance
+  - m06-03-platform-labs
+- id: m07
+  title: 'Putting it together: design and interviews'
+  summary: End-to-end system design case studies and how to present your work, pulling every module together.
+  lessons:
+  - m07-01-design-early-warning
+  - m07-02-design-rag-assistant
+  - m07-03-telling-your-story

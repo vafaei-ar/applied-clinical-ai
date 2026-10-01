@@ -1,0 +1,479 @@
+id: m04-01-trial-anatomy
+title: Anatomy of a clinical trial
+summary: Phases, randomization, concealment and blinding, analysis populations, endpoints, non-inferiority,
+  multiplicity, and the intuition behind sample size.
+minutes: 25
+status: authored
+why_it_matters: Pharma and biotech roles assume you can read a trial protocol and spot a weak design in
+  minutes. ML roles need the same literacy, because the only convincing proof that a deployed model helps
+  patients is a prospective, often randomized, evaluation.
+objectives:
+  - Describe the trial phases and the question each one answers
+  - Explain simple, block, and stratified randomization, allocation concealment, and blinding
+  - Define ITT, mITT, per-protocol, and safety populations and when each is used
+  - Distinguish primary, secondary, surrogate, and composite endpoints
+  - Read a non-inferiority result against its margin
+  - Explain why multiplicity inflates type I error and how trials control it
+  - Reason about sample size from alpha, power, and effect size (events, for time-to-event trials)
+key_points:
+  - Randomization balances measured and unmeasured confounders in expectation
+  - Allocation concealment protects randomization; blinding protects what happens after it
+  - ITT preserves randomization; per-protocol breaks it because adherence is post-randomization
+  - Surrogates can move without the outcome moving
+  - Multiplicity inflates type I error unless the testing strategy is pre-specified
+  - Time-to-event trials are powered by the number of events, not the number of patients
+tags: [trials, design, interview]
+steps:
+  - type: text
+    title: A result you're asked to believe
+    text: |
+      An interviewer at a biotech slides an abstract across the table:
+
+      _"In 3,000 patients with recent ischemic stroke, zetagrel plus aspirin reduced recurrent
+      stroke versus aspirin alone (HR 0.76, 95% CI 0.62–0.94). In patients who completed
+      treatment, the reduction was 35%."_
+
+      Then: "Do you believe it?"
+
+      Which number is the headline? Who counts as "patients"? What happened to the ones who
+      stopped the drug? How many other endpoints were tested? A trial-literate reader asks
+      these in the first minute. This lesson gives you that checklist.
+
+  - type: text
+    title: Our running trial (synthetic)
+    text: |
+      Module 04 follows one **invented** trial. Call it SYN-STROKE (the statistics module
+      sketched it for sample-size planning). The drug _zetagrel_ doesn't exist, and all the data
+      will be simulated.
+
+      - **Population**: adults within 7 days of an ischemic stroke or high-risk TIA, with no
+        indication for anticoagulation
+      - **Arms**: zetagrel + aspirin vs placebo + aspirin, 1:1, about 1,500 per arm
+      - **Primary endpoint**: time to recurrent stroke
+      - **Key safety endpoint**: major bleeding
+      - **Follow-up**: 12 to 30 months, depending on when the patient enrolled
+
+      The design mirrors a real question. Trials such as CHANCE (NEJM 2013) and POINT (NEJM
+      2018) tested adding clopidogrel to aspirin within hours of a minor stroke or high-risk
+      TIA. Both cut recurrent stroke over 90 days. POINT also found more major bleeding
+      (0.9% vs 0.4%), whereas CHANCE saw no significant excess. The patients look like the
+      Module 01 cohort, but a trial enrolls them prospectively instead of finding them in
+      claims.
+
+  - type: text
+    title: Phases, and the question each one asks
+    text: |
+      - **Phase 1**: is it safe, and how does the body handle it? Tens of participants, often
+        healthy volunteers. Pharmacokinetics and dose escalation.
+      - **Phase 2**: does it seem to work, and at what dose? Usually hundreds of patients.
+        Often uses surrogate endpoints (for an antiplatelet, platelet inhibition or new lesions
+        on MRI).
+      - **Phase 3**: does it improve outcomes that matter, compared with standard care? Hundreds
+        to thousands of patients, and a pre-specified primary endpoint. This is the
+        **confirmatory** trial regulators rely on. SYN-STROKE is phase 3.
+      - **Phase 4**: what happens after approval? Post-marketing safety, rare adverse events,
+        and real-world use. Module 04's last lesson (target trial emulation) lives close to
+        here.
+
+      The boundaries blur in practice (phase 1/2 and 2/3 designs exist), but the ladder of
+      questions stays the same: safety, then signal, then confirmation, then surveillance.
+
+  - type: quiz
+    question: |
+      A study randomizes 240 post-stroke patients to three zetagrel doses or placebo and measures
+      platelet aggregation at 7 days. Which phase is this most likely to be?
+    options:
+      - Phase 1, because it measures a laboratory value
+      - Phase 4, because the drug is already in use
+      - Phase 3, because it's randomized and placebo-controlled
+      - Phase 2, because it compares doses on a surrogate in patients
+    answer: 3
+    explanation: |
+      Dose-ranging in patients with a biomarker endpoint is classic phase 2. Randomization and
+      placebo don't define phase 3, since many phase 2 trials have both. What defines phase 3 is
+      the confirmatory question about a clinical outcome. Phase 1 usually concerns first-in-human
+      safety and pharmacokinetics.
+
+  - type: text
+    title: Why randomize at all
+    text: |
+      In Module 01's observational cohort, patients who got a drug differ from those who didn't
+      in ways you can measure (age, AF, prior stroke) and ways you can't (frailty, adherence,
+      how worried their neurologist was).
+
+      Randomization makes treatment assignment independent of **all** of these, measured or
+      not. Groups are then comparable **in expectation**, so a difference in outcomes can be
+      attributed to the assigned treatment.
+
+      Two precise points that interviewers like:
+
+      - "In expectation" means that any single trial can still be imbalanced by chance,
+        especially a small one. That's a precision issue, not bias.
+      - Testing baseline differences with p-values in a "Table 1" of an RCT is conceptually
+        odd. You know any differences arose by chance. What matters is whether an imbalance
+        is large enough in a prognostic variable to matter, which is a reason to pre-specify
+        covariate adjustment.
+
+  - type: text
+    title: Simple, block, stratified
+    text: |
+      **Simple randomization** is a coin flip per patient. It's unpredictable, but in a small
+      trial or at a small site the arms can end up unequal (say 14 vs 6).
+
+      **Permuted block randomization** assigns within blocks. With block size 4, every 4
+      patients contain exactly 2 per arm (AABB, ABAB, and so on). Arms stay balanced over time.
+
+      **Stratified randomization** runs separate block schedules within strata of strong
+      prognostic factors, for example site × stroke severity (NIHSS 0–3 vs 4+). This keeps the
+      arms balanced on those factors.
+
+      Rules of thumb: stratify on a few strong predictors only (too many strata leave most of
+      them nearly empty), and **analyze with the stratification factors as covariates** so the
+      analysis matches the design. For many factors at once, some trials use **minimization**,
+      a dynamic method that assigns each patient to reduce overall imbalance.
+
+  - type: quiz
+    question: |
+      An open-label stroke trial uses permuted blocks of fixed size 4 at each site. A site
+      investigator notices this. What is the main risk?
+    options:
+      - The arms will become unbalanced over time
+      - The investigator can predict some upcoming assignments and steer which patients enroll
+      - The randomization is no longer stratified
+      - Nothing, because the list is generated by computer
+    answer: 1
+    explanation: |
+      After three assignments in a block of 4, the fourth is certain, and after AA the next two
+      are known. In an open-label trial the investigator sees past assignments and can delay or
+      hurry enrollment of a sicker patient. That is selection bias. Balance is exactly what
+      blocks guarantee, so that option is wrong. The fix is **random, varying block sizes**
+      (for example 4 and 6) that aren't disclosed to sites.
+
+  - type: text
+    title: Concealment and blinding protect different moments
+    text: |
+      These two ideas are often mixed up.
+
+      **Allocation concealment** protects the moment **before and during assignment**. Nobody
+      enrolling a patient can know or influence the next allocation. In practice this means a
+      central web or phone randomization system (IWRS), not sealed envelopes at the bedside.
+      Concealment is always possible.
+
+      **Blinding (masking)** protects everything **after assignment**. Patients, clinicians, and
+      outcome assessors don't know the arm, so co-interventions, dropout, and outcome
+      assessment can't differ by arm. SYN-STROKE uses a matching placebo tablet so it can be
+      double-blind.
+
+      When blinding isn't feasible (surgery vs medical therapy), a common compromise is
+      **PROBE**: prospective, randomized, open-label, **blinded endpoint** evaluation. An
+      adjudication committee that doesn't know the arm decides whether each suspected event
+      really was a stroke.
+
+  - type: quiz
+    question: |
+      A trial compares carotid stenting with medical therapy. Patients and surgeons obviously
+      know the arm. Which statement is correct?
+    options:
+      - Allocation concealment is still possible and essential, and endpoints can be adjudicated blind
+      - Without blinding, allocation concealment is pointless
+      - The trial must use per-protocol analysis to compensate
+      - Blinding can be replaced by stratified randomization
+    answer: 0
+    explanation: |
+      Concealment happens before assignment, so it's independent of whether the treatment can be
+      masked afterwards. The main remaining risk is biased outcome assessment, which a blinded
+      adjudication committee (the PROBE design) reduces. Per-protocol analysis would add bias,
+      and stratification only balances baseline factors.
+
+  - type: text
+    title: Four analysis populations
+    text: |
+      The same trial can be analyzed in several populations. Each is defined in the statistical
+      analysis plan before unblinding.
+
+      - **ITT (intention-to-treat)**: everyone randomized, analyzed in the arm they were
+        **assigned** to, whatever they actually took.
+      - **mITT (modified ITT)**: ITT minus a pre-specified group, often "randomized and took at
+        least one dose". Legitimate if exclusion can't depend on the assigned arm, and
+        suspicious otherwise. The term is used inconsistently, so always read the definition.
+      - **PP (per-protocol)**: patients who followed the protocol well enough, for example at
+        least 80% adherence and no major violations.
+      - **Safety population**: everyone who received at least one dose, analyzed by the
+        treatment they **actually received**. Harms follow exposure, not intention.
+
+  - type: code
+    title: Populations as code
+    language: python
+    text: A colleague defines the SYN-STROKE analysis sets in pandas.
+    code: |
+      import pandas as pd
+
+      df = pd.read_parquet("04-clinical-trials-survival/data/adsl.parquet")
+
+      itt = df
+      mitt = df[df["doses_taken"] >= 1]
+      pp = df[(df["adherence"] >= 0.80) & (df["major_violation"] == 0)]
+      safety = (
+          df[df["doses_taken"] >= 1]
+          .assign(arm=lambda d: d["arm_received"])
+      )
+    after: |
+      `adsl` is a nod to the CDISC ADaM subject-level dataset, which you'll meet in lesson 6.
+      In real studies these flags (`ITTFL`, `PPROTFL`, `SAFFL`) are derived once, reviewed, and
+      reused. They aren't re-derived in every notebook.
+
+  - type: quiz
+    question: In the code above, which analysis set no longer compares groups formed by randomization?
+    language: python
+    options:
+      - "`itt`"
+      - "`mitt`"
+      - "`pp`"
+      - All of them are still randomized comparisons
+    answer: 2
+    explanation: |
+      `pp` selects on adherence and protocol violations, which happen **after** randomization
+      and are tied to prognosis. The groups it compares are no longer the ones randomization
+      created. `mitt` excludes only never-dosed patients, which is close to randomized if that
+      is rare and balanced (in a blinded trial, patients can't choose based on the arm). The
+      `safety` set, analyzed by arm received, isn't a randomized comparison either, but that
+      isn't its purpose.
+
+  - type: text
+    title: Why per-protocol can mislead
+    text: |
+      The classic cautionary tale is the Coronary Drug Project (NEJM 1980). Men who took at
+      least 80% of their **placebo** had much lower 5-year mortality than men who didn't
+      (roughly 15% vs 28%). The placebo did nothing. Adherence is a marker of health behaviour,
+      socioeconomic status, and being well enough to take pills.
+
+      So a per-protocol comparison mixes the drug's effect with **who adheres**, and adherence
+      can differ by arm. If zetagrel causes bruising and frailer patients stop it, the
+      per-protocol zetagrel group is enriched with robust patients.
+
+      That's why the abstract's "35% reduction in completers" should make you wary. ITT answers
+      a clean question: what happens when you **assign** this treatment policy? Lesson 2 makes
+      this precise with estimands. ICH E9(R1) reframes the ITT vs PP debate as explicit
+      handling of intercurrent events like discontinuation.
+
+  - type: text
+    title: Endpoints, and the surrogate trap
+    text: |
+      - **Primary**: the single endpoint the trial is powered for and whose test controls the
+        type I error. One primary is the norm.
+      - **Secondary**: supportive endpoints, tested under a pre-specified multiplicity strategy.
+      - **Exploratory**: hypothesis-generating, not confirmatory.
+      - **Surrogate**: a biomarker that stands in for a clinical outcome (platelet inhibition,
+        blood pressure, LDL, silent MRI infarcts). Surrogates are faster and cheaper, but can
+        mislead. In CAST (NEJM 1989), encainide and flecainide suppressed post-MI arrhythmias,
+        the surrogate, but **increased** mortality.
+      - **Composite**: several events counted together, such as "stroke, myocardial infarction,
+        or vascular death". A composite gives more events and more power, but it's only
+        interpretable if the components matter similarly and move in the same direction.
+
+  - type: quiz
+    question: |
+      A composite of "stroke, MI, vascular death, or hospitalization for TIA" shows HR 0.80.
+      Almost all of the benefit comes from fewer TIA hospitalizations. What's the best reading?
+    options:
+      - The drug prevents strokes and death, because the composite is significant
+      - Composites are invalid and the trial should be ignored
+      - The result is driven by the least severe component, so check each component before claiming benefit on hard outcomes
+      - The HR applies equally to each component
+    answer: 2
+    explanation: |
+      A significant composite doesn't mean each component improved. When the softest, most
+      frequent component (TIA hospitalization, which is also sensitive to admission practice)
+      drives the effect, claims about stroke or death aren't supported. Good reports show each
+      component's HR next to the composite. Composites aren't invalid. They need components of
+      similar importance.
+
+  - type: text
+    title: Superiority vs non-inferiority
+    text: |
+      A **superiority** trial asks whether the new treatment is better. H0: HR = 1.
+
+      A **non-inferiority (NI)** trial asks whether it's **not unacceptably worse**. This makes
+      sense when the new drug has other advantages, such as fewer bleeds, oral dosing, or lower
+      cost. You pre-specify an NI margin, say HR 1.25, justified by how much of the standard
+      drug's proven benefit you're willing to give up. NI is shown when the **upper** bound of
+      the 95% CI is below the margin.
+
+      Two NI subtleties that come up in interviews:
+
+      - **Sloppiness helps NI.** Poor adherence, crossover, and misclassified outcomes all
+        push arms toward looking similar, which is the NI hypothesis. So ITT is not
+        automatically conservative here. ICH E9 expects both analyses, and agreement between
+        them adds confidence.
+      - **Assay sensitivity.** NI only means something if the comparator would have beaten
+        placebo in this trial. A good active comparator, dosed and followed properly, is part
+        of the design.
+
+  - type: quiz
+    question: |
+      A bleeding-sparing antiplatelet is compared with standard therapy. NI margin: HR 1.25 for
+      recurrent stroke. Result: HR 1.05 (95% CI 0.90–1.22). What can you conclude?
+    options:
+      - Non-inferiority shown, superiority not shown
+      - The new drug is worse, because HR > 1
+      - Inconclusive, because the CI includes 1
+      - Superiority shown, because the CI is below 1.25
+    answer: 0
+    explanation: |
+      The upper bound (1.22) is below the margin (1.25), so NI holds. The CI includes 1, so the
+      data don't show the new drug is better. "Inconclusive because it includes 1" is the
+      superiority lens applied to an NI question. The margin, not 1, is the NI benchmark.
+
+  - type: text
+    title: Multiplicity
+    text: |
+      Test one true null at alpha = 0.05 and you have a 5% false-positive risk. Test 10
+      independent true nulls and the chance of **at least one** false positive (the
+      family-wise error rate) is 1 − 0.95¹⁰ ≈ **40%**.
+
+      Trials multiply tests quietly: several endpoints, several doses, interim analyses,
+      subgroups, and analysis populations. Standard controls include:
+
+      - **One primary endpoint**, then **hierarchical (fixed-sequence) testing**: test
+        secondary 1 only if the primary succeeds, secondary 2 only if secondary 1 succeeds,
+        and so on. No alpha is split, but the order is binding.
+      - **Bonferroni / Holm** splitting of alpha across a family.
+      - **Graphical approaches** that pass alpha between hypotheses according to a
+        pre-specified diagram.
+      - **Alpha spending** (for example an O'Brien–Fleming-type spending function) for interim looks.
+
+      The key word in all of these is **pre-specified**. Choosing the method after you see
+      the data defeats the purpose.
+
+  - type: quiz
+    question: |
+      SYN-STROKE's primary result is null (p = 0.31). Of 12 pre-listed subgroups, patients over
+      75 show HR 0.60 (p = 0.03). The sponsor wants to promote the drug for older patients. What
+      is the right response?
+    options:
+      - Agreed, because p = 0.03 is below 0.05
+      - Agreed if the subgroup had more than 300 patients
+      - Treat it as hypothesis-generating, look at the interaction test and prior plausibility, and confirm in a new trial
+      - Ignore subgroups entirely; they never contain information
+    answer: 2
+    explanation: |
+      With 12 subgroups and a null primary, one p = 0.03 is roughly what chance produces. The
+      right test is whether the effect **differs** across age groups (an interaction test),
+      not whether one subgroup is significant on its own. ISIS-2 (Lancet 1988) famously showed
+      that aspirin appeared not to work (if anything, slightly harmful, and not significantly
+      so) in patients born under Gemini or Libra, which is a reminder of how easily subgroups
+      mislead. Subgroups can be informative, but they need
+      replication.
+
+  - type: text
+    title: Sample size is really event count
+    text: |
+      Power depends on four things: alpha, the power you want (1 − beta), the effect size you
+      need to detect, and the noise. For time-to-event trials, the information is in the
+      **events**, not the number of patients. A common approximation (Schoenfeld) for 1:1
+      allocation is:
+
+      `events = 4 (z₁₋α/₂ + z₁₋β)² / (log HR)²`
+
+      For HR 0.75, two-sided alpha 0.05 and 80% power, that's about **380 events**. SYN-STROKE
+      was designed around that figure: 3,000 patients followed 12–30 months give roughly that
+      many recurrent strokes when the aspirin-alone risk is about 10% per year.
+
+      This is why event-driven trials keep following patients until the target number of
+      events is reached. It's also why a sponsor that overestimates the event rate or the
+      effect size ends up with an underpowered trial.
+
+  - type: image
+    image: m04-01-events-needed.png
+    caption: |
+      Events needed for a two-sided alpha of 0.05 with 1:1 allocation. The curve is flat for
+      large effects and very steep for small ones. Required events scale with 1/(log HR)².
+
+  - type: quiz
+    question: |
+      The trial was planned for HR 0.75 with 90% power (about 508 events). A regulator asks
+      whether it could detect HR 0.85 with the same power. Roughly how many events would that need?
+    options:
+      - About the same, since power is already 90%
+      - About 1.7× as many
+      - About 2× as many
+      - About 3× as many
+    answer: 3
+    explanation: |
+      Events scale with 1/(log HR)². (log 0.75 / log 0.85)² = (0.288 / 0.163)² ≈ 3.1, which
+      gives about 1,590 events. The tempting "1.7×" comes from comparing effect sizes linearly
+      (a 25% vs a 15% reduction) and forgetting that the effect enters squared.
+      Detecting modest effects is very expensive.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Why is intention-to-treat the primary analysis in most superiority trials, and when would
+      you still want to see a per-protocol analysis?"
+    model_answer: |
+      ITT compares groups exactly as randomized, so it keeps the one property that makes the
+      trial causal: assignment is independent of prognosis. It answers a pragmatic question,
+      the effect of assigning a treatment policy, including real-world non-adherence. Per-protocol
+      conditions on adherence, which happens after randomization and is linked to prognosis. The
+      Coronary Drug Project showed placebo adherers doing much better than non-adherers, so PP
+      comparisons can be confounded. In a superiority trial, non-adherence usually dilutes the
+      effect toward the null, which makes ITT the conservative choice. I'd still want PP or,
+      better, a properly defined hypothetical estimand in two situations. First, in
+      non-inferiority trials, where dilution favours the NI claim, so ITT and PP should agree.
+      Second, when the question is efficacy under full adherence, for example for a patient
+      deciding whether to keep taking the drug. There I'd use methods that adjust for
+      post-randomization adherence properly, such as inverse probability weighting, rather than
+      naive exclusion. That's the estimand framework's point: name the question first.
+    key_points:
+      - ITT preserves randomization and answers the effect of assigning the treatment
+      - Adherence is post-randomization and prognostic, so naive PP is confounded
+      - In superiority trials non-adherence biases toward the null, which makes ITT conservative
+      - In non-inferiority trials dilution favours the claim, so PP and ITT should both be reported
+      - Adherence-adjusted questions deserve an explicit estimand and proper causal methods
+
+  - type: think
+    interview: true
+    prompt: |
+      "Your 30-day readmission model is deployed. The CMO asks whether it actually reduces
+      readmissions. How would you design a study to answer that?"
+    model_answer: |
+      I'd separate model accuracy from clinical impact. Good AUROC doesn't mean the alerts change
+      care. The cleanest design is a randomized trial of model-guided care against usual care.
+      Individual randomization risks contamination, because the same nurses see alerts for some
+      patients and not others and change their behaviour for everyone. So I'd randomize
+      clusters, such as wards or care-transition teams, or use a stepped-wedge design where
+      units cross over to the model at random times. That also fits a phased rollout. The
+      primary endpoint would be 30-day readmission, defined as in our pipeline, analyzed by
+      intention-to-treat at the cluster level, with alert response rates as process measures and
+      a harm endpoint such as ED visits or mortality. Sample size has to account for clustering
+      through the intraclass correlation, which can inflate it a lot. Before any of this I'd run
+      the model silently to confirm calibration on current data. I'd also pre-register the
+      analysis, because the same multiplicity and endpoint discipline applies as in a drug trial.
+    key_points:
+      - Separates predictive performance from clinical impact
+      - Proposes cluster or stepped-wedge randomization and explains contamination
+      - Defines a primary endpoint, ITT analysis, and a harm or safety endpoint
+      - Accounts for clustering (ICC) in sample size
+      - Mentions a silent run and pre-registration
+
+  - type: laptop
+    title: Simulate SYN-STROKE's randomization
+    repo_path: 04-clinical-trials-survival/src/simulate_trial.py
+    task: |
+      Create `04-clinical-trials-survival/src/simulate_trial.py`. Generate 3,000 patients with
+      age, NIHSS (0–20), prior stroke, and site (10 sites). Assign arms by **stratified permuted
+      blocks** (strata: site × NIHSS 0–3 vs 4+), with block sizes drawn at random from {4, 6}.
+      Save the allocation list and print arm counts per stratum to confirm balance. Then
+      compare with simple randomization: how unbalanced does the smallest site get? Keep the
+      seed fixed. Lesson 3 will add event times to this file.
+
+  - type: recap
+    points:
+      - "Phases ask different questions: safety, signal and dose, confirmation, then surveillance"
+      - Randomization balances measured and unmeasured factors in expectation; stratify on a few strong predictors and adjust for them
+      - "**Concealment** protects assignment; **blinding** protects everything after it (PROBE when you can't blind)"
+      - ITT is the primary superiority analysis; per-protocol selects on post-randomization behaviour
+      - Surrogates can mislead (CAST); composites need components of similar weight
+      - "Non-inferiority: compare the CI's upper bound with the margin; sloppiness favours NI"
+      - Multiplicity must be controlled by a pre-specified strategy; subgroups are hypothesis-generating
+      - Time-to-event trials are powered by **events**, and required events scale with 1/(log HR)²

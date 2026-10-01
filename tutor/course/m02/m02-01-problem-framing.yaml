@@ -1,0 +1,447 @@
+id: m02-01-problem-framing
+title: Framing a clinical prediction problem
+summary: Prediction time, horizon, label definition, base rates, actionability, strong simple baselines,
+  and splits that mimic deployment.
+minutes: 25
+status: authored
+why_it_matters: Most clinical ML projects fail at framing, not modelling. Interviewers ask "how would
+  you set this up?" long before they ask about architectures, and a crisp answer marks you as senior.
+objectives:
+  - Specify population, prediction time, horizon, and label for a clinical prediction task
+  - Relate prevalence, sensitivity, and specificity to achievable PPV
+  - Connect a prediction to an action, an owner, and a workflow with finite capacity
+  - Justify logistic regression and gradient boosting as the first baselines on tabular EHR data
+  - Choose grouped and temporal splits that mimic deployment
+key_points:
+  - A prediction without an action is trivia
+  - Prediction time decides which features are legal
+  - Label definitions (e.g., Sepsis-3 vs billing codes) change prevalence and what the model learns
+  - Low prevalence caps PPV even for a good model
+  - "Tabular data: GBMs are hard to beat, and logistic regression is often close"
+  - Split by patient and by time, and require a complete outcome window
+tags: [framing, baselines, interview]
+steps:
+  - type: text
+    title: "\"Can you build us a readmission model?\""
+    text: |
+      The stroke service director stops you in the hallway: _"We get penalized for readmissions.
+      Can you build a model that predicts them?"_
+
+      It sounds like a modelling request. It is really five design questions, and every one of
+      them changes the model you will end up with:
+
+      - **Who** is scored? (population)
+      - **When** is the score produced? (prediction time)
+      - **What** counts as the outcome, and over what window? (label and horizon)
+      - **What happens** when the score is high? (action and workflow)
+      - **How** will you know it works? (metric and validation design)
+
+      Module 02 trains and evaluates a 30-day readmission model on the stroke cohort you built
+      in Module 01. This lesson is about getting these five answers right before any code, so
+      the PyTorch lessons that follow optimize the right thing.
+
+  - type: text
+    title: Population
+    text: |
+      The population is whoever the model will score in production, not whoever is convenient
+      to query.
+
+      Your Module 01 cohort already made population choices: first ischemic stroke only
+      (`I63%` on an ED or inpatient encounter), age 18+, and 365 days of continuous coverage
+      before the index date. Each one has consequences:
+
+      - **First stroke only** means one row per patient, and it means the model has never seen
+        a recurrent-stroke admission. If production scores every stroke admission, that is a
+        population mismatch.
+      - **Continuous coverage** makes lookback features trustworthy, but it drops the
+        uninsured and newly enrolled, who may have different readmission risk.
+      - **ED or inpatient**: a patient seen only in the ED and sent home is not really at risk
+        of "readmission" in the usual sense. Many real definitions start from inpatient
+        discharges only.
+
+      Write the population down as an inclusion/exclusion list and keep it next to the
+      attrition table from Module 01.
+
+  - type: text
+    title: Prediction time decides the features
+    text: |
+      In the leakage lesson (m01-05), length of stay was **leakage**, because the prediction
+      was made at admission. Move the prediction to **discharge** and length of stay becomes a
+      perfectly legal feature, along with in-hospital labs, complications, and discharge
+      disposition.
+
+      So "when do we predict?" is not a detail. It defines the feature set:
+
+      - **At admission**: only pre-index history. Earliest, weakest signal.
+      - **At discharge**: history plus the whole index stay. Stronger signal, and it lines up
+        with the usual action (transitional care, follow-up calls, early clinic visits).
+      - **Daily during the stay**: a sequence of predictions. More useful, harder to validate.
+
+      The repo's feature table uses pre-index features only, so it is an admission-time model.
+      That is a legitimate choice, but you should make it deliberately and say why.
+
+  - type: image
+    image: m02-01-prediction-time.png
+    caption: |
+      The label is the same, but the prediction time moves. Predicting at discharge can use
+      everything from the index stay. Predicting at admission cannot. Choose the time that
+      matches when someone can act.
+
+  - type: quiz
+    question: |
+      The team switches to a **discharge-time** prediction of 30-day readmission. Which feature is
+      still **not** allowed?
+    options:
+      - Length of the index stay
+      - Discharge disposition (home, skilled nursing, rehab)
+      - Whether a follow-up clinic visit happened within 7 days of discharge
+      - Last in-hospital creatinine before discharge
+    answer: 2
+    explanation: |
+      A follow-up visit in the first week happens **after** discharge, inside the outcome
+      window, so it is leakage. It is also strongly tied to readmission, which makes it look
+      attractive. Length of stay, disposition, and in-hospital labs are all known by the moment
+      of discharge, so moving the prediction time made them legal.
+
+  - type: text
+    title: The label is a definition, not a fact
+    text: |
+      "Readmission" hides a stack of decisions:
+
+      - **All-cause or unplanned?** Planned readmissions (a scheduled procedure) are not care
+        failures. CMS-style measures try to exclude them.
+      - **Anchored where?** The repo counts 30 days from the **admission** date, because some
+        `encounter_end` values are missing. The standard measure counts from **discharge**.
+      - **Transfers**: a transfer to another hospital is not a readmission.
+      - **Visibility**: a single health system's EHR misses readmissions at other hospitals.
+        Claims data catches them. This is one reason payer and provider models differ.
+      - **Death**: a patient who dies at home on day 5 was never readmitted.
+
+      The same applies elsewhere. Sepsis defined by billing codes, by Sepsis-3 (suspected
+      infection plus an acute SOFA increase of 2 or more; Singer et al., JAMA 2016), or by the
+      CMS SEP-1 measure picks out different patients at different times. Each definition
+      changes the prevalence and what the model learns to detect.
+
+  - type: quiz
+    question: |
+      Your label is "any inpatient encounter within 30 days". A frail patient dies at home on
+      day 5 without being readmitted. What does that do to the model?
+    options:
+      - Nothing, because death is rare after stroke
+      - The patient is labeled 0, so the model can learn that the sickest profiles look "low risk"
+      - The patient is automatically excluded because they lack follow-up
+      - The patient is labeled 1 because death is a worse outcome
+    answer: 1
+    explanation: |
+      A naive label codes early death as "not readmitted". Death is a **competing event**: it
+      removes the possibility of readmission. If deaths cluster among the frailest patients,
+      the model learns a distorted risk pattern. Common fixes are a composite outcome
+      (readmission or death), excluding in-hospital deaths explicitly, or competing-risk
+      methods (Module 04). Nothing excludes these patients automatically. You have to decide.
+
+  - type: text
+    title: A cautionary tale from sepsis
+    text: |
+      When Michigan Medicine externally validated a widely deployed proprietary sepsis model
+      (Wong et al., JAMA Internal Medicine 2021), they reported an AUROC of about 0.63, far below
+      the vendor's figures. At its alert threshold, the model flagged about 18% of all
+      hospitalized patients and still missed about two thirds of sepsis cases.
+
+      Three framing lessons are packed into that result:
+
+      - The label used for development may not match the label the hospital cares about.
+      - A large share of flagged patients means a large workload, and alert fatigue follows.
+      - Performance at the developer's site says little about yours. External and temporal
+        validation are not optional (m02-06).
+
+      Keep this example ready for interviews. It shows that you know deployment failures are
+      usually framing and validation failures.
+
+  - type: text
+    title: Prevalence caps PPV
+    text: |
+      **PPV** (precision) is the fraction of flagged patients who actually have the outcome. It
+      depends on the base rate. By Bayes' rule:
+
+      PPV = sens × prev / (sens × prev + (1 − spec) × (1 − prev))
+
+      Take a decent model with sensitivity 0.80 and specificity 0.80:
+
+      - At prevalence **12%** (roughly the range reported for 30-day readmission after stroke
+        in many US cohorts), PPV ≈ **35%**. About 1 in 3 alerts is a true readmission.
+      - At prevalence **2%**, PPV ≈ **8%**. About 1 in 13 alerts is real.
+
+      Sensitivity and specificity are the same in both cases. The difference is entirely the
+      base rate. This is why a model that "looks great" can still bury a care team in false
+      alarms. Lesson m02-04 goes deeper.
+
+  - type: image
+    image: m02-01-ppv-prevalence.png
+    caption: |
+      With sensitivity fixed at 0.80, PPV climbs steeply with prevalence. Raising specificity
+      from 0.80 to 0.95 helps a lot at low prevalence, because false
+      positives come from the much larger negative group.
+
+  - type: quiz
+    question: |
+      1,000 stroke patients, 10% readmitted. Your model has sensitivity 0.80 and specificity
+      0.80. What fraction of flagged patients are true readmissions?
+    options:
+      - About 80%
+      - About 50%
+      - About 31%
+      - About 10%
+    answer: 2
+    explanation: |
+      100 positives give 80 true positives. 900 negatives with specificity 0.80 give 180 false
+      positives. PPV = 80 / (80 + 180) ≈ 31%. The tempting answer, 80%, confuses PPV with
+      sensitivity. Sensitivity is conditioned on the true outcome, while PPV is conditioned on
+      the alert.
+
+  - type: text
+    title: A prediction without an action is trivia
+    text: |
+      Before building anything, write one sentence:
+
+      _"When the score is above X, **[who]** will do **[what]**, within **[when]**, for up to
+      **[how many]** patients per day."_
+
+      For stroke readmission, a plausible version is: _the transitional-care nurse calls the top
+      10 patients discharged each day within 48 hours and books a clinic visit within 7 days._
+
+      That sentence forces the real constraints into view:
+
+      - **Capacity** sets the threshold. Ten calls a day is an alert budget, not a probability.
+      - **Timing** sets the prediction time. The nurse acts at discharge, so predict at discharge.
+      - **Effectiveness** matters. If the intervention barely changes outcomes, a perfect model
+        changes nothing.
+      - **Risk is not benefit.** The highest-risk patients (for example, with severe disability)
+        may be the least preventable. Targeting who would _benefit_ is a causal question, which
+        is where Module 04 comes in.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our stroke service wants a model to predict 30-day readmissions. Walk me through how you'd
+      scope this before touching any data."
+    model_answer: |
+      I'd start with the decision, not the model. Who acts on the score, what they do, and how
+      many patients they can handle per day. Say it's a transitional-care nurse with capacity for
+      about ten calls a day. That tells me the prediction should run at discharge, and the
+      threshold is really a top-k alert budget. Then I'd pin down the population, for example
+      adults discharged alive after an ischemic stroke admission, and whether we score every
+      admission or only the first. Next is the label: unplanned all-cause readmission within 30
+      days of discharge, excluding transfers and planned procedures, with a decision on how to
+      handle deaths, maybe a composite with death. I'd also check whether our data sees
+      readmissions at other hospitals. Then I'd estimate prevalence to set expectations for PPV,
+      and agree on success metrics up front: discrimination, calibration, PPV at the alert
+      budget, and ideally a silent prospective run. Only then would I pull data, starting with
+      logistic regression and gradient boosting baselines on a temporal split.
+    key_points:
+      - Starts from the action, the owner, and the capacity (alert budget)
+      - Chooses the prediction time to match when the action can happen
+      - Defines the population and the label precisely, including planned readmissions, transfers, and death
+      - Uses prevalence to set realistic PPV expectations
+      - Agrees on metrics and validation design (temporal, silent run) before modelling
+
+  - type: text
+    title: Start with baselines that are hard to beat
+    text: |
+      Every project needs a ladder of baselines before any neural network:
+
+      1. **Prevalence only**: predict the base rate for everyone. AUROC 0.5, AUPRC =
+         prevalence. This is the floor.
+      2. **A simple clinical score or a few-feature logistic regression**: what a clinician
+         could compute by hand.
+      3. **Penalized logistic regression** on all features.
+      4. **Gradient boosting** (XGBoost, LightGBM, or scikit-learn's
+         `HistGradientBoostingClassifier`).
+
+      Baselines tell you whether the problem has signal, catch pipeline bugs (a fancy model
+      that loses to logistic regression is often a data bug), and set the bar a complex model
+      must clear. A systematic review of clinical prediction studies (Christodoulou et al.,
+      J Clin Epidemiol 2019) found no average performance benefit of machine learning over
+      logistic regression when comparisons had low risk of bias.
+
+      Set expectations too. Readmission is hard to predict. A systematic review of readmission
+      models (Kansagara et al., JAMA 2011) found that most performed poorly: c-statistics of
+      0.55 to 0.65 for models built on administrative data, and up to roughly 0.7 to 0.8 for
+      a few built for discharge-time use.
+
+  - type: text
+    title: Why gradient boosting wins on tabular EHR data
+    text: |
+      On tables of structured features (the kind you built in `02_features.sql`), gradient
+      boosted trees are usually the model to beat. Deep networks rarely beat them.
+      Grinsztajn et al. (NeurIPS 2022) benchmarked this directly and found tree ensembles ahead
+      on typical medium-sized tabular data. The reasons map to clinical data:
+
+      - **Mixed feature types**: binary flags, counts, and skewed lab values need no scaling.
+      - **Missingness**: modern implementations route missing values natively, and a missing
+        lab is often informative.
+      - **Thresholds and interactions**: "LDL above X _and_ prior AF" is a tree split, found
+        automatically.
+      - **Irrelevant features**: trees ignore them more gracefully than MLPs.
+      - **Small data**: a few thousand rows is plenty for boosting but thin for a network.
+
+      Deep learning earns its place with **sequences** (encounter histories), **text** (notes),
+      **images**, **waveforms**, or very large datasets. You will train an MLP in m02-02 to
+      learn the tooling, but judge it against these baselines.
+
+  - type: code
+    title: Two baselines in fifteen lines
+    language: python
+    text: "Reading the Module 01 export (`results/stroke_features.csv`):"
+    code: |
+      import pandas as pd
+      from sklearn.ensemble import HistGradientBoostingClassifier
+      from sklearn.impute import SimpleImputer
+      from sklearn.linear_model import LogisticRegression
+      from sklearn.pipeline import make_pipeline
+      from sklearn.preprocessing import StandardScaler
+
+      FEATURES = ["age_at_index", "prior_af", "prior_hypertension", "prior_diabetes",
+                  "encounters_prior_365d", "ed_visits_prior_365d",
+                  "inpatient_visits_prior_365d", "latest_ldl_prior_365d"]
+
+      logreg = make_pipeline(
+          SimpleImputer(strategy="median", add_indicator=True),
+          StandardScaler(),
+          LogisticRegression(C=1.0, max_iter=1000),
+      )
+      gbm = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=200)
+    after: |
+      The imputer and scaler live **inside** the pipeline, so they are fit on training data only,
+      even inside cross-validation. The GBM needs neither step. It handles the `NaN` values in
+      `latest_ldl_prior_365d` natively.
+
+  - type: quiz
+    question: |
+      `latest_ldl_prior_365d` is NULL for many patients because no LDL was measured in the prior
+      year. For the logistic regression, what is the best default?
+    options:
+      - Drop patients with a missing LDL
+      - Impute 0, since no test means no result
+      - Impute the training-set median and add a missing indicator
+      - Impute the mean of the full dataset before splitting
+    answer: 2
+    explanation: |
+      Missingness in EHR data is usually **informative**. No LDL in a year can reflect less
+      engaged care, which is itself a risk signal, so the indicator lets the model use it. (In
+      this synthetic dataset the missingness is random by construction, so the indicator won't
+      help here; in real data it often does. The missing-data module returns to this.)
+      Dropping patients changes the population the model applies to. Imputing 0 invents an
+      impossible lab value. Full-dataset statistics leak test information (m01-05).
+
+  - type: text
+    title: Know your sample size
+    text: |
+      Before choosing models, count **events**, not rows. The synthetic cohort is small (a few
+      hundred first strokes out of 5,000 synthetic patients). The default data has about 35
+      readmissions among the 333 cohort patients (roughly 10%, count them yourself). The
+      generator draws them with modest risk that depends on age, prior atrial fibrillation,
+      hypertension and diabetes, and prior ED and inpatient use, so a model can find some signal
+      but not much: expect an AUROC in the 0.6s. With 35 events and eight predictors that is
+      already thin, so the goal here is a correct pipeline, not a publishable result. Passing
+      a larger `n_patients` to the generator gives more events (and a different cohort).
+
+      In real projects, the number of outcome events limits how many parameters you can fit
+      reliably. Riley et al. (BMJ 2020) give formal sample-size methods for prediction models
+      that replace the old "10 events per variable" rule of thumb. With only dozens of events,
+      a regularized logistic regression with a handful of features is the honest model, and the
+      real work is getting more data.
+
+  - type: text
+    title: Splits that mimic deployment
+    text: |
+      Your evaluation should simulate the future the model will face:
+
+      - **Grouped by patient.** The repo keeps only the first stroke, so each patient appears
+        once. Include recurrent strokes and you need `GroupKFold` or `StratifiedGroupKFold`
+        with `groups=patient_id`. Otherwise the model memorizes patients.
+      - **Temporal.** Train on earlier index dates and test on the latest ones. This catches
+        drift in coding, practice, and population, which random splits hide.
+      - **Three roles.** Train (fit), validation (tune and early-stop), and test (touch once at
+        the end). If you tune on the test set, it becomes a validation set.
+      - **Complete outcome windows.** A patient needs a full 30 days of observable follow-up
+        before their label means anything.
+
+  - type: quiz
+    question: |
+      The synthetic data ends on 2025-12-15. A patient's index stroke is on 2025-12-01 and their
+      `readmission_30d` is 0. What's the problem?
+    options:
+      - None, because the SQL window stops at 30 days
+      - Only 14 days of follow-up exist, so the 0 may be a readmission we can't see yet
+      - The patient fails the 365-day coverage requirement
+      - Temporal splits will put this patient in the training set
+    answer: 1
+    explanation: |
+      The label assumes 30 observable days. Near the end of the data, a 0 partly means "not yet
+      observed", which biases the latest (test) period toward lower prevalence. Require
+      `index_date <= data_end - INTERVAL '30 days'` in the cohort. The current
+      `01_index_stroke_cohort.sql` does not enforce this, so it's a good fix to make. Coverage is
+      checked against the index date, not the outcome window.
+
+  - type: code
+    title: A temporal split with a complete outcome window
+    language: python
+    code: |
+      df = pd.read_csv("../01-clinical-data-engineering/results/stroke_features.csv",
+                       parse_dates=["index_date"])
+
+      data_end = pd.Timestamp("2025-12-15")
+      df = df[df["index_date"] <= data_end - pd.Timedelta(days=30)]   # full window
+
+      cut = df["index_date"].quantile(0.8)
+      train = df[df["index_date"] < cut]
+      test = df[df["index_date"] >= cut]
+
+      print(len(train), len(test), train["readmission_30d"].mean(),
+            test["readmission_30d"].mean())
+    after: |
+      Print prevalence per split every time. A big difference between train and test is either
+      real drift or a label artefact, and you want to know which before you compare models.
+      Take the validation set from the end of the training period, the same way.
+
+  - type: think
+    interview: true
+    prompt: |
+      "On a temporal holdout, your gradient boosting model gets AUROC 0.71 and your deep neural
+      network gets 0.72. Which one do you deploy?"
+    model_answer: |
+      Probably the gradient boosting model, but I'd check before deciding. First, is 0.01 real?
+      With a typical test set, the confidence interval on the AUROC difference will likely cross
+      zero, so I'd bootstrap the paired difference. Second, AUROC isn't the deployment metric. I'd
+      compare calibration and PPV or net benefit at the operating point we'll actually use, such
+      as the top ten patients a day. Then the engineering side. The GBM is cheaper to serve,
+      easier to explain with SHAP or partial dependence, easier to retrain, and usually more
+      robust to small data shifts. If the neural net only matches the GBM, the simpler model
+      wins on total cost of ownership. I'd pick the network only if it clearly wins at the
+      operating point, for example because it uses sequence or text data the GBM can't.
+    key_points:
+      - Tests whether the difference is real (paired bootstrap CI on the AUROC difference)
+      - Compares at the operating point (PPV at the alert budget, calibration, net benefit), not only AUROC
+      - Weighs maintenance, explainability, serving cost, and robustness
+      - Prefers the simpler model unless the complex one clearly wins where it matters
+
+  - type: laptop
+    title: Build the baseline ladder
+    repo_path: 02-pytorch-clinical-ml/src/baselines.py
+    task: |
+      Create `02-pytorch-clinical-ml/src/baselines.py`. Load
+      `01-clinical-data-engineering/results/stroke_features.csv`, drop index dates without a full
+      30-day window, and make a temporal train/test split. Fit a prevalence-only baseline,
+      logistic regression, and `HistGradientBoostingClassifier`. Print the number of events per
+      split, AUROC, and AUPRC (`average_precision_score`) for each model. Save the table. It is
+      the bar the PyTorch model in m02-02 has to clear.
+
+  - type: recap
+    points:
+      - "Five questions first: population, prediction time, label and horizon, action, validation"
+      - Prediction time decides which features are legal. Match it to when someone can act
+      - The label is a definition. Planned readmissions, transfers, death, and data visibility all change it
+      - Low prevalence caps PPV even for a good model, so estimate it early
+      - Write the action sentence (who, what, when, how many). Capacity sets the threshold
+      - Start with prevalence, logistic regression, and gradient boosting, which are hard to beat on tabular EHR data
+      - Split by patient and time, and require a complete outcome window

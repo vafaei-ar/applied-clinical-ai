@@ -1,0 +1,577 @@
+id: m01-07-scale-and-tools
+title: 'From DuckDB to Spark: choosing and scaling tools'
+summary: OLTP vs OLAP, row vs columnar storage, DuckDB vs PostgreSQL vs Spark/Databricks, query plans,
+  shuffles, Parquet partitioning, the medallion layout, and dbt as the transformation layer.
+minutes: 28
+status: authored
+why_it_matters: Job descriptions list Spark, Databricks, and dbt, and interviewers probe whether you
+  understand them or just list them. A clear mental model of when each tool matters, and what makes
+  queries slow, lets you move the stroke cohort from a laptop to a health system's platform.
+objectives:
+  - Contrast OLTP vs OLAP workloads and row vs columnar storage
+  - Choose between DuckDB, PostgreSQL, and Spark/Databricks for a given job
+  - Read an EXPLAIN plan and spot the expensive step
+  - Explain Spark's lazy evaluation, partitions, shuffles, and broadcast joins
+  - Lay out data with Parquet partitioning and the bronze/silver/gold (medallion) pattern
+  - Describe dbt models, ref(), and tests, and translate a SQL window query to PySpark
+key_points:
+  - DuckDB is an in-process, columnar OLAP engine for one machine
+  - Row stores suit transactions, and column stores suit scans and aggregates
+  - Spark is lazy. Transformations build a plan, and actions run it
+  - Shuffles are the main cost of joins, groupBy, and windows. Broadcast the small side
+  - Parquet partitioned by date, with bronze/silver/gold layers
+  - dbt turns SELECT statements into a tested dependency graph via ref()
+tags: [spark, dbt, duckdb, databricks, interview]
+steps:
+  - type: text
+    title: A fraction of a second on a laptop
+    text: |
+      Your stroke cohort builds in well under a second in DuckDB on the repo's 5,000 synthetic
+      patients (each SQL script takes a few milliseconds). Now a health system hires you. They have 8 million members, ten years of claims,
+      billions of rows, and a Databricks workspace.
+
+      An interviewer asks: _"Would you rewrite everything in Spark?"_
+
+      There are two weak answers. "Yes, Spark is for big data" and "No, DuckDB is faster" both
+      skip the question that matters: **what is the workload?** This lesson gives you the mental
+      model to answer properly, and the vocabulary (shuffles, partitions, medallion, dbt) that
+      shows you've done it.
+
+  - type: text
+    title: OLTP vs OLAP
+    text: |
+      Databases are built for one of two very different workloads:
+
+      - **OLTP** (online transaction processing) is the EHR's operational database. It handles
+        thousands of small reads and writes per second, like "record this vital sign" or "update
+        this allergy". It needs transactions, concurrency, and fast lookup of **one** record.
+      - **OLAP** (online analytical processing) is the reporting warehouse. It handles a few
+        huge queries, like "average LDL by year across every patient". Those queries scan
+        millions of rows but only a handful of columns, and the data is mostly appended.
+
+      Clinical data engineering almost always happens on the **OLAP** side. Records are copied
+      out of the operational system, often nightly, into a reporting database or warehouse, and
+      you build cohorts there. Running a cohort query against the live EHR database would compete
+      with clinicians for the same machine.
+
+  - type: image
+    image: m01-07-row-vs-columnar.png
+    caption: |
+      A row store keeps each record together, so a query that needs one column still reads every
+      block. A column store keeps each column together, so the same query reads a fraction of the
+      data.
+
+  - type: text
+    title: Why columnar wins for analytics
+    text: |
+      Column storage helps analytics in three ways:
+
+      - **Read less**: a query touching 3 of 40 columns reads roughly 3/40 of the data.
+      - **Compress better**: a column of `encounter_type` values holds three distinct strings,
+        which dictionary and run-length encoding shrink dramatically.
+      - **Process in batches**: engines like DuckDB apply each operation to a vector of values
+        at a time (vectorized execution), which is far more CPU-efficient than going row by row.
+
+      Column stores and Parquet files also keep **min/max statistics** per block. A filter like
+      `encounter_start >= '2024-01-01'` can skip whole blocks without reading them.
+
+      The price is paid on writes. Updating one patient's record means touching many column
+      chunks, and that's why row stores still run the EHR.
+
+  - type: quiz
+    question: Which task is best suited to a row store like PostgreSQL?
+    options:
+      - Mean LDL by year across 5 million patients
+      - Counting encounters by type for a 10-year dashboard
+      - A service that writes each new risk score and reads one patient's latest score on demand
+      - Building the 30-day readmission label for the whole cohort
+    answer: 2
+    explanation: |
+      Many small writes, plus point lookups by key, are OLTP. An indexed row store handles
+      them with transactions and concurrency. The other three scan many rows but few columns,
+      which is columnar territory. The service in Module 03 could reasonably store its
+      predictions in Postgres, while the training cohort is built in a columnar engine.
+
+  - type: text
+    title: DuckDB, PostgreSQL, Spark
+    text: |
+      **DuckDB** is an in-process, columnar OLAP engine: "SQLite for analytics". There's no
+      server, and it runs inside your Python process. It queries Parquet and CSV files directly,
+      and can spill to disk when data is larger than memory. The limits are that it runs on one
+      machine and allows one writing process at a time. It's ideal for the repo, for research
+      extracts, and for CI tests.
+
+      **PostgreSQL** is a client-server row store with transactions (MVCC), many concurrent
+      users, indexes, and enforced constraints. It's excellent for applications and for moderate
+      analytics. Large scans are slower than on a columnar engine.
+
+      **Spark** is a distributed engine that splits data into partitions and processes them on a
+      cluster. It scales far beyond one machine, but it comes with real overhead: cluster
+      start-up, scheduling, and network shuffles. **Databricks** is a managed Spark platform. It
+      adds Delta Lake tables, Unity Catalog governance and access control, scheduled jobs, and
+      notebooks.
+
+      Snowflake and BigQuery are other managed warehouses, and their mental models are similar.
+
+  - type: text
+    title: How to choose
+    text: |
+      Ask four questions, in this order:
+
+      1. **Where does the data already live, and who governs it?** At a health system, protected
+         health information (PHI) usually can't leave the governed platform. If that platform is
+         Databricks, that's your answer for production work.
+      2. **How big is it after filtering?** A single machine handles tens to hundreds of GB of
+         columnar data well. Many "big data" cohorts shrink dramatically once you keep only the
+         relevant codes and years.
+      3. **How many concurrent users and writers?** An app with many writers suggests Postgres. A
+         shared team warehouse suggests a managed platform.
+      4. **What does the team already run?** Fitting the team's operations and on-call is worth
+         more than a benchmark win.
+
+      A common, sensible pattern is to **develop and test on DuckDB with synthetic data** (as the
+      repo does) and **run in production on Spark or a warehouse**. The SQL carries over, with
+      some dialect differences.
+
+  - type: quiz
+    question: |
+      A researcher has a 40 GB Parquet extract of de-identified claims, works alone, and has a
+      laptop with 32 GB of RAM. What's the best first tool?
+    options:
+      - A 10-node Spark cluster, because the data is bigger than RAM
+      - DuckDB over the Parquet files
+      - Load everything into pandas
+      - PostgreSQL with indexes on every column
+    answer: 1
+    explanation: |
+      DuckDB reads only the needed columns and row groups from Parquet, and spills to disk when
+      it must. A 40 GB columnar extract is well within single-machine range. "Bigger than RAM"
+      doesn't mean "needs a cluster". Pandas loads everything into memory, and Postgres would
+      first need a slow load, then a row-oriented scan.
+
+  - type: text
+    title: Reading a query plan
+    text: |
+      When a query is slow, don't guess. Ask the engine what it did.
+
+      - `EXPLAIN` shows the **plan**: a tree of operators (scans, filters, joins, aggregates)
+        with **estimated** row counts.
+      - `EXPLAIN ANALYZE` actually **runs** the query and adds **actual** rows and time per
+        operator. Be careful with statements that write data.
+
+      Read the tree **from the innermost (most indented) nodes outward**, because data flows up
+      from the scans. Look for three things:
+
+      - the operator that takes most of the **time**,
+      - a scan that **reads millions of rows to keep a few**,
+      - **estimated vs actual** rows that differ by 10× or more. When that happens, the planner
+        is choosing join strategies on wrong beliefs. Stale statistics are the usual cause, and in
+        Postgres you fix them with `ANALYZE`.
+
+  - type: code
+    title: A Postgres plan (larger copy of the schema, trimmed)
+    language: text
+    code: |
+      EXPLAIN ANALYZE
+      SELECT e.patient_id, e.encounter_start
+      FROM encounters e
+      JOIN diagnoses d ON d.encounter_id = e.encounter_id
+      WHERE d.icd10_code LIKE 'I63%'
+        AND e.encounter_type IN ('ED', 'inpatient');
+
+      Hash Join (rows=4300) (actual time=61.2..884.5 rows=4550 loops=1)
+        Hash Cond: (d.encounter_id = e.encounter_id)
+        ->  Seq Scan on diagnoses d (rows=4300)
+              (actual time=0.03..801.7 rows=4550 loops=1)
+              Filter: ((icd10_code)::text ~~ 'I63%'::text)
+              Rows Removed by Filter: 3995450
+        ->  Hash (rows=105000) (actual time=58.9..58.9 rows=104200 loops=1)
+              ->  Seq Scan on encounters e (rows=105000)
+                    (actual time=0.02..41.3 rows=104200 loops=1)
+                    Filter: ((encounter_type)::text = ANY ('{ED,inpatient}'::text[]))
+                    Rows Removed by Filter: 245800
+    after: |
+      Illustrative numbers. `~~` is Postgres's internal spelling of `LIKE`. Estimates (`rows=`)
+      and actuals are close, so the planner's beliefs are sound.
+
+  - type: quiz
+    question: In the plan above, where is the time going, and what's the natural fix?
+    options:
+      - Building the hash on encounters. Add more memory
+      - The Hash Join itself. Rewrite it as a subquery
+      - The diagnoses scan, which reads 4M rows to keep 4,550. Add an index that supports the prefix LIKE, or pre-filter
+      - The encounters scan. Add an index on encounter_type
+    answer: 2
+    explanation: |
+      About 800 of the 885 ms are the sequential scan of diagnoses, which throws away 99.9% of its
+      rows. In Postgres, a B-tree index can serve `LIKE 'I63%'`, but in most locales only if it's
+      built with `text_pattern_ops`. The other fix is a small pre-filtered stroke-diagnosis
+      table. The encounters side is cheap (41 ms), and an index on a 3-value column rarely helps.
+      Rewriting the SQL doesn't change the work if the plan stays the same.
+
+  - type: text
+    title: Plans in DuckDB
+    text: |
+      DuckDB's `EXPLAIN` and `EXPLAIN ANALYZE` print the same kind of tree, with operators such
+      as `HASH_JOIN`, `HASH_GROUP_BY`, `WINDOW`, and `FILTER`. Exact names and layout vary by
+      version.
+
+      Tuning is different, though. You rarely create indexes for analytics in DuckDB. Its
+      automatic min/max zone maps and columnar scans do that job. The levers are:
+
+      - **select fewer columns** (never `SELECT *` in a pipeline),
+      - **filter early** and let the engine push filters down into Parquet scans,
+      - **store data sorted or partitioned** by what you filter on, usually dates,
+      - watch for **row explosions** in joins (the fan-out problem from the SQL lesson).
+
+      Milestone 4 in the repo asks you to run `EXPLAIN` on a multi-table query. Do it on the
+      cohort query and find the most expensive operator.
+
+  - type: text
+    title: Spark in one screen
+    text: |
+      A Spark application has a **driver** (your program, which plans the work) and
+      **executors** (worker processes). A DataFrame is split into **partitions**, and each
+      partition is processed by one **task** on one core.
+
+      Spark is **lazy**. `select`, `where`, `join`, `groupBy`, and `withColumn` are
+      **transformations**. They only add steps to a plan. Nothing runs until an **action** such
+      as `count()`, `show()`, `collect()`, or `write`. At that point the optimizer (Catalyst)
+      rewrites the **whole** plan, pushing filters down and pruning unused columns, before
+      executing it.
+
+      Practical consequences:
+
+      - An error in line 3 may only show up at the `write` in line 30.
+      - Every action recomputes the plan from the source, unless you `cache()` a DataFrame you
+        reuse.
+      - `collect()` pulls all the data to the driver. On a large table that's how you crash it.
+
+  - type: quiz
+    question: Which line makes Spark actually read the data?
+    code: |
+      enc = spark.read.parquet("silver/encounters")        # 1
+      acute = enc.where(F.col("encounter_type").isin("ED", "inpatient"))  # 2
+      by_fac = acute.groupBy("facility_id").count()        # 3
+      by_fac = by_fac.orderBy(F.desc("count"))             # 4
+      by_fac.show(5)                                       # 5
+    language: python
+    options:
+      - Line 1, because reading is always eager
+      - Line 3, because groupBy forces a shuffle
+      - Line 5
+      - Line 4, because sorting needs all the data
+    answer: 2
+    explanation: |
+      `show()` is the action, so the job starts there. Lines 2–4 only extend the plan, even
+      though line 3 and line 4 will each cause a shuffle **when** it runs. Line 1 is a good
+      distractor. Spark may touch file metadata to learn the schema, but it doesn't scan the
+      rows until an action.
+
+  - type: text
+    title: Partitions and shuffles
+    text: |
+      Some transformations are **narrow**. Each output partition needs only one input partition,
+      as with `where`, `select`, and `withColumn`. These are cheap and run in parallel without
+      moving anything.
+
+      Others are **wide**: `groupBy`, `join`, `distinct`, `orderBy`, and window functions with
+      `partitionBy`. Rows with the same key must end up together, so Spark **shuffles**. Every
+      executor writes its rows to disk, split by key, and sends them across the network. Shuffles
+      mark **stage** boundaries and are usually the dominant cost of a job.
+
+      Two knobs and one trap:
+
+      - `spark.sql.shuffle.partitions` (default 200) sets the partition count after a shuffle.
+      - **Adaptive Query Execution** (on by default since Spark 3.2) adjusts this at run time. It
+        merges tiny partitions and splits skewed ones.
+      - **Skew**: if one key holds a huge share of rows (one giant facility, or a NULL key), one
+        task gets that share and everyone waits for it.
+
+  - type: image
+    image: m01-07-shuffle-vs-broadcast.png
+    caption: |
+      A shuffle join re-partitions both sides by the join key across the network. A broadcast
+      join sends a full copy of the small table to every executor, so the large table never moves.
+
+  - type: text
+    title: Broadcast joins
+    text: |
+      If one side of a join is small, Spark can skip the shuffle. It copies the small table to
+      every executor and joins locally. Spark does this automatically when it estimates a side is
+      under `spark.sql.autoBroadcastJoinThreshold` (10 MB by default). You can also force it:
+
+      ```
+      from pyspark.sql import functions as F
+      joined = claims.join(F.broadcast(facilities), "facility_id")
+      ```
+
+      Good candidates are lookup tables such as facilities, code sets (for example, the list of
+      stroke ICD-10 codes), and plan types. Never broadcast something big. Every executor has to
+      hold it in memory, and the driver has to collect it first, so an oversized broadcast
+      fails with out-of-memory errors instead of just running slowly.
+
+  - type: quiz
+    question: |
+      You join 2 billion claim lines to (a) a 40,000-row provider table and (b) a 300-million-row
+      encounters table. How should Spark execute each join?
+    options:
+      - Broadcast both, which avoids all shuffles
+      - Shuffle both, because broadcast is only for tiny test data
+      - Broadcast the encounters, because it's the smaller of the two
+      - Broadcast the provider table, and use a shuffle (sort-merge) join for encounters
+    answer: 3
+    explanation: |
+      Forty thousand rows is a few MB, so broadcasting it is a clear win. Three hundred million
+      encounters is far too large to copy to every executor. That join needs a shuffle, ideally
+      after filtering both sides down to the stroke-relevant rows. "Smaller of the two" isn't
+      the test. The broadcast side has to fit comfortably in each executor's memory.
+
+  - type: text
+    title: Parquet and partitioning
+    text: |
+      **Parquet** is the default columnar file format for analytics. Files are split into row
+      groups, each column is stored and compressed separately, and min/max statistics let engines
+      skip data. DuckDB, Spark, pandas, and Polars all read it.
+
+      **Partitioning** means laying out files in folders by a column value:
+
+      ```
+      claims/service_year=2023/part-0001.parquet
+      claims/service_year=2024/part-0001.parquet
+      ```
+
+      A query with `WHERE service_year = 2024` then opens only that folder. This is **partition
+      pruning**. Pick a **low-to-moderate-cardinality** column that queries filter on. In
+      clinical data that's almost always a **date** grain, such as year or month.
+
+      Never partition by `patient_id`. Millions of folders of tiny files make everything slower.
+      Aim for files of roughly hundreds of MB.
+
+      Table formats like **Delta Lake** and **Apache Iceberg** add ACID transactions, schema
+      enforcement, and **time travel** on top of Parquet. Time travel is valuable in health care,
+      because you can rebuild the cohort exactly as the data stood on the day the model was
+      trained.
+
+  - type: quiz
+    question: |
+      Analysts mostly query claims by service date range, sometimes filtered by patient. Which
+      partition column is best?
+    options:
+      - patient_id
+      - service month (year-month of service_date)
+      - claim_id
+      - claim_status (paid or denied)
+    answer: 1
+    explanation: |
+      Month matches the dominant filter and gives a manageable number of folders (120 for ten
+      years). `patient_id` and `claim_id` create millions of tiny partitions. `claim_status` has
+      only two values and doesn't match the typical filter. Patient lookups are better served by
+      sorting or clustering within files than by partitioning.
+
+  - type: text
+    title: Medallion architecture
+    text: |
+      Most lakehouse teams (the Databricks term, which is now common) organize tables into three
+      layers:
+
+      - **Bronze**: raw data as it landed, append-only, with duplicates and oddities kept. It's
+        your audit trail. _Repo: the generated CSVs._
+      - **Silver**: cleaned and conformed. Types are cast, clinical duplicates removed, codes
+        standardized, and the tests from the data-quality lesson enforced. _Repo: the typed
+        DuckDB tables, plus the `stg_diagnoses` dedup you wrote._
+      - **Gold**: analysis-ready products for a specific use. _Repo: `index_stroke_cohort` and
+        `stroke_features`, which feed Module 02's readmission model._
+
+      The value is separation. When a cohort definition changes, you rebuild gold from silver.
+      When an upstream bug is fixed, you reprocess from bronze. Nobody ever edits raw data in
+      place.
+
+  - type: text
+    title: dbt in one screen
+    text: |
+      **dbt** is the transformation layer. It doesn't store or move data. It runs your SQL
+      **inside** the warehouse (DuckDB via `dbt-duckdb`, Databricks, Snowflake, Postgres), in the
+      right order, with tests.
+
+      - A **model** is a `.sql` file containing one `SELECT`. dbt wraps it in `CREATE TABLE` or
+        `CREATE VIEW` for you.
+      - `{{ ref('stg_diagnoses') }}` references another model. dbt resolves it to the right
+        schema for dev or prod, and uses it to build the **dependency graph (DAG)**.
+      - `{{ source('ehr', 'encounters') }}` points at raw bronze tables declared in YAML.
+      - **Materializations** control how a model is built: `view`, `table`, `incremental` (only
+        new rows, which matters at claims scale), or `ephemeral`.
+      - **Tests** are the YAML and SQL tests from the data-quality lesson.
+
+      `dbt build` runs every model and its tests in DAG order, and skips anything downstream of
+      a failure. The repo's `sql/01…` and `02…` files map naturally onto gold models.
+
+  - type: code
+    title: The first-stroke step as a dbt model
+    text: "`models/gold/first_stroke.sql`:"
+    code: |
+      {{ config(materialized='table') }}
+
+      WITH qualifying_strokes AS (
+          SELECT DISTINCT
+              e.patient_id,
+              e.encounter_id,
+              CAST(e.encounter_start AS DATE) AS index_date
+          FROM {{ ref('stg_encounters') }} e
+          JOIN {{ ref('stg_diagnoses') }} d
+            ON d.encounter_id = e.encounter_id
+           AND d.patient_id = e.patient_id
+          WHERE d.icd10_code LIKE 'I63%'
+            AND e.encounter_type IN ('ED', 'inpatient')
+      )
+      SELECT *
+      FROM qualifying_strokes
+      QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY patient_id ORDER BY index_date, encounter_id
+      ) = 1
+    after: |
+      The next model, `index_stroke_cohort`, would `ref('first_stroke')` and
+      `ref('stg_coverage')` to apply eligibility, which keeps "index first, then eligibility"
+      visible in the DAG itself.
+
+  - type: quiz
+    question: Why write `{{ ref('stg_diagnoses') }}` instead of just `stg_diagnoses`?
+    options:
+      - dbt builds the dependency graph from ref(), so models run in the right order and the name resolves per environment
+      - ref() caches the table in memory, which makes queries faster
+      - ref() deduplicates rows automatically
+      - Hard-coded table names are not valid SQL in dbt
+    answer: 0
+    explanation: |
+      `ref()` is how dbt knows `first_stroke` depends on `stg_diagnoses`, so it builds staging
+      first, and `dbt build -s +first_stroke` can select a model and its upstream. It also
+      swaps in your dev schema versus the prod schema automatically. A hard-coded name works as
+      SQL, but it's invisible to the DAG. That's how models run in the wrong order and read stale
+      tables.
+
+  - type: code
+    title: The same window query in PySpark
+    language: python
+    code: |
+      from pyspark.sql import SparkSession, Window
+      from pyspark.sql import functions as F
+
+      spark = SparkSession.builder.appName("first-stroke").getOrCreate()
+      enc = spark.read.parquet("silver/encounters")
+      dx = spark.read.parquet("silver/diagnoses")
+
+      qualifying = (
+          enc.join(dx, on=["encounter_id", "patient_id"], how="inner")
+          .where(F.col("icd10_code").startswith("I63")
+                 & F.col("encounter_type").isin("ED", "inpatient"))
+          .select("patient_id", "encounter_id",
+                  F.to_date("encounter_start").alias("index_date"))
+          .distinct()
+      )
+
+      w = Window.partitionBy("patient_id").orderBy("index_date", "encounter_id")
+      first_stroke = (
+          qualifying.withColumn("stroke_number", F.row_number().over(w))
+          .where(F.col("stroke_number") == 1)
+          .drop("stroke_number")
+      )
+      first_stroke.write.mode("overwrite").parquet("gold/first_stroke")
+    after: |
+      It maps line for line onto the SQL: the join, `LIKE 'I63%'` as `startswith`, `DISTINCT`,
+      `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`, and the filter. Nothing runs until
+      `.write`. In Databricks you could also run nearly the same SQL with `spark.sql(...)`, apart
+      from dialect differences, because both go through the same optimizer.
+
+  - type: quiz
+    question: |
+      In the PySpark code, which step forces rows to be regrouped by `patient_id` across the
+      cluster?
+    options:
+      - F.to_date on encounter_start
+      - The where filter on icd10_code
+      - The select of three columns
+      - Window.partitionBy("patient_id") inside row_number
+    answer: 3
+    explanation: |
+      A window with `partitionBy` must see all of a patient's rows together, so Spark shuffles by
+      `patient_id` (and sorts within partitions). The join and `distinct` also shuffle, by their
+      own keys. `to_date`, `where`, and `select` are narrow transformations that run inside each
+      partition with no data movement. Filtering **before** the shuffles, as this code does,
+      shrinks what has to move.
+
+  - type: think
+    interview: true
+    prompt: |
+      "Our cohort pipeline runs in seconds on DuckDB in development. We're moving it to a health
+      system's Databricks workspace with ten years of claims for 8 million members. What changes,
+      and what stays the same?"
+    model_answer: |
+      The logic stays the same. That's the index event, eligibility, windows, and tests, and I'd
+      keep the SQL as close to identical as possible, ideally as dbt models, so the DuckDB
+      version remains the fast test harness in CI on synthetic data. What changes is data layout
+      and execution. Claims would land in bronze Delta tables, partitioned by service month.
+      Silver tables would be deduplicated and typed, with the quality tests enforced. Gold would
+      hold the cohort and features. For performance, I'd filter to relevant codes and years
+      before any wide join. I'd broadcast small lookup tables like code sets and facilities, and
+      watch the Spark UI for skewed tasks and large shuffles. For incremental loads, the big fact
+      tables would use incremental models instead of full rebuilds. Governance also changes.
+      Access goes through Unity Catalog permissions on PHI, and I'd use Delta time travel or
+      versioned snapshots so every model version can be traced to the exact data it was trained
+      on. Finally, I'd rerun the attrition table on the new platform, and if the numbers differ
+      from what we expect, I'd investigate before trusting any result.
+    key_points:
+      - Keeps the cohort logic and tests the same, with DuckDB on synthetic data as the CI harness
+      - Uses bronze/silver/gold Delta tables partitioned by date
+      - Filters early, broadcasts small lookups, and watches for shuffles and skew
+      - Uses incremental processing for large fact tables
+      - Handles governance and reproducibility (catalog permissions, time travel or snapshots, reconciling attrition)
+
+  - type: think
+    interview: true
+    prompt: |
+      "A Spark job that joins claims to encounters takes three hours. In the Spark UI, 199 of 200
+      tasks in the join stage finish in two minutes, and one runs for almost three hours. What's
+      going on, and what would you do?"
+    model_answer: |
+      That's classic data skew. One join key holds a disproportionate share of rows, so a single
+      task does most of the work. First I'd find the key by grouping the join column and counting
+      the top values. In claims, it's often a NULL or placeholder key, like a missing encounter
+      ID or a default provider, or one huge facility. If it's NULL or junk, I'd filter it out or
+      handle it separately, because those rows usually shouldn't join anyway, and that also
+      becomes a data-quality finding. If it's a real hot key, I'd make sure Adaptive Query
+      Execution's skew-join handling is on, since it can split oversized partitions
+      automatically. If one side is small enough, I'd broadcast it. Otherwise, I'd salt the hot
+      key: add a random suffix on the big side and replicate the matching rows on the other side
+      so the work spreads across tasks. Then I'd confirm in the UI that task times have evened out.
+    key_points:
+      - Identifies data skew from one straggler task
+      - Profiles the join key distribution to find the hot key
+      - Checks for NULL or placeholder keys and treats them as a data-quality issue
+      - Mentions AQE skew-join handling, broadcasting, or salting
+      - Verifies the fix in the Spark UI
+
+  - type: laptop
+    title: Parquet, plans, and a PySpark translation
+    repo_path: 01-clinical-data-engineering/
+    task: |
+      1. In DuckDB, export encounters to partitioned Parquet with
+         `COPY (SELECT *, year(encounter_start) AS encounter_year FROM encounters) TO
+         'data/parquet/encounters' (FORMAT parquet, PARTITION_BY (encounter_year));`
+         Then query one year with `read_parquet('data/parquet/encounters/*/*.parquet',
+         hive_partitioning = true)`.
+      2. Run `EXPLAIN ANALYZE` on the contents of `sql/01_index_stroke_cohort.sql` (the SELECT
+         part). Write down the most expensive operator and its row counts.
+      3. Create `spark/first_stroke.py` with the PySpark translation from this lesson. If you
+         have `pyspark` installed locally, check that it returns the same patients as the SQL.
+
+  - type: recap
+    points:
+      - "**OLTP** runs the EHR (small writes, row stores), and **OLAP** runs analytics (big scans, column stores)"
+      - Columnar wins for analytics because it reads fewer columns, compresses well, runs vectorized, and skips blocks with min/max stats
+      - "**DuckDB** is in-process columnar OLAP on one machine, **Postgres** is a transactional row store, and **Spark/Databricks** is distributed with a governed lakehouse"
+      - Choose by where the data lives and its governance, then size after filtering, concurrency, and what the team runs
+      - Read plans from the inside out. Find the costly operator, wasteful scans, and bad estimates
+      - Spark is lazy. **Shuffles** from joins, groupBy, and windows dominate cost, so broadcast small tables and watch for skew
+      - Partition Parquet by a **date** grain, never by patient. Delta or Iceberg add ACID and time travel
+      - "**Medallion**: bronze is raw, silver is clean and tested, gold is the cohort and features"
+      - dbt models are SELECTs, and `ref()` builds the DAG. `dbt build` runs models and tests in order
