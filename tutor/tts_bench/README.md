@@ -50,3 +50,31 @@ mispronounced or dropped codes, numbers, and names; it cannot judge pacing, natu
 listening fatigue, and the transcriber has its own errors (it sometimes drops a zero from a long
 number). Use it to rule voices out and to find lexicon gaps, then decide among the survivors by
 ear.
+
+## Findings so far (macOS built-in voices, 175 words per minute)
+
+Scores are the share of key terms recognized after a round trip through `faster-whisper small.en`,
+on the lexicon as committed. Daniel, Moira, Karen, and Tessa score 0.99, Samantha 0.97; earlier
+runs put Tara at 0.91 and Kathy, Ralph, Sandy, Rocko, Reed, Flo, Shelley, Eddy, Aman, and Fred
+between 0.72 and 0.82. A difference of one term is about 0.4 points, so the top group is a tie on
+intelligibility: choose among them by ear with `listen.html`. Daniel is the default because he
+leads on medical codes and acronyms; set `TTS_VOICE` to change it.
+
+What this exercise taught us, which is why the notes below matter more than the ranking:
+
+- **Check the scorer before trusting the ranking.** The first run had universal "misses" that
+  were the transcriber's fault (it writes "kappa" as "cap", `Parquet` as "per K", drops a repeated
+  digit from `93000`) or bad expected terms. A bigger transcriber (`small.en`, not `base.en`) and
+  alternate renderings per term fixed most of it. When every voice misses a term, suspect the
+  scorer, and listen.
+- **Spell letters in CAPITALS in the lexicon.** A lowercase "a" is read as the article "uh":
+  "S a M D" came out as "S-uh-M-D" and was heard as "SMD".
+- **Letter-by-letter beats a guessed phonetic spelling.** "loynk" was recognized as LOINC for 2 of
+  6 voices; "L O I N C" for all 6. Test a spelling on several voices before committing it.
+- **Capital words with a run of four or more consonants are acronyms** (IMDRF, SDTM, HTTPS); the
+  converter spells those and reads other capital words as words (UNKNOWN, STORE).
+- **Accents reorder dates.** British, Irish, and South African voices say "31 December", so scoring
+  accepts both orders. Tara said "January 1 of January 2019", which is a real glitch.
+
+Not measured: naturalness, pacing, and listening fatigue over a 20-minute lesson, and anything about
+voices outside the built-in set. Run the same cases against any engine you are considering.
