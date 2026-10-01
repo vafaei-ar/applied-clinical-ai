@@ -29,8 +29,9 @@ steps:
       You open `stroke_features`, the table you built in Module 01. It has **333 patients**. One
       feature matters clinically: `latest_ldl_prior_365d`. It is NULL for **275** of them.
 
-      A colleague runs `dropna()` and moves on. What is left is **58 patients**. The cohort has 5
-      readmissions in total, and **none** of them are among the 58.
+      A colleague runs `dropna()` and moves on. What is left is **58 patients**. The cohort has
+      35 readmissions in total, and only **7** of them are among the 58: four in five of your
+      events disappeared with the rows.
 
       Nothing errored. The model will train. It will just be a model of a smaller, differently
       selected population, and no validation metric will tell you.
@@ -121,13 +122,13 @@ steps:
     options:
       - Bias, because with more than 80% missing it cannot be unbiased
       - Nothing, MCAR makes complete-case analysis free
-      - Precision. It is unbiased in expectation, but only 58 patients and no readmissions remain
+      - Precision. It is unbiased in expectation, but only 58 patients and 7 readmissions remain
       - Both bias and precision, because the 3 "drawn, no value" rows are informative
     answer: 2
     explanation: |
       The **proportion** missing does not determine bias, the **mechanism** does. Under MCAR
       the 58 patients are a random subsample, so estimates are unbiased in expectation, just
-      very noisy (and here you cannot even fit a readmission model, with zero events). "Free"
+      very noisy (with 7 events you cannot sensibly fit a model with eight predictors). "Free"
       is wrong: throwing away 83% of the data is a huge loss of power. The 3 blank-value rows
       are also generated at random.
 

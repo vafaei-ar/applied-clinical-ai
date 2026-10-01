@@ -337,11 +337,13 @@ steps:
     title: Know your sample size
     text: |
       Before choosing models, count **events**, not rows. The synthetic cohort is small (a few
-      hundred first strokes out of 5,000 synthetic patients) and the readmission label is very
-      rare, with only a handful of events (count them). The generator also puts little real risk
-      signal into it, so do not expect an impressive
-      AUROC. That is fine, because the goal here is a correct pipeline, not a publishable
-      result.
+      hundred first strokes out of 5,000 synthetic patients). The default data has about 35
+      readmissions among the 333 cohort patients (roughly 10%, count them yourself). The
+      generator draws them with modest risk that depends on age, prior atrial fibrillation,
+      hypertension and diabetes, and prior ED and inpatient use, so a model can find some signal
+      but not much: expect an AUROC in the 0.6s. With 35 events and eight predictors that is
+      already thin, so the goal here is a correct pipeline, not a publishable result. Passing
+      a larger `n_patients` to the generator gives more events (and a different cohort).
 
       In real projects, the number of outcome events limits how many parameters you can fit
       reliably. Riley et al. (BMJ 2020) give formal sample-size methods for prediction models
